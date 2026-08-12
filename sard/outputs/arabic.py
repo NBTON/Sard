@@ -11,7 +11,8 @@ from bidi.algorithm import get_display
 
 ARABIC_RE = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]")
 PROTECTED_RE = re.compile(
-    r"https?://[^\s<>]+|\[CIT-[A-Za-z0-9_-]+\]|[A-Za-z0-9][A-Za-z0-9._:/?&=%+\-]*"
+    r"https?://[^\s<>]+|\[CIT-[A-Za-z0-9_-]+\]|[%+\-]\d+(?:[.,]\d+)?|"
+    r"[A-Za-z0-9][A-Za-z0-9._:/?&=%+\-]*"
 )
 
 

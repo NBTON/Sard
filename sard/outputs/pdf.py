@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -144,6 +143,7 @@ class _TextFlowable(Flowable):
         citation_ids: Sequence[str] = (),
         top_padding: float = 0,
         bottom_padding: float = 0,
+        logical_lines: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
         self.text = text
@@ -156,15 +156,46 @@ class _TextFlowable(Flowable):
         self.citation_ids = tuple(citation_ids)
         self.top_padding = top_padding
         self.bottom_padding = bottom_padding
-        self.lines: list[str] = []
+        self.lines: list[str] = list(logical_lines or ())
+        self._lines_are_fixed = logical_lines is not None
 
     def wrap(self, availWidth, availHeight):  # noqa: N802 - ReportLab API
-        self.lines = wrap_logical_lines(
-            self.text, availWidth, self.font, self.size, self.latin_font
-        )
+        if not self._lines_are_fixed:
+            self.lines = wrap_logical_lines(
+                self.text, availWidth, self.font, self.size, self.latin_font
+            )
         self.width = availWidth
         self.height = self.top_padding + len(self.lines) * self.leading + self.bottom_padding
         return self.width, self.height
+
+    def split(self, availWidth, availHeight):  # noqa: N802 - ReportLab API
+        """Split long untrusted text across pages instead of raising LayoutError."""
+
+        self.wrap(availWidth, availHeight)
+        usable = availHeight - self.top_padding - self.bottom_padding
+        line_count = int(usable // self.leading)
+        if line_count <= 0 or line_count >= len(self.lines):
+            return []
+
+        def fragment(lines: Sequence[str], *, top: float, bottom: float) -> _TextFlowable:
+            return _TextFlowable(
+                self.text,
+                font=self.font,
+                latin_font=self.latin_font,
+                size=self.size,
+                leading=self.leading,
+                color=self.color,
+                rtl=self.rtl,
+                citation_ids=self.citation_ids,
+                top_padding=top,
+                bottom_padding=bottom,
+                logical_lines=lines,
+            )
+
+        return [
+            fragment(self.lines[:line_count], top=self.top_padding, bottom=0),
+            fragment(self.lines[line_count:], top=0, bottom=self.bottom_padding),
+        ]
 
     def draw(self) -> None:
         canvas = self.canv
@@ -202,17 +233,24 @@ class _FooterCanvas(Canvas):
         width, _ = A4
         self.saveState()
         self.setStrokeColor(colors.HexColor("#D7CCC8"))
-        self.line(42, 42, width - 42, 42)
+        self.line(42, 54, width - 42, 54)
         self.setFillColor(colors.HexColor("#6D4C41"))
         ids = ", ".join(sorted(self._page_citations)) or "لا توجد إحالات"
         note = f"المصادر في هذه الصفحة: {ids}"
-        for text, y in ((note, 28), (f"الصفحة {self.getPageNumber()}", 14)):
+        note_lines = wrap_logical_lines(
+            note, width - 84, self.arabic_font, 8, self.latin_font
+        )[:2]
+        footer_lines = [
+            *((text, 42 - index * 10, True) for index, text in enumerate(note_lines)),
+            (f"الصفحة {self.getPageNumber()}", 14, False),
+        ]
+        for text, y, right_aligned in footer_lines:
             runs = visual_runs(shape_rtl(text))
             total = sum(
                 pdfmetrics.stringWidth(run, self.arabic_font if ar else self.latin_font, 8)
                 for ar, run in runs
             )
-            x = (width - 42 - total) if y == 28 else (width - total) / 2
+            x = (width - 42 - total) if right_aligned else (width - total) / 2
             for arabic, run in runs:
                 run_font = self.arabic_font if arabic else self.latin_font
                 self.setFont(run_font, 8)
@@ -418,7 +456,7 @@ def render_pdf(itinerary: Itinerary, output_path: str | Path) -> RenderedArtifac
         rightMargin=50,
         leftMargin=50,
         topMargin=48,
-        bottomMargin=58,
+        bottomMargin=70,
         title=itinerary.title,
         author="Sard",
     )

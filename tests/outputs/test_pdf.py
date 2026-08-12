@@ -46,6 +46,13 @@ def test_numerals_and_punctuation_survive_shaping(sample):
     assert "?" not in sample or "?" in visual
 
 
+def test_prefixed_numeric_tokens_keep_logical_order():
+    visual = shape_rtl("الرموز %50 و+3 و-12 مستقرة")
+    assert "%50" in visual
+    assert "+3" in visual
+    assert "-12" in visual
+
+
 def test_wrapping_uses_shaped_line_widths():
     font_name = "SardTestNaskh"
     if font_name not in pdfmetrics.getRegisteredFontNames():
@@ -143,6 +150,68 @@ def test_successful_multipage_pdf(monkeypatch, tmp_path):
         assert "CIT-DEMO-SPRING-001" in extracted
         assert "CIT-DEMO-MARKET-002" in extracted
         assert "https://example.org/arabic-springs?lang=ar&ref=PDF" in extracted
+
+
+def test_very_long_body_splits_across_pages(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    monkeypatch.setenv("SARD_PDF_OUTPUT_ROOT", str(tmp_path))
+    fixture = representative_fixture()
+    long_block = TextBlock(
+        text=" ".join(["نص عربي طويل مع English 123."] * 700),
+        citation_ids=("CIT-DEMO-SPRING-001",),
+    )
+    first_stop = replace(fixture.days[0].stops[0], paragraphs=(long_block,))
+    first_day = replace(
+        fixture.days[0], stops=(first_stop, *fixture.days[0].stops[1:])
+    )
+    fixture = replace(fixture, days=(first_day, *fixture.days[1:]))
+    artifact = render_pdf(fixture, "long-body.pdf")
+    with fitz.open(artifact.path) as document:
+        assert document.page_count >= 4
+        assert all(
+            0 <= block[1] and block[3] <= page.rect.height
+            for page in document
+            for block in page.get_text("blocks")
+        )
+
+
+def test_long_footer_citations_stay_inside_page(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from sard.outputs.schemas import CitationSource
+
+    monkeypatch.setenv("SARD_PDF_OUTPUT_ROOT", str(tmp_path))
+    fixture = representative_fixture()
+    original = fixture.days[0].stops[0].paragraphs[0]
+    extra = tuple(
+        CitationSource(
+            citation_id=f"CIT-DEMO-EXTRA-{index:03d}",
+            title=f"مصدر تجريبي {index}",
+            url=f"https://example.org/{index}",
+        )
+        for index in range(12)
+    )
+    cited_block = replace(
+        original,
+        citation_ids=(*original.citation_ids, *(source.citation_id for source in extra)),
+    )
+    first_stop = replace(fixture.days[0].stops[0], paragraphs=(cited_block,))
+    first_day = replace(
+        fixture.days[0], stops=(first_stop, *fixture.days[0].stops[1:])
+    )
+    fixture = replace(
+        fixture,
+        days=(first_day, *fixture.days[1:]),
+        sources=(*fixture.sources, *extra),
+    )
+    artifact = render_pdf(fixture, "long-footer.pdf")
+    with fitz.open(artifact.path) as document:
+        assert all(
+            0 <= block[0] <= block[2] <= page.rect.width
+            and 0 <= block[1] <= block[3] <= page.rect.height
+            for page in document
+            for block in page.get_text("blocks")
+        )
 
 
 def test_pdf_modules_do_not_import_forbidden_architecture():
