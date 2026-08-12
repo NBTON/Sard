@@ -334,7 +334,8 @@ def verify(state: dict, deps) -> dict:
 
     max_retries = int(state.get("compose_max_retries", 0))
     retry_count = int(state.get("compose_retry_count", 0)) + 1
-    exhausted = retry_count >= max_retries
+    # The configured cap counts re-compositions after the initial attempt.
+    exhausted = retry_count > max_retries
 
     result = VerificationResult(
         passed=False,

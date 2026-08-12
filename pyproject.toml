@@ -47,6 +47,7 @@ dev = [
 
 [project.scripts]
 sard-rag = "sard.cli.rag:main"
+sard-agent = "sard.cli.agent:main"
 
 [build-system]
 requires = ["hatchling"]

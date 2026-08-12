@@ -118,6 +118,6 @@ def route_after_verification(state: dict) -> str:
         return "render"
     retry_count = int(state.get("compose_retry_count", 0))
     max_retries = int(state.get("compose_max_retries", 0))
-    if retry_count < max_retries:
+    if retry_count <= max_retries:
         return "compose"
     return "render"

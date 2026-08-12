@@ -93,6 +93,12 @@ def understand(state: dict, deps) -> dict:
         timing = timing.strip() or None
     audience = _str_list(structured.get("audience"))
     interests = _str_list(structured.get("interests"))
+    travel_dates = _str_list(structured.get("travel_dates"))
+    timing_constraints = _str_list(structured.get("timing_constraints"))
+    accessibility_needs = _str_list(structured.get("accessibility_needs"))
+    budget = structured.get("budget")
+    if isinstance(budget, str):
+        budget = budget.strip() or None
     user_facts = _str_list(structured.get("user_facts"))
     intent = structured.get("intent") or "travel_planning"
     if isinstance(intent, str):
@@ -122,9 +128,13 @@ def understand(state: dict, deps) -> dict:
         "intent": intent,
         "destination": destination,
         "duration_days": duration_days,
+        "travel_dates": travel_dates,
         "audience": audience,
         "interests": interests,
         "timing": timing,
+        "timing_constraints": timing_constraints,
+        "accessibility_needs": accessibility_needs,
+        "budget": budget,
         "user_facts": user_facts,
         "missing_constraints": missing,
         "assumptions": assumptions,

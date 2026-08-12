@@ -7,7 +7,8 @@ UNDERSTAND_SYSTEM_PROMPT = (
     "استخرج من طلب المستخدم البيانات الهيكلية فقط وأعدها بصيغة JSON صالحة دون أي نص إضافي، "
     "بالشكل التالي:\n"
     '{"intent": "...", "destination": "... أو null", "duration_days": عدد أو null, '
-    '"audience": [...], "interests": [...], "timing": "... أو null", '
+    '"travel_dates": [...], "audience": [...], "interests": [...], "timing": "... أو null", '
+    '"timing_constraints": [...], "accessibility_needs": [...], "budget": "... أو null", '
     '"user_facts": [...], "missing_constraints": [...], "assumptions": [...]}\n'
     "القواعد:\n"
     "1) لا تختلق وجهة أو مدة أو تاريخًا غير مذكور في الطلب؛ اترك القيمة null.\n"
@@ -24,9 +25,13 @@ UNDERSTAND_OUTPUT_KEYS = (
     "intent",
     "destination",
     "duration_days",
+    "travel_dates",
     "audience",
     "interests",
     "timing",
+    "timing_constraints",
+    "accessibility_needs",
+    "budget",
     "user_facts",
     "missing_constraints",
     "assumptions",

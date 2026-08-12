@@ -173,9 +173,13 @@ class GraphState(TypedDict, total=False):
     intent: str
     destination: Optional[str]
     duration_days: Optional[int]
+    travel_dates: list[str]
     audience: list[str]
     interests: list[str]
     timing: Optional[str]
+    timing_constraints: list[str]
+    accessibility_needs: list[str]
+    budget: Optional[str]
     user_facts: list[str]
     missing_constraints: list[str]
     assumptions: list[str]
@@ -233,9 +237,13 @@ def initial_state(
         "intent": "travel_planning",
         "destination": None,
         "duration_days": None,
+        "travel_dates": [],
         "audience": [],
         "interests": [],
         "timing": None,
+        "timing_constraints": [],
+        "accessibility_needs": [],
+        "budget": None,
         "user_facts": [],
         "missing_constraints": [],
         "assumptions": [],

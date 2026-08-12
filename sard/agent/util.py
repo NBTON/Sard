@@ -138,6 +138,10 @@ def deterministic_extraction(text: str) -> dict:
             timing = keyword
             break
     items["timing"] = timing
+    items["travel_dates"] = []
+    items["timing_constraints"] = []
+    items["accessibility_needs"] = []
+    items["budget"] = None
 
     audience = []
     for keyword, label in _AUDIENCE_KEYWORDS.items():

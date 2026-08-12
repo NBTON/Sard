@@ -335,6 +335,30 @@ only `RAGService`; it does not call Zvec or NVIDIA integrations directly. If a
 collection is unavailable, the UI reports the condition and retains the
 existing direct-chat fallback.
 
+## Step 5 LangGraph orchestration
+
+The typed orchestration layer runs `understand -> plan -> retrieve -> compose
+-> verify -> render`. Failed verification returns structured feedback to
+`compose`; the re-composition count is capped and exhaustion returns only an
+honest verified subset. Agent nodes use the centralized LangChain model service
+and the public `RAGService` boundary, never NVIDIA endpoints or Zvec directly.
+
+Run the deterministic, network-free hero-query trace:
+
+```bash
+uv run sard-agent --demo
+```
+
+Run against configured NVIDIA NIM routes and an existing Step 3 collection:
+
+```bash
+uv run sard-agent "أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية"
+```
+
+The trace contains only safe node status, retrieval mode/source count, resolved
+model routes, fallback count, verification coverage/retries, and latency. It
+never prints prompts, reasoning, keys, headers, or provider payloads.
+
 ## Known limitations
 
 - The pilot corpus is intentionally small and does not cover shrimp drying.

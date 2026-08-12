@@ -234,6 +234,14 @@ def test_exhaustion_emits_honest_partial_and_does_not_crash():
         '{"claims":[{"claim_id":"CLAIM-01-001","status":"supported","correction":"","note":""},'
         '{"claim_id":"CLAIM-01-002","status":"unsupported","correction":"إزالة","note":""}]}'
     )
+    scripts.append(
+        "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-RIY01]. "
+        "سعر الدخول خمسون ريالًا [CIT-RIY02]."
+    )
+    scripts.append(
+        '{"claims":[{"claim_id":"CLAIM-02-001","status":"supported","correction":"","note":""},'
+        '{"claim_id":"CLAIM-02-002","status":"unsupported","correction":"إزالة","note":""}]}'
+    )
 
     rag = FakeRAGService(_evidence_answer())
     deps = _make_deps(scripts, rag_service=rag, max_retries=1)
@@ -241,11 +249,11 @@ def test_exhaustion_emits_honest_partial_and_does_not_crash():
 
     assert result["graph_outcome"] == "partial"
     assert result["verification_exhausted"] is True
-    assert result["compose_retry_count"] == 1
+    assert result["compose_retry_count"] == 2
     assert result["final_answer"]
     assert "CIT-RIY01" in result["final_answer"]
     assert "CIT-RIY02" not in result["final_answer"]
-    assert result["unsupported_claims"] == ["CLAIM-01-002"]
+    assert result["unsupported_claims"] == ["CLAIM-02-002"]
     kinds = [error.kind for error in result["errors"]]
     assert "verification_exhausted" in kinds
     assert "failed" in [event.kind for event in result["progress_events"]]
