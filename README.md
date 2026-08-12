@@ -241,6 +241,89 @@ uv run pytest -q -m live
 The offline suite mocks NVIDIA interfaces and must not require network access or
 live credentials.
 
+## Step 4 Arabic RTL PDF rendering spike
+
+The PDF layer is intentionally isolated in `sard/outputs/`: it imports no UI,
+LangChain, NVIDIA, or Zvec code and does not make network calls. It accepts the
+typed `Itinerary` contract and returns a `RenderedArtifact` containing the safe
+path, filename, MIME type, byte size, and warnings. Calendar generation and
+LangGraph orchestration are outside this spike.
+
+### Font setup and license
+
+The repository deliberately bundles `NotoNaskhArabic-Regular.ttf` (178,388
+bytes) and the `NotoSans-Regular.ttf` Latin companion (569,208 bytes) so
+Arabic plus URLs/English render deterministically and offline. Both are pinned to
+notofonts/noto-fonts commit
+`ffebf8c1ee449e544955a7e813c54f9b73848eac`, SHA-256
+`2f4b88e6ee50fa82c617e2d1d4ba18281cb1c6cd71c3af3ec64970c23995db4b`
+and `b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5`,
+and distributed under the SIL Open Font License 1.1 in
+`sard/outputs/assets/OFL.txt`. The upstream source is:
+
+https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoNaskhArabic
+
+Verify the bundled file (or restore the exact pinned download if it was
+removed) with:
+
+```bash
+uv run python -m sard.outputs.sample --download-font --output font-check.pdf
+```
+
+Set `SARD_ARABIC_FONT_PATH` to switch deliberately to another Arabic-capable
+TTF. A missing configured file raises `ArabicFontError`; there is no silent
+Helvetica or system-font fallback. Any alternative font's embedding and
+distribution license must be reviewed by the deployer.
+
+### Generate and inspect the fixture
+
+The sample is prominently labeled fixture-only and uses invented
+`example.org`/`example.com` sources; it is not travel advice:
+
+```bash
+uv sync --extra dev
+uv run python -m sard.outputs.sample --output step4-arabic-rtl-sample.pdf
+```
+
+The default output is
+`output/pdf/step4-arabic-rtl-sample.pdf`. Set `SARD_PDF_OUTPUT_ROOT` to choose
+another root. Relative output paths are resolved beneath that root; absolute
+paths outside it, non-PDF suffixes, traversal, and overwriting an existing file
+are rejected. Generated PDFs and page images under `output/pdf/` and
+`tmp/pdfs/` are ignored by Git.
+
+Render every page for visual review with PyMuPDF:
+
+```bash
+uv run python -c "import fitz,pathlib; d=fitz.open('output/pdf/step4-arabic-rtl-sample.pdf'); o=pathlib.Path('tmp/pdfs'); o.mkdir(parents=True,exist_ok=True); [p.get_pixmap(matrix=fitz.Matrix(2,2),alpha=False).save(o/f'page-{i+1}.png') for i,p in enumerate(d)]"
+```
+
+Inspection should confirm joined Arabic glyphs, right alignment, readable
+mixed Arabic/English, unchanged URLs and citation IDs, wrapped long lines,
+portrait A4 margins, non-overlapping footers, and sequential page numbers.
+The checked Step 4 artifact was rendered as three 595 x 842 point pages and
+rasterized to three 1191 x 1684 PNGs at 2x. Visual review found joined Arabic,
+complete Latin runs/URLs/IDs, clean wrapping and margins, and no clipping,
+overlap, tofu glyphs, or black squares. PyMuPDF extraction also recovered both
+full citation IDs and both fixture URLs; all 285 text spans remained within the
+physical page bounds.
+
+### Citation flow and fallback decision
+
+Each `TextBlock` carries stable citation IDs and may also display them inline.
+Before any file is created, `Itinerary.validate_citations()` rejects duplicate
+source IDs and every unknown declared or inline `CIT-*` ID. The renderer uses
+only the supplied title, URL, page, section, and publication date; absent
+optional metadata stays absent. IDs appear inline, in per-page source notes,
+and in the final source list. ReportLab markup metacharacters are escaped when
+markup is needed; itinerary content is currently drawn as plain canvas text,
+so it is never interpreted as markup.
+
+ReportLab meets the spike criteria with explicit line-level Arabic reshaping
+and bidi processing. The proposed HTML-to-PDF fallback is therefore not
+implemented and remains disabled; adding a browser rendering stack would add
+deployment and reproducibility costs without solving a demonstrated gap.
+
 ## Streamlit application
 
 ```bash

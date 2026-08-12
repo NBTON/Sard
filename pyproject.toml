@@ -21,6 +21,9 @@ dependencies = [
     "lxml>=5.0.0",
     "tenacity>=8.0.0",
     "pyyaml>=6.0",
+    "reportlab>=4.2.0",
+    "arabic-reshaper>=3.0.0",
+    "python-bidi>=0.6.0",
 ]
 
 [project.optional-dependencies]
@@ -56,4 +59,9 @@ packages = ["sard"]
 testpaths = ["tests"]
 markers = [
     "live: opt-in network-backed NVIDIA smoke tests",
+]
+
+[dependency-groups]
+dev = [
+    "pymupdf>=1.24.0",
 ]

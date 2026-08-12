@@ -1,5 +1,20 @@
-"""Output renderers (not yet implemented).
+"""Provider-independent output contracts and renderers."""
 
-Reserved for later steps: PDF itinerary export, calendar/.ics generation,
-and other multi-format outputs described in docs/demo-script.md.
-"""
+from sard.outputs.pdf import RenderedArtifact, render_pdf
+from sard.outputs.schemas import (
+    CitationSource,
+    Itinerary,
+    ItineraryDay,
+    ItineraryStop,
+    TextBlock,
+)
+
+__all__ = [
+    "CitationSource",
+    "Itinerary",
+    "ItineraryDay",
+    "ItineraryStop",
+    "RenderedArtifact",
+    "TextBlock",
+    "render_pdf",
+]
