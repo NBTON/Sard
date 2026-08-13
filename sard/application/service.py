@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Generator, Iterator, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 from sard.agent.events import EVENT_WAITING, make_event
 from sard.agent.graph import GraphDependencies, build_graph, default_dependencies
@@ -45,7 +45,13 @@ _ARTIFACT_STATUSES = frozenset({"created", "skipped", "failed"})
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$")
 _SECRET_QUERY_KEY_RE = re.compile(
-    r"(?i)(api[_-]?key|authorization|credential|password|secret|token)"
+    r"(?i)(api[_-]?key|authorization|credential|password|secret|token|"
+    r"sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|"
+    r"x-ms-signature|sharedaccesssignature|sas)"
+)
+_TOKEN_LIKE_RE = re.compile(r"(?i)(?:nvapi[-_])?[A-Za-z0-9_-]{24,}")
+_SECRET_COMPONENT_RE = re.compile(
+    r"(?i)(api[_-]?key|authorization|bearer|credential|password|secret|token|signature|sas)"
 )
 
 
@@ -529,15 +535,25 @@ def _safe_source_url(value: object) -> str:
             return ""
         if parsed.username is not None or parsed.password is not None:
             return ""
-        query = urlencode(
-            [
-                (key, "[REDACTED]" if _SECRET_QUERY_KEY_RE.search(key) else item)
-                for key, item in parse_qsl(parsed.query, keep_blank_values=True)
-            ],
-            doseq=True,
+        decoded_path = unquote(parsed.path)
+        decoded_fragment = unquote(parsed.fragment)
+        if (
+            _SECRET_COMPONENT_RE.search(decoded_path)
+            or _TOKEN_LIKE_RE.search(decoded_path)
+            or _SECRET_COMPONENT_RE.search(decoded_fragment)
+            or _TOKEN_LIKE_RE.search(decoded_fragment)
+        ):
+            return ""
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+            if (
+                _SECRET_QUERY_KEY_RE.fullmatch(key.strip())
+                or _SECRET_COMPONENT_RE.search(key)
+                or _TOKEN_LIKE_RE.search(unquote(item))
+            ):
+                return ""
+        return urlunsplit(
+            (parsed.scheme.lower(), parsed.netloc, parsed.path, parsed.query, parsed.fragment)
         )
-        fragment = "" if _SECRET_QUERY_KEY_RE.search(parsed.fragment) else parsed.fragment
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, fragment))
     except (TypeError, ValueError):
         return ""
 

@@ -19,7 +19,6 @@ per new run token.
 from __future__ import annotations
 
 import sys
-from datetime import timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -44,6 +43,7 @@ from sard.application.contracts import (  # noqa: E402
     UIRunResult,
 )
 from sard.ui import presentation as ui  # noqa: E402
+from sard.ui import session_state as session  # noqa: E402
 
 _PAGE_TITLE = "سرد | Sard"
 _MAX_QUERY_LENGTH = 2000
@@ -53,19 +53,7 @@ _BACKUP_QUERIES = (
 )
 
 # Stable Streamlit session keys.
-SS = {
-    "service": "step7_service",
-    "request": "step7_request",
-    "run_id": "step7_run_id",
-    "progress": "step7_progress",
-    "result": "step7_result",
-    "error": "step7_error",
-    "last_query": "step7_last_query",
-    "demo_flag": "step7_demo_flag",
-    "run_token": "step7_run_token",
-    "intent": "step7_intent",
-    "cal_view": "step7_cal_view",
-}
+SS = session.KEYS
 
 _DEFAULT_PREFERENCES = (
     "طعام محلي",
@@ -190,38 +178,17 @@ textarea:focus-visible, [tabindex]:focus-visible {
 
 def _init_session() -> None:
     """Ensure all Step 7 session keys exist with stable defaults."""
-    if SS["service"] not in st.session_state:
-        st.session_state[SS["service"]] = SardApplicationService(
-            cached_demo_provider=build_demo_result
-        )
-    defaults = {
-        SS["request"]: None,
-        SS["run_id"]: None,
-        SS["progress"]: [],
-        SS["result"]: None,
-        SS["error"]: None,
-        SS["last_query"]: "",
-        SS["demo_flag"]: False,
-        SS["run_token"]: 0,
-        SS["intent"]: None,
-        SS["cal_view"]: None,
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    session.initialize_session(
+        st.session_state,
+        lambda: SardApplicationService(cached_demo_provider=build_demo_result),
+    )
 
 
 def _current_dates() -> tuple[object, ...]:
     """Collect optional start/end dates as an ordered tuple of ``date``."""
     start = st.session_state.get("step7_date_start")
     end = st.session_state.get("step7_date_end")
-    if start is None:
-        return ()
-    if end is None or end == start:
-        return (start,)
-    if end < start:
-        return ()
-    return tuple(start + timedelta(days=offset) for offset in range((end - start).days + 1))
+    return session.inclusive_dates(start, end)
 
 
 def _current_preferences() -> tuple[str, ...]:
@@ -239,45 +206,49 @@ def _start_run(mode: UIExecutionMode, query: str) -> str:
     end = st.session_state.get("step7_date_end")
     if start is not None and end is not None and end < start:
         return "invalid_dates"
-    st.session_state[SS["last_query"]] = cleaned
-    st.session_state[SS["demo_flag"]] = mode == UIExecutionMode.CACHED_DEMO
+    dates = _current_dates()
+    if mode is UIExecutionMode.CACHED_DEMO and dates and len(dates) != 2:
+        return "demo_dates"
     run_id = ui.new_run_id()
     request = UIRunRequest(
         query=cleaned,
         run_id=run_id,
-        trip_dates=_current_dates(),
+        trip_dates=dates,
         preferences=_current_preferences(),
         execution_mode=mode,
         render_artifacts=True,
     )
-    st.session_state[SS["request"]] = request
-    st.session_state[SS["run_id"]] = run_id
-    st.session_state[SS["progress"]] = []
-    st.session_state[SS["result"]] = None
-    st.session_state[SS["error"]] = None
-    st.session_state[SS["cal_view"]] = None
-    st.session_state[SS["run_token"]] += 1
+    session.begin_run(st.session_state, request)
     return "ok"
 
 
 def _execute_request() -> None:
     """Consume stream_run once for the staged request; store progress+result."""
+    if not session.claim_execution(st.session_state):
+        return
     service = st.session_state[SS["service"]]
     request = st.session_state[SS["request"]]
-    progress = st.session_state[SS["progress"]]
     result: UIRunResult | None = None
     with st.status("جارٍ تجهيز رحلتك...", expanded=True) as status:
         bar = st.progress(0.0)
         for item in service.stream_run(request):
             if isinstance(item, UIProgressEvent):
-                progress.append(item)
+                session.append_progress(st.session_state, item)
                 label = f"{ui.stage_label(item.stage)} — {ui.state_label(item.state)}"
                 bar.progress(min(item.sequence / 25.0, 1.0), text=label)
             elif isinstance(item, UIRunResult):
                 result = item
-        bar.progress(1.0, text="اكتمل التنفيذ")
-        status.update(label="اكتمل التنفيذ", expanded=False)
-    st.session_state[SS["result"]] = result
+        terminal_label, terminal_state = session.terminal_status(result)
+        bar.progress(1.0, text=terminal_label)
+        status.update(
+            label=terminal_label,
+            state=terminal_state,
+            expanded=terminal_state == "error",
+        )
+    if result is None:
+        st.session_state[SS["error"]] = terminal_label
+        return
+    session.finish_run(st.session_state, result)
 
 
 def _render_hero() -> tuple[str, bool, bool]:
@@ -359,7 +330,7 @@ def _render_mode_and_metrics(result: UIRunResult) -> None:
     with col_b:
         if result.coverage_ratio is not None:
             st.metric("تغطية المصادر", ui.format_coverage(result.coverage_ratio))
-    if result.mode.model_routes:
+    if result.mode.model_routes and not demo:
         with st.expander("مسارات النماذج (تقني)"):
             for route in result.mode.model_routes:
                 st.write(ui.model_route_label(route))
@@ -424,10 +395,7 @@ def _render_calendar_after_dates(result: UIRunResult) -> None:
     ready = start is not None and end is not None
     if st.button("إنشاء التقويم", disabled=not ready, key="step7_btn_cal"):
         service = st.session_state[SS["service"]]
-        dates = tuple(
-            start + timedelta(days=offset)
-            for offset in range((end - start).days + 1)
-        ) if end >= start else ()
+        dates = session.inclusive_dates(start, end)
         if not dates:
             st.warning("يجب أن يكون تاريخ النهاية مساويًا لتاريخ البداية أو بعده.")
         else:
@@ -476,7 +444,7 @@ def _render_failure_backup(result: UIRunResult) -> None:
             use_container_width=True,
             disabled=not last_query,
         ):
-            st.session_state[SS["intent"]] = (UIExecutionMode.LIVE, last_query)
+            session.stage_intent(st.session_state, UIExecutionMode.LIVE, last_query)
             st.rerun()
     with col_b:
         if st.button(
@@ -485,7 +453,7 @@ def _render_failure_backup(result: UIRunResult) -> None:
             use_container_width=True,
             disabled=False,
         ):
-            st.session_state[SS["intent"]] = (UIExecutionMode.CACHED_DEMO, HERO_QUERY)
+            session.stage_intent(st.session_state, UIExecutionMode.CACHED_DEMO, HERO_QUERY)
             st.rerun()
 
 
@@ -494,6 +462,11 @@ def _render_result() -> None:
     if result is None:
         return
     _render_mode_and_metrics(result)
+    visible_warnings = ui.warning_messages(result)
+    if visible_warnings:
+        with st.expander("تنبيهات التشغيل", expanded=result.graph_outcome != "completed"):
+            for warning in visible_warnings:
+                st.warning(warning)
     _render_answer(result)
     _render_artifacts(result)
     if result.error_message or result.graph_outcome == "failed":
@@ -539,15 +512,16 @@ def main() -> None:
     intent = st.session_state.get(SS["intent"])
     if intent is None:
         if run_clicked:
-            st.session_state[SS["intent"]] = (UIExecutionMode.LIVE, query)
+            session.stage_intent(st.session_state, UIExecutionMode.LIVE, query)
             st.rerun()
         elif demo_clicked:
-            st.session_state[SS["intent"]] = (UIExecutionMode.CACHED_DEMO, HERO_QUERY)
+            session.stage_intent(st.session_state, UIExecutionMode.CACHED_DEMO, HERO_QUERY)
             st.rerun()
     else:
-        st.session_state[SS["intent"]] = None
-        mode, staged_query = intent
-        outcome = _start_run(mode, staged_query)
+        run_intent = session.consume_intent(st.session_state)
+        if run_intent is None:
+            return
+        outcome = _start_run(run_intent.mode, run_intent.query)
         if outcome == "blank":
             st.warning("اكتب وصف رحلتك قبل البدء.")
         elif outcome == "too_long":
@@ -556,6 +530,8 @@ def main() -> None:
             )
         elif outcome == "invalid_dates":
             st.warning("يجب أن يكون تاريخ النهاية مساويًا لتاريخ البداية أو بعده.")
+        elif outcome == "demo_dates":
+            st.warning("العرض التجريبي ليومين يتطلب تاريخي بداية ونهاية متتاليين.")
         else:
             _execute_request()
 

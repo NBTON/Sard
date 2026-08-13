@@ -218,6 +218,11 @@ def test_is_safe_external_url_accepts_http_https(url: str) -> None:
         "//example.org/path",  # scheme-less protocol-relative
         "https://example.org\n",  # control char
         "https://example.org:99999/",  # invalid port
+        "https://example.org/private/token/abc",
+        "https://example.org/path?sig=abc",
+        "https://example.org/path?X-Amz-Signature=abc",
+        "https://example.org/path#authorization-secret",
+        "https://example.org/path/abcdefghijklmnopqrstuvwx",
         "x" * 2049,  # over length bound
         "",
         None,
@@ -376,6 +381,20 @@ def test_mode_status_line_live() -> None:
 def test_mode_status_line_reports_fallback() -> None:
     line = ui.mode_status_line(_mode_status(model_fallback_used=True))
     assert "نموذج احتياطي مُفعَّل" in line
+
+
+def test_mode_status_line_marks_cached_demo_as_simulated_without_live_routes() -> None:
+    line = ui.mode_status_line(
+        _mode_status(
+            kind="cached_demo",
+            execution_mode="cached_demo",
+            retrieval_mode="hybrid_reranked",
+            model_fallback_used=True,
+        )
+    )
+    assert line == "عرض تجريبي محفوظ — مراحل ومخرجات محاكاة ثابتة"
+    assert "الاسترجاع" not in line
+    assert "نموذج احتياطي" not in line
 
 
 def test_mode_status_line_handles_unknown_kind_gracefully() -> None:

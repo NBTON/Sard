@@ -35,7 +35,7 @@ import re
 import secrets
 from datetime import date as date_type
 from typing import TYPE_CHECKING, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
     from sard.application.contracts import (
@@ -270,6 +270,15 @@ _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 _MAX_URL_LENGTH = 2048
 
 _WHITESPACE_RE = re.compile(r"[\x00-\x20]")
+_SECRET_QUERY_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|authorization|credential|password|secret|token|"
+    r"sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|"
+    r"x-ms-signature|sharedaccesssignature|sas)"
+)
+_TOKEN_LIKE_RE = re.compile(r"(?i)(?:nvapi[-_])?[A-Za-z0-9_-]{24,}")
+_SECRET_COMPONENT_RE = re.compile(
+    r"(?i)(api[_-]?key|authorization|bearer|credential|password|secret|token|signature|sas)"
+)
 
 
 def is_safe_external_url(url: object) -> bool:
@@ -299,6 +308,22 @@ def is_safe_external_url(url: object) -> bool:
         return False
     if parsed.username is not None or parsed.password is not None:
         return False
+    decoded_path = unquote(parsed.path)
+    decoded_fragment = unquote(parsed.fragment)
+    if (
+        _SECRET_COMPONENT_RE.search(decoded_path)
+        or _TOKEN_LIKE_RE.search(decoded_path)
+        or _SECRET_COMPONENT_RE.search(decoded_fragment)
+        or _TOKEN_LIKE_RE.search(decoded_fragment)
+    ):
+        return False
+    for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+        if (
+            _SECRET_QUERY_KEY_RE.fullmatch(key.strip())
+            or _SECRET_COMPONENT_RE.search(key)
+            or _TOKEN_LIKE_RE.search(unquote(item))
+        ):
+            return False
     return True
 
 
@@ -442,6 +467,9 @@ def mode_status_line(mode_status: object) -> str:
     fallback_used = bool(getattr(mode_status, "model_fallback_used", False))
     execution_mode = getattr(mode_status, "execution_mode", None)
 
+    if _value_of(execution_mode) == "cached_demo" or _value_of(kind) == "cached_demo":
+        return "عرض تجريبي محفوظ — مراحل ومخرجات محاكاة ثابتة"
+
     parts: list[str] = []
     if execution_mode is not None:
         parts.append(execution_mode_label(execution_mode))
@@ -486,6 +514,19 @@ def artifact_download_label(artifact: object) -> str:
     if size_bytes > 0:
         return f"{label} ({format_size_bytes(size_bytes)})"
     return label
+
+
+def warning_messages(result: object) -> tuple[str, ...]:
+    """Return bounded warnings safe for Streamlit's Markdown rendering."""
+
+    values = getattr(result, "warnings", ())
+    if not isinstance(values, tuple):
+        return ()
+    return tuple(
+        escape_html(str(value).strip())[:320]
+        for value in values
+        if str(value).strip()
+    )
 
 
 def mode_banner_html(mode_status: object, *, demo: bool = False) -> str:

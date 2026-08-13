@@ -359,7 +359,7 @@ The supported hero query is:
 أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية
 ```
 
-Two backup queries are available as one-click controls. Optional dates and
+Two backup queries are available as one-click prefill controls. Optional dates and
 preferences are included once in the structured application request. The UI
 shows the six graph stages, verified Arabic answer, source cards, actual model
 route metadata, and PDF/calendar/raw-text download state. A retry is explicit

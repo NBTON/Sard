@@ -22,9 +22,7 @@ Guarantees (all proven by ``tests/application/test_demo.py``):
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time as time_type, timedelta, timezone
 from pathlib import Path
@@ -51,6 +49,7 @@ from sard.outputs.artifacts import (
 )
 from sard.outputs.calendar import CalendarRenderError, render_calendar
 from sard.outputs.pdf import render_pdf
+from sard.outputs.pdf_environment import locked_pdf_output_root
 from sard.outputs.raw import render_raw_text
 from sard.outputs.schemas import (
     CITATION_ID_RE,
@@ -323,11 +322,17 @@ def _demo_itinerary(
 def demo_fixture(*, run_id: str, trip_dates: tuple[date, ...] = ()) -> DemoFixture:
     """Return the stable, explicitly fixture-only demo data for the hero query.
 
-    Explicit dates are taken from ``trip_dates`` when supplied, padded with the
-    fixed demo dates otherwise, and are never inferred from free text.
+    The fixed pair is used only when no dates are supplied. Explicit dates for
+    this two-day fixture must be exactly two ordered values; they are never
+    padded with stale fixture dates or inferred from free text.
     """
     sources = _demo_sources()
-    explicit_dates = (tuple(trip_dates) + DEMO_DEFAULT_DATES)[:2]
+    if trip_dates:
+        if len(trip_dates) != 2 or trip_dates[1] < trip_dates[0]:
+            raise ValueError("two ordered explicit dates are required for the demo")
+        explicit_dates = tuple(trip_dates)
+    else:
+        explicit_dates = DEMO_DEFAULT_DATES
     itinerary = _demo_itinerary(run_id=run_id, sources=sources, explicit_dates=explicit_dates)
     return DemoFixture(
         query=HERO_QUERY,
@@ -443,19 +448,6 @@ def build_demo_progress(run_id: str) -> tuple[UIProgressEvent, ...]:
         duration_ms=510.0,
     )
     return tuple(events)
-
-
-@contextmanager
-def _pdf_output_root(root: Path) -> Iterator[None]:
-    previous = os.environ.get("SARD_PDF_OUTPUT_ROOT")
-    os.environ["SARD_PDF_OUTPUT_ROOT"] = str(root)
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("SARD_PDF_OUTPUT_ROOT", None)
-        else:
-            os.environ["SARD_PDF_OUTPUT_ROOT"] = previous
 
 
 # ReportLab embeds wall-clock ``/CreationDate`` and ``/ModDate`` values in every
@@ -595,7 +587,7 @@ def _render_demo_artifacts(
     temporary = manager.temporary_path(".pdf")
     try:
         try:
-            with _pdf_output_root(manager.run_dir):
+            with locked_pdf_output_root(manager.run_dir):
                 render_pdf(itinerary, temporary)
             _normalize_demo_pdf(Path(temporary), itinerary.generated_at)
             pdf_result = manager.publish_generated_file(

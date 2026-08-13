@@ -7,9 +7,7 @@ No model, retriever, reranker, Zvec, or network dependency is available here.
 
 from __future__ import annotations
 
-import os
 import time
-from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -33,6 +31,7 @@ from sard.outputs.artifacts import (
 )
 from sard.outputs.calendar import CalendarRenderError, render_calendar
 from sard.outputs.pdf import render_pdf
+from sard.outputs.pdf_environment import locked_pdf_output_root
 from sard.outputs.raw import render_raw_text
 from sard.outputs.validation import CitationValidationError, VerifiedRenderInput, build_verified_render_input, verified_answer_subset
 
@@ -49,19 +48,6 @@ def _parse_explicit_dates(values) -> tuple[date, ...]:
             except ValueError:
                 continue
     return tuple(result)
-
-
-@contextmanager
-def _pdf_root(root: Path):
-    previous = os.environ.get("SARD_PDF_OUTPUT_ROOT")
-    os.environ["SARD_PDF_OUTPUT_ROOT"] = str(root)
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("SARD_PDF_OUTPUT_ROOT", None)
-        else:
-            os.environ["SARD_PDF_OUTPUT_ROOT"] = previous
 
 
 def _manifest_info(result: ArtifactWriteResult) -> RenderedArtifactInfo:
@@ -104,7 +90,7 @@ def _render_pdf_artifact(manager: ArtifactManager, verified: VerifiedRenderInput
         )
     temporary = manager.temporary_path(".pdf")
     try:
-        with _pdf_root(manager.run_dir):
+        with locked_pdf_output_root(manager.run_dir):
             render_pdf(verified.itinerary, temporary)
         return manager.publish_generated_file(
             temporary,
