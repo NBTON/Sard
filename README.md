@@ -1,9 +1,9 @@
 # Sard (سرد) — MVP
 
-Sard is an Arabic-first Saudi cultural-travel assistant. Step 3 adds a
-provider-independent RAG foundation while preserving the provider-neutral Step
-2 chat service. It does not include the later LangGraph agent, RTL PDF
-generation, or other post-MVP stages.
+Sard is an Arabic-first Saudi cultural-travel assistant. Steps 3–6 add a
+provider-independent RAG foundation, typed LangGraph pipeline, RTL PDF
+generation, and deterministic PDF/calendar/raw-answer artifacts while
+preserving the provider-neutral Step 2 chat service.
 
 ## Requirements
 
@@ -246,8 +246,9 @@ live credentials.
 The PDF layer is intentionally isolated in `sard/outputs/`: it imports no UI,
 LangChain, NVIDIA, or Zvec code and does not make network calls. It accepts the
 typed `Itinerary` contract and returns a `RenderedArtifact` containing the safe
-path, filename, MIME type, byte size, and warnings. Calendar generation and
-LangGraph orchestration are outside this spike.
+path, filename, MIME type, byte size, and warnings. Step 6 reuses this renderer
+from the provider-free LangGraph render node; calendar and raw-text generation
+remain separate deterministic renderer paths.
 
 ### Font setup and license
 
@@ -358,6 +359,71 @@ uv run sard-agent "أنشئ برنامجًا سياحيًا تراثيًا لم�
 The trace contains only safe node status, retrieval mode/source count, resolved
 model routes, fallback count, verification coverage/retries, and latency. It
 never prints prompts, reasoning, keys, headers, or provider payloads.
+
+## Step 6 deterministic artifacts
+
+When artifact rendering is enabled, the final verified graph output can create
+three independent files beneath `output/runs/<run-id>/`:
+
+```text
+output/runs/<run-id>/
+├── itinerary.pdf
+├── itinerary.ics
+└── answer.txt
+```
+
+| Artifact | MIME type |
+| --- | --- |
+| `itinerary.pdf` | `application/pdf` |
+| `itinerary.ics` | `text/calendar; charset=utf-8` |
+| `answer.txt` | `text/plain; charset=utf-8` |
+
+Generate the offline sample with explicit dates:
+
+```bash
+uv run python -m sard.outputs.sample --step6 --run-id step6-sample --output-root output/runs --date 2026-11-01 --date 2026-11-02
+```
+
+Or run the graph demo:
+
+```bash
+uv run sard-agent --demo --render --date 2026-11-01 --date 2026-11-02
+```
+
+Dates control calendar creation. User-provided dates are used when present;
+relative labels such as `اليوم الأول` are never treated as dates. Without
+dates, PDF and raw text may still be created, while the calendar is skipped
+with a `missing_dates` warning. A preview calendar requires explicit
+caller-supplied dates and must be labeled as a preview.
+
+Every artifact is written with a fixed safe filename, in a unique per-run
+directory, through a same-directory temporary file and atomic no-overwrite
+publication. The manifest returned in `rendered_artifacts` includes artifact
+type, display label, absolute path, MIME type, size, optional SHA-256 checksum,
+creation status, warnings, and error category. A failure in one artifact does
+not suppress the others.
+
+Rendering uses only the verified itinerary, accepted claims, and supplied
+source map. Citation IDs must exist in that map and every structured factual
+field must retain field-level support. Unsupported optional fields are removed;
+renderers never add addresses, coordinates, prices, opening hours, durations,
+or other facts. Degraded retrieval, evidence-limited verification, and model
+fallbacks are disclosed in a small PDF notice and a concise raw-text notice,
+not as internal logs.
+
+The calendar uses `icalendar` (pinned to the maintained 7.2.x line) rather than
+`ics.py`, because the installed renderer must emit and round-trip timezone-aware
+RFC 5545 `VTIMEZONE`/`TZID` values reliably.
+
+Validate a calendar offline with:
+
+```bash
+uv run python -c "from icalendar import Calendar; from pathlib import Path; c=Calendar.from_ical(Path('output/runs/step6-sample/itinerary.ics').read_bytes()); print([x.name for x in c.subcomponents]); print(len([x for x in c.subcomponents if x.name == 'VEVENT']))"
+```
+
+Inspect the PDF visually by rendering every page to PNG with PyMuPDF; verify
+Arabic shaping, right-to-left order, URLs, citation IDs, page footers, and the
+absence of clipped or overlapping text.
 
 ## Known limitations
 

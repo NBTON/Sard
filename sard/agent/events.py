@@ -149,6 +149,37 @@ class SafeFallbackEvent:
     degraded: bool
     failure_category: Optional[str] = None
     latency_ms: float = 0.0
+    endpoint_type: Optional[str] = None
+    selected_fallback: Optional[str] = None
+
+
+def adapt_fallback_events(events) -> list[SafeFallbackEvent]:
+    """Convert provider-neutral fallback records to safe graph metadata.
+
+    The adapter intentionally copies model-routing metadata only. It never
+    carries prompts, responses, credentials, or provider payloads across the
+    graph boundary.
+    """
+
+    adapted: list[SafeFallbackEvent] = []
+    for event in events or ():
+        raw_failure = getattr(event, "failure_category", None)
+        failure = getattr(raw_failure, "value", raw_failure)
+        adapted.append(
+            SafeFallbackEvent(
+                use_case=str(getattr(event, "use_case", "") or ""),
+                requested_model=str(getattr(event, "requested_model", "") or ""),
+                resolved_model=str(getattr(event, "resolved_model", "") or ""),
+                attempt=int(getattr(event, "attempt", 0) or 0),
+                outcome=str(getattr(event, "outcome", "") or ""),
+                degraded=bool(getattr(event, "quality_degraded", False)),
+                failure_category=failure,
+                latency_ms=float(getattr(event, "latency_ms", 0.0) or 0.0),
+                endpoint_type=getattr(event, "endpoint_type", None),
+                selected_fallback=getattr(event, "selected_fallback", None),
+            )
+        )
+    return adapted
 
 
 class GraphNodeError(Exception):

@@ -13,6 +13,7 @@ from sard.agent.events import (
     EVENT_COMPLETED,
     EVENT_DEGRADED,
     EVENT_STARTED,
+    adapt_fallback_events,
     make_event,
 )
 from sard.agent.prompts.plan import (
@@ -97,6 +98,7 @@ def plan(state: dict, deps) -> dict:
 
     degraded = False
     model_used = None
+    fallback_events = []
     fallback_plan = _deterministic_plan(state)
     final_plan = fallback_plan
 
@@ -119,6 +121,7 @@ def plan(state: dict, deps) -> dict:
             allowed_keys=PLAN_OUTPUT_KEYS,
         )
         model_used = response.model_used
+        fallback_events = adapt_fallback_events(response.events)
         if parsed is not None:
             final_plan = _plan_from_dict(parsed, state.get("duration_days"))
         else:
@@ -140,6 +143,7 @@ def plan(state: dict, deps) -> dict:
     return {
         "plan": final_plan,
         "model_routes": {"plan": model_used},
+        "fallback_events": fallback_events,
         "timings": {"plan_ms": duration_ms},
         "progress_events": events,
     }

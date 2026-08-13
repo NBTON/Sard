@@ -6,6 +6,7 @@ Runs the agent pipeline and prints a sanitized trace. Supports offline `--demo` 
 import argparse
 import sys
 import json
+import uuid
 from dataclasses import dataclass, field
 
 from sard.agent.graph import GraphDependencies, default_dependencies, run_pipeline
@@ -118,14 +119,29 @@ def _demo_dependencies() -> GraphDependencies:
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Sard Step 5 Agent CLI")
     parser.add_argument("--demo", action="store_true", help="Run in offline deterministic demo mode")
+    parser.add_argument("--render", action="store_true", help="Generate PDF, calendar, and raw-text artifacts")
+    parser.add_argument("--output-root", default=None, help="Artifact root directory")
+    parser.add_argument("--date", action="append", default=[], help="Explicit ISO date; repeat for itinerary days")
+    parser.add_argument("--preview-calendar", action="store_true", help="Allow caller-supplied preview dates for an undated request")
+    parser.add_argument("--checksums", action="store_true", help="Include SHA-256 checksums in the manifest")
+    parser.add_argument("--run-id", default=None, help="Safe run identifier; generated when omitted")
     parser.add_argument("query", nargs="?", default="أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية")
     args = parser.parse_args()
 
     deps = _demo_dependencies() if args.demo else default_dependencies(open_rag=True)
+    deps.render_artifacts = args.render
+    deps.output_root = args.output_root
+    deps.caller_dates = tuple(args.date)
+    deps.preview_calendar = args.preview_calendar
+    deps.render_checksums = args.checksums
 
-    result = run_pipeline(args.query, dependencies=deps, run_id="cli-run")
+    run_id = args.run_id or f"cli-{uuid.uuid4().hex[:12]}"
+    result = run_pipeline(args.query, dependencies=deps, run_id=run_id, caller_dates=args.date, preview_calendar=args.preview_calendar)
 
     print(f"Query: {args.query}")
     print("Mode: " + ("DEMO (Offline Fake)" if args.demo else "NORMAL (Real Dependencies)"))
@@ -164,6 +180,8 @@ def main():
     cov_ratio = getattr(cov, "coverage_ratio", 0.0) if cov else 0.0
     print(f"Citation Coverage: {cov_ratio:.0%}")
     print(f"Retry Count: {result.get('compose_retry_count', 0)}")
+    for artifact in result.get("rendered_artifacts", []):
+        print(f"Artifact: {artifact.artifact_type or artifact.filename} | {artifact.creation_status} | {artifact.path or '—'}")
     
     total_ms = 0.0
     timings = result.get("timings", {})

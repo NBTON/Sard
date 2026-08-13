@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -23,6 +24,11 @@ from sard.outputs.schemas import INLINE_CITATION_RE, CitationSource, Itinerary, 
 MIME_TYPE = "application/pdf"
 DEFAULT_OUTPUT_ROOT = Path("output/pdf")
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_DEGRADED_RETRIEVAL_MODES = {"dense_only", "full_text_only", "unavailable"}
+_PDF_ID_RE = re.compile(
+    rb"/ID\s*\[\s*<[0-9A-Fa-f]+>\s*<[0-9A-Fa-f]+>\s*\]",
+    re.S,
+)
 
 
 @dataclass(frozen=True)
@@ -221,6 +227,10 @@ class _TextFlowable(Flowable):
 
 class _FooterCanvas(Canvas):
     def __init__(self, *args, arabic_font: str, latin_font: str, **kwargs) -> None:
+        # ReportLab otherwise salts the trailer ID with process randomness.
+        # The itinerary's supplied ``generated_at`` remains the visible
+        # generation timestamp in the document body.
+        kwargs.setdefault("invariant", 1)
         super().__init__(*args, **kwargs)
         self.arabic_font = arabic_font
         self.latin_font = latin_font
@@ -290,10 +300,60 @@ def _source_metadata(source: CitationSource) -> str:
     return " | ".join(values)
 
 
+def _degraded_notice(itinerary: Itinerary) -> str | None:
+    if itinerary.degraded_notice:
+        return itinerary.degraded_notice
+    notices: list[str] = []
+    status = getattr(itinerary.verification_status, "value", itinerary.verification_status)
+    if status == "evidence_limited":
+        notices.append("النتيجة محدودة بالأدلة المتاحة")
+    if itinerary.retrieval_mode in _DEGRADED_RETRIEVAL_MODES:
+        notices.append("تم استخدام وضع استرجاع محدود")
+    if itinerary.model_fallback_used:
+        notices.append("تم استخدام مسار نموذج احتياطي")
+    return "؛ ".join(notices) + "." if notices else None
+
+
+def _format_time(value) -> str:
+    if value is None:
+        return ""
+    formatter = getattr(value, "strftime", None)
+    return formatter("%H:%M") if formatter is not None else str(value)
+
+
+def _normalize_pdf_id(path: Path) -> None:
+    """Replace ReportLab's process-dependent trailer ID with a stable ID."""
+
+    data = path.read_bytes()
+    placeholder = b"/ID\n[<00000000000000000000000000000000><00000000000000000000000000000000>]"
+    canonical = _PDF_ID_RE.sub(placeholder, data, count=1)
+    if canonical == data:
+        return
+    digest = hashlib.sha256(canonical).hexdigest()[:32].encode("ascii")
+    normalized = _PDF_ID_RE.sub(
+        b"/ID\n[<" + digest + b"><" + digest + b">]",
+        canonical,
+        count=1,
+    )
+    path.write_bytes(normalized)
+
+
 def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowable]:
+    def support_citations(field_name: str) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                citation_id
+                for support in itinerary.field_support
+                if support.field_name == field_name
+                for citation_id in support.citation_ids
+            )
+        )
+
+    title_citations = support_citations("title")
+    summary_citations = support_citations("summary")
     story: list[Flowable] = [
         _TextFlowable(
-            itinerary.title,
+            append_citations(itinerary.title, title_citations),
             font=font,
             latin_font=latin_font,
             size=24,
@@ -302,7 +362,7 @@ def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowa
             bottom_padding=10,
         ),
         _TextFlowable(
-            itinerary.summary,
+            append_citations(itinerary.summary, summary_citations),
             font=font,
             latin_font=latin_font,
             size=13,
@@ -320,16 +380,42 @@ def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowa
             bottom_padding=12,
         ),
     ]
+    notice = _degraded_notice(itinerary)
+    if notice:
+        story.append(
+            _TextFlowable(
+                f"تنبيه: {notice}",
+                font=font,
+                latin_font=latin_font,
+                size=8,
+                leading=12,
+                color=colors.HexColor("#8D6E63"),
+                bottom_padding=8,
+            )
+        )
     for block in itinerary.notes:
         story.append(_block_flowable(block, font, latin_font, "ملاحظة عامة: "))
 
     for day_index, day in enumerate(itinerary.days, 1):
         if day_index > 1:
             story.append(PageBreak())
-        date_suffix = f" - {day.date.isoformat()}" if day.date else ""
+        relative_number = day.relative_day_number or day_index
+        day_date = (
+            itinerary.explicit_dates[relative_number - 1]
+            if itinerary.explicit_dates and 0 < relative_number <= len(itinerary.explicit_dates)
+            else day.date
+        )
+        date_suffix = f" - {day_date.isoformat()}" if day_date else ""
+        day_citations = tuple(
+            dict.fromkeys(
+                citation_id
+                for support in day.field_support
+                for citation_id in support.citation_ids
+            )
+        )
         story.append(
             _TextFlowable(
-                f"اليوم {day_index}: {day.title}{date_suffix}",
+                append_citations(f"اليوم {day_index}: {day.title}{date_suffix}", day_citations),
                 font=font,
                 latin_font=latin_font,
                 size=18,
@@ -339,10 +425,18 @@ def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowa
             )
         )
         for stop in day.stops:
+            stop_citations = tuple(dict.fromkeys(stop.citation_ids + tuple(
+                citation_id
+                for support in stop.field_support
+                for citation_id in support.citation_ids
+            )))
+            display_time = stop.time
+            if stop.start_time is not None and stop.end_time is not None:
+                display_time = f"{_format_time(stop.start_time)} - {_format_time(stop.end_time)}"
             story.extend(
                 [
                     _TextFlowable(
-                        f"{stop.time} | {stop.title}",
+                        append_citations(f"{display_time} | {stop.title}" if display_time else stop.title, stop_citations),
                         font=font,
                         latin_font=latin_font,
                         size=14,
@@ -350,26 +444,39 @@ def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowa
                         color=colors.HexColor("#37474F"),
                         top_padding=5,
                     ),
-                    _TextFlowable(
-                        f"الموقع: {stop.location}",
-                        font=font,
-                        latin_font=latin_font,
-                        size=10,
-                        leading=16,
-                        color=colors.HexColor("#607D8B"),
-                        bottom_padding=5,
-                    ),
+                    *([
+                        _TextFlowable(
+                            append_citations(f"الموقع: {stop.effective_location_name}", stop_citations),
+                            font=font,
+                            latin_font=latin_font,
+                            size=10,
+                            leading=16,
+                            color=colors.HexColor("#607D8B"),
+                            bottom_padding=5,
+                            citation_ids=stop_citations,
+                        )
+                    ] if stop.effective_location_name else []),
                 ]
             )
+            if stop.address:
+                story.append(_TextFlowable(f"العنوان: {stop.address}", font=font, latin_font=latin_font, size=9, leading=14, color=colors.HexColor("#607D8B"), bottom_padding=4, citation_ids=stop_citations))
+            if stop.coordinates:
+                story.append(_TextFlowable(f"الإحداثيات: {stop.coordinates.latitude:.6f}, {stop.coordinates.longitude:.6f}", font=font, latin_font=latin_font, size=8.5, leading=13, color=colors.HexColor("#607D8B"), bottom_padding=4, citation_ids=stop_citations, rtl=False))
             story.extend(
-                _block_flowable(block, font, latin_font) for block in stop.paragraphs
+                _block_flowable(block, font, latin_font)
+                for block in stop.effective_description
             )
             story.extend(
-                _block_flowable(block, font, latin_font, "• ") for block in stop.bullets
+                _block_flowable(block, font, latin_font, "• ")
+                for block in stop.effective_practical_notes
             )
             story.extend(
                 _block_flowable(block, font, latin_font, "ملاحظة: ")
                 for block in stop.notes
+            )
+            story.extend(
+                _block_flowable(block, font, latin_font, "إتاحة: ")
+                for block in stop.accessibility_notes
             )
             story.append(Spacer(1, 7))
         story.extend(
@@ -470,6 +577,7 @@ def render_pdf(itinerary: Itinerary, output_path: str | Path) -> RenderedArtifac
     except Exception:
         destination.unlink(missing_ok=True)
         raise
+    _normalize_pdf_id(destination)
     return RenderedArtifact(
         filename=destination.name,
         path=destination,
@@ -477,3 +585,14 @@ def render_pdf(itinerary: Itinerary, output_path: str | Path) -> RenderedArtifac
         size_bytes=destination.stat().st_size,
         warnings=(),
     )
+
+
+def render_pdf_atomic(itinerary: Itinerary, output_path: str | Path) -> RenderedArtifact:
+    """Render using the Step 4 implementation into a same-directory temp file.
+
+    The public ``render_pdf`` contract remains unchanged.  Step 6 uses this
+    helper with an artifact-manager-owned temporary path and publishes that
+    path atomically after ReportLab has completed.
+    """
+
+    return render_pdf(itinerary, output_path)

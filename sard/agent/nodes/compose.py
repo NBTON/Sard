@@ -18,6 +18,7 @@ from sard.agent.events import (
     EVENT_COMPLETED,
     EVENT_DEGRADED,
     EVENT_STARTED,
+    adapt_fallback_events,
     make_event,
 )
 from sard.agent.prompts.compose import (
@@ -29,6 +30,7 @@ from sard.outputs.schemas import (
     INLINE_CITATION_RE,
     CITATION_ID_RE,
     CitationSource,
+    FieldSupport,
     Itinerary,
     ItineraryDay,
     ItineraryStop,
@@ -139,7 +141,14 @@ def _build_itinerary(
                         time=period,
                         title=item.title or "محطة",
                         location=item.source_name or "",
+                        stop_id=f"day-{plan_day.day_index}-stop-{block_index}",
                         paragraphs=(TextBlock(text=text, citation_ids=(citation_id,)),),
+                        citation_ids=(citation_id,),
+                        field_support=(
+                            FieldSupport("title", (citation_id,)),
+                            FieldSupport("location", (citation_id,)),
+                            FieldSupport("description", (citation_id,)),
+                        ),
                     )
                 )
             if not stops:
@@ -154,6 +163,7 @@ def _build_itinerary(
             days.append(
                 ItineraryDay(
                     title=plan_day.focus or f"اليوم {plan_day.day_index}",
+                    relative_day_number=plan_day.day_index,
                     stops=tuple(stops),
                 )
             )
@@ -168,12 +178,20 @@ def _build_itinerary(
                     time="أثناء اليوم",
                     title=item.title or "محطة",
                     location=item.source_name or "",
+                    stop_id=f"day-{index}-stop-1",
                     paragraphs=(TextBlock(text=text, citation_ids=(citation_id,)),),
+                    citation_ids=(citation_id,),
+                    field_support=(
+                        FieldSupport("title", (citation_id,)),
+                        FieldSupport("location", (citation_id,)),
+                        FieldSupport("description", (citation_id,)),
+                    ),
                 )
             ]
             days.append(
                 ItineraryDay(
                     title=f"اليوم {index}: {item.title or 'استكشاف'}",
+                    relative_day_number=index,
                     stops=tuple(stops),
                 )
             )
@@ -191,6 +209,10 @@ def _build_itinerary(
         sources=tuple(sources),
         generated_at=datetime.now(timezone.utc),
         notes=tuple(notes),
+        field_support=(
+            FieldSupport("title", provenance="user_provided"),
+            FieldSupport("summary", tuple(referenced)),
+        ),
     )
 
 
@@ -227,6 +249,7 @@ def compose(state: dict, deps) -> dict:
             "itinerary": None,
             "sources": [],
             "model_routes": {"compose": None},
+            "fallback_events": [],
             "timings": {"compose_ms": duration_ms},
             "progress_events": events,
         }
@@ -235,6 +258,7 @@ def compose(state: dict, deps) -> dict:
     sources = build_sources(evidence)
     model_used = None
     degraded = False
+    fallback_events = []
 
     summary_parts = []
     if plan is not None:
@@ -270,6 +294,7 @@ def compose(state: dict, deps) -> dict:
             user + feedback_section,
         )
         model_used = response.model_used
+        fallback_events = adapt_fallback_events(response.events)
         if response.success:
             draft, referenced_ids = _repair_citations(
                 response.text, valid_ids
@@ -313,6 +338,7 @@ def compose(state: dict, deps) -> dict:
         "itinerary": itinerary,
         "sources": sources,
         "model_routes": {"compose": model_used},
+        "fallback_events": fallback_events,
         "timings": {"compose_ms": duration_ms},
         "progress_events": events,
     }

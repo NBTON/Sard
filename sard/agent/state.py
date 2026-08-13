@@ -160,6 +160,12 @@ class RenderedArtifactInfo:
     mime_type: str
     size_bytes: int
     warnings: tuple[str, ...] = ()
+    artifact_type: str = ""
+    display_label: str = ""
+    absolute_path: str = ""
+    checksum: Optional[str] = None
+    creation_status: str = "created"
+    error_category: Optional[str] = None
 
 
 class GraphState(TypedDict, total=False):
@@ -210,6 +216,12 @@ class GraphState(TypedDict, total=False):
     compose_max_retries: int
 
     final_answer: Optional[str]
+
+    output_root: Optional[str]
+    render_checksums: bool
+    caller_dates: list[str]
+    preview_calendar: bool
+    model_fallback_used: bool
 
     rendered_artifacts: Annotated[list[RenderedArtifactInfo], operator.add]
 
@@ -269,6 +281,11 @@ def initial_state(
         "compose_retry_count": 0,
         "compose_max_retries": compose_max_retries,
         "final_answer": None,
+        "output_root": None,
+        "render_checksums": False,
+        "caller_dates": [],
+        "preview_calendar": False,
+        "model_fallback_used": False,
         "rendered_artifacts": [],
         "model_routes": {},
         "timings": {},

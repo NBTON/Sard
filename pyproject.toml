@@ -24,6 +24,8 @@ dependencies = [
     "reportlab>=4.2.0",
     "arabic-reshaper>=3.0.0",
     "python-bidi>=0.6.0",
+    # RFC 5545 calendar generation and parsing for the Step 6 renderer.
+    "icalendar>=7.2.2,<8",
 ]
 
 [project.optional-dependencies]

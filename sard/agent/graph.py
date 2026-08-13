@@ -53,6 +53,10 @@ class GraphDependencies:
     settings: Optional[Any] = None
     render_smoke: Optional[Callable[..., Any]] = None
     render_artifacts: bool = False
+    output_root: Optional[str] = None
+    render_checksums: bool = False
+    caller_dates: tuple[str, ...] = ()
+    preview_calendar: bool = False
     compose_max_retries: int = 2
 
 
@@ -143,6 +147,9 @@ def run_pipeline(
     request: str,
     dependencies: Optional[GraphDependencies] = None,
     run_id: Optional[str] = None,
+    *,
+    caller_dates: Optional[list[str] | tuple[str, ...]] = None,
+    preview_calendar: Optional[bool] = None,
 ) -> dict:
     """Convenient runner: compile, seed state, invoke, return final state dict."""
     if not request or not request.strip():
@@ -154,6 +161,10 @@ def run_pipeline(
         run_id=run_id,
         compose_max_retries=deps.compose_max_retries,
     )
+    state["caller_dates"] = list(caller_dates if caller_dates is not None else deps.caller_dates)
+    state["preview_calendar"] = deps.preview_calendar if preview_calendar is None else preview_calendar
+    state["output_root"] = deps.output_root
+    state["render_checksums"] = deps.render_checksums
     state["progress_events"] = [
         make_event(EVENT_WAITING, state["run_id"], "pipeline", "waiting", summary="في الانتظار")
     ]

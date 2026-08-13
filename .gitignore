@@ -8,5 +8,7 @@ __pycache__/
 data/zvec/
 data/fonts/
 output/pdf/
+output/runs/
 tmp/pdfs/
+tmp/
 .streamlit/

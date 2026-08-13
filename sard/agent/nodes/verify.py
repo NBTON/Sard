@@ -22,6 +22,7 @@ from sard.agent.events import (
     EVENT_RETRIED,
     EVENT_STARTED,
     FailureKind,
+    adapt_fallback_events,
     make_error,
     make_event,
 )
@@ -84,6 +85,7 @@ def verify(state: dict, deps) -> dict:
     round_index = int(state.get("compose_retry_count", 0)) + 1
     semantic_model_used = None
     semantic_degraded = False
+    fallback_events = []
 
     if not draft or not draft.strip() or not evidence:
         coverage = CoverageReport(
@@ -120,6 +122,7 @@ def verify(state: dict, deps) -> dict:
             "verification_result": result,
             "verification_history": [VerificationRound(round_index, True, (), ())],
             "model_routes": {"verify": semantic_model_used},
+            "fallback_events": fallback_events,
             "timings": {"verify_ms": (time.monotonic() - start) * 1000},
             "progress_events": events,
         }
@@ -199,6 +202,7 @@ def verify(state: dict, deps) -> dict:
             user,
             allowed_keys=VERIFY_OUTPUT_KEYS,
         )
+        fallback_events = adapt_fallback_events(response.events)
         if parsed is not None and isinstance(parsed.get("claims"), list):
             for entry in parsed["claims"]:
                 if not isinstance(entry, dict):
@@ -319,6 +323,7 @@ def verify(state: dict, deps) -> dict:
                 )
             ],
             "model_routes": {"verify": semantic_model_used},
+            "fallback_events": fallback_events,
             "timings": {"verify_ms": duration_ms},
             "progress_events": events,
             "warnings": (["التحقق الدلالي غير متاح؛ الفحوص الحتمية وحدها حاسمة."] if semantic_degraded else []),
@@ -420,6 +425,7 @@ def verify(state: dict, deps) -> dict:
         )
     )
     updates["model_routes"] = {"verify": semantic_model_used}
+    updates["fallback_events"] = fallback_events
     updates["timings"] = {"verify_ms": duration_ms}
     updates["progress_events"] = events
     return updates

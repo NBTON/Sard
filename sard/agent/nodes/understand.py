@@ -13,6 +13,7 @@ from sard.agent.events import (
     EVENT_COMPLETED,
     EVENT_DEGRADED,
     EVENT_STARTED,
+    adapt_fallback_events,
     make_event,
 )
 from sard.agent.prompts.understand import (
@@ -66,6 +67,7 @@ def understand(state: dict, deps) -> dict:
 
     degraded = False
     model_used = None
+    fallback_events = []
     structured = dict(base)
     model_service = getattr(deps, "model_service", None)
     if model_service is not None:
@@ -77,6 +79,7 @@ def understand(state: dict, deps) -> dict:
             allowed_keys=UNDERSTAND_OUTPUT_KEYS,
         )
         model_used = response.model_used
+        fallback_events = adapt_fallback_events(response.events)
         if parsed is not None:
             for key in UNDERSTAND_OUTPUT_KEYS:
                 if key in parsed:
@@ -140,6 +143,7 @@ def understand(state: dict, deps) -> dict:
         "assumptions": assumptions,
         "understanding_degraded": degraded,
         "model_routes": {"understand": model_used},
+        "fallback_events": fallback_events,
         "timings": {"understand_ms": duration_ms},
         "progress_events": events,
     }

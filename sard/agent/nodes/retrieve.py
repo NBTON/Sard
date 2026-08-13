@@ -18,6 +18,7 @@ from sard.agent.events import (
     EVENT_RETRIEVAL_MODE_CHANGED,
     EVENT_STARTED,
     SafeFallbackEvent,
+    adapt_fallback_events,
     make_event,
 )
 from sard.agent.routing import normalize_retrieval_mode
@@ -135,25 +136,9 @@ def retrieve(state: dict, deps) -> dict:
                     )
                 )
 
-            for raw_event in getattr(answer, "fallback_events", []) or []:
-                fallback_events.append(
-                    SafeFallbackEvent(
-                        use_case=getattr(raw_event, "use_case", ""),
-                        requested_model=getattr(raw_event, "requested_model", ""),
-                        resolved_model=getattr(raw_event, "resolved_model", ""),
-                        attempt=getattr(raw_event, "attempt", 0),
-                        outcome=getattr(raw_event, "outcome", ""),
-                        degraded=getattr(raw_event, "quality_degraded", False),
-                        failure_category=(
-                            getattr(getattr(raw_event, "failure_category", None), "value", None)
-                        ),
-                        latency_ms=getattr(raw_event, "latency_ms", 0.0),
-                    )
-                )
-                if getattr(raw_event, "outcome", "") == "success" and (
-                    getattr(raw_event, "quality_degraded", False)
-                    or getattr(raw_event, "selected_fallback", "primary") != "primary"
-                ):
+            fallback_events.extend(adapt_fallback_events(getattr(answer, "fallback_events", []) or []))
+            for fallback in fallback_events:
+                if fallback.outcome == "success" and (fallback.degraded or fallback.selected_fallback != "primary"):
                     events.append(
                         make_event(
                             EVENT_MODEL_FALLBACK_ACTIVATED,
