@@ -82,14 +82,19 @@ class SardApplicationService:
         graph_builder: Callable[[GraphDependencies], object] = build_graph,
         cached_demo_provider: Optional[Callable[[UIRunRequest], UIRunResult]] = None,
     ) -> None:
-        self._dependencies = dependencies or default_dependencies(open_rag=True)
+        # Resolve live dependencies only when a live run actually starts.  An
+        # explicitly cached-demo request must not open RAG or initialize model
+        # routing merely because the session service was constructed.
+        self._dependencies = dependencies
         root_value = (
-            self._dependencies.output_root
+            getattr(dependencies, "output_root", None)
             or os.environ.get("SARD_OUTPUT_ROOT")
             or DEFAULT_OUTPUT_ROOT
         )
         self._output_root = Path(root_value).expanduser().resolve()
-        self._render_checksums = bool(self._dependencies.render_checksums)
+        self._render_checksums = bool(
+            getattr(dependencies, "render_checksums", False)
+        )
         self._graph_builder = graph_builder
         self._cached_demo_provider = cached_demo_provider
         self._lock = threading.RLock()
@@ -261,8 +266,12 @@ class SardApplicationService:
         progress: list[UIProgressEvent] = []
         effective_request = _effective_request(request)
         caller_dates = tuple(value.isoformat() for value in request.trip_dates)
+        base_dependencies = self._dependencies
+        if base_dependencies is None:
+            base_dependencies = default_dependencies(open_rag=True)
+            self._dependencies = base_dependencies
         deps = replace(
-            self._dependencies,
+            base_dependencies,
             render_artifacts=request.render_artifacts,
             output_root=str(self._output_root),
             caller_dates=caller_dates,

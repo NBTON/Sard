@@ -19,6 +19,7 @@ per new run token.
 from __future__ import annotations
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -29,7 +30,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from sard.application import SardApplicationService  # noqa: E402
+from sard.application import (  # noqa: E402
+    ApplicationServiceError,
+    HERO_QUERY,
+    SardApplicationService,
+    build_demo_result,
+)
 from sard.application.contracts import (  # noqa: E402
     CalendarAfterDateRequest,
     UIExecutionMode,
@@ -41,6 +47,10 @@ from sard.ui import presentation as ui  # noqa: E402
 
 _PAGE_TITLE = "سرد | Sard"
 _MAX_QUERY_LENGTH = 2000
+_BACKUP_QUERIES = (
+    "ما هي أبرز المواقع التراثية السعودية المسجلة في قائمة اليونسكو للتراث العالمي؟",
+    "اقترح خطة زيارة ليوم واحد لاستكشاف حي الطريف التاريخي في الدرعية",
+)
 
 # Stable Streamlit session keys.
 SS = {
@@ -181,7 +191,9 @@ textarea:focus-visible, [tabindex]:focus-visible {
 def _init_session() -> None:
     """Ensure all Step 7 session keys exist with stable defaults."""
     if SS["service"] not in st.session_state:
-        st.session_state[SS["service"]] = SardApplicationService()
+        st.session_state[SS["service"]] = SardApplicationService(
+            cached_demo_provider=build_demo_result
+        )
     defaults = {
         SS["request"]: None,
         SS["run_id"]: None,
@@ -203,7 +215,13 @@ def _current_dates() -> tuple[object, ...]:
     """Collect optional start/end dates as an ordered tuple of ``date``."""
     start = st.session_state.get("step7_date_start")
     end = st.session_state.get("step7_date_end")
-    return tuple(d for d in (start, end) if d is not None)
+    if start is None:
+        return ()
+    if end is None or end == start:
+        return (start,)
+    if end < start:
+        return ()
+    return tuple(start + timedelta(days=offset) for offset in range((end - start).days + 1))
 
 
 def _current_preferences() -> tuple[str, ...]:
@@ -217,6 +235,10 @@ def _start_run(mode: UIExecutionMode, query: str) -> str:
         return "blank"
     if len(cleaned) > _MAX_QUERY_LENGTH:
         return "too_long"
+    start = st.session_state.get("step7_date_start")
+    end = st.session_state.get("step7_date_end")
+    if start is not None and end is not None and end < start:
+        return "invalid_dates"
     st.session_state[SS["last_query"]] = cleaned
     st.session_state[SS["demo_flag"]] = mode == UIExecutionMode.CACHED_DEMO
     run_id = ui.new_run_id()
@@ -270,6 +292,19 @@ def _render_hero() -> tuple[str, bool, bool]:
         ),
         unsafe_allow_html=True,
     )
+    st.caption("استعلامات جاهزة للعرض")
+    quick_columns = st.columns(3)
+    quick_queries = (HERO_QUERY, *_BACKUP_QUERIES)
+    quick_labels = ("الاستعلام الرئيسي", "احتياطي: اليونسكو", "احتياطي: الطريف")
+    for index, (column, label, quick_query) in enumerate(
+        zip(quick_columns, quick_labels, quick_queries)
+    ):
+        column.button(
+            label,
+            key=f"step7_quick_{index}",
+            use_container_width=True,
+            on_click=lambda value=quick_query: st.session_state.update(step7_query=value),
+        )
     query = st.text_area(
         "صف رحلتك",
         placeholder=(
@@ -332,7 +367,10 @@ def _render_mode_and_metrics(result: UIRunResult) -> None:
 
 def _render_answer(result: UIRunResult) -> None:
     st.subheader("الإجابة")
-    st.markdown(ui.answer_with_source_links(result.final_answer, result.sources))
+    # Citations and sources are produced by the application service.  The UI
+    # renders the verified answer verbatim and never derives citation records
+    # by parsing its text.
+    st.markdown(result.final_answer)
     if result.sources:
         st.subheader("المصادر")
         cards = "".join(ui.source_card_html(source) for source in result.sources)
@@ -386,14 +424,25 @@ def _render_calendar_after_dates(result: UIRunResult) -> None:
     ready = start is not None and end is not None
     if st.button("إنشاء التقويم", disabled=not ready, key="step7_btn_cal"):
         service = st.session_state[SS["service"]]
-        view = service.create_calendar_after_dates(
-            CalendarAfterDateRequest(
-                run_id=result.run_id,
-                dates=(start, end),
-                preview=False,
-            )
-        )
-        st.session_state[SS["cal_view"]] = view
+        dates = tuple(
+            start + timedelta(days=offset)
+            for offset in range((end - start).days + 1)
+        ) if end >= start else ()
+        if not dates:
+            st.warning("يجب أن يكون تاريخ النهاية مساويًا لتاريخ البداية أو بعده.")
+        else:
+            try:
+                view = service.create_calendar_after_dates(
+                    CalendarAfterDateRequest(
+                        run_id=result.run_id,
+                        dates=dates,
+                        preview=False,
+                    )
+                )
+            except ApplicationServiceError as exc:
+                st.warning(exc.safe_message)
+            else:
+                st.session_state[SS["cal_view"]] = view
     view = st.session_state.get(SS["cal_view"])
     if view is not None:
         if view.creation_status == "created" and view.download_bytes:
@@ -434,9 +483,9 @@ def _render_failure_backup(result: UIRunResult) -> None:
             "عرض بالوضع التجريبي",
             key="step7_btn_demo_fallback",
             use_container_width=True,
-            disabled=not last_query,
+            disabled=False,
         ):
-            st.session_state[SS["intent"]] = (UIExecutionMode.CACHED_DEMO, last_query)
+            st.session_state[SS["intent"]] = (UIExecutionMode.CACHED_DEMO, HERO_QUERY)
             st.rerun()
 
 
@@ -493,7 +542,7 @@ def main() -> None:
             st.session_state[SS["intent"]] = (UIExecutionMode.LIVE, query)
             st.rerun()
         elif demo_clicked:
-            st.session_state[SS["intent"]] = (UIExecutionMode.CACHED_DEMO, query)
+            st.session_state[SS["intent"]] = (UIExecutionMode.CACHED_DEMO, HERO_QUERY)
             st.rerun()
     else:
         st.session_state[SS["intent"]] = None
@@ -505,6 +554,8 @@ def main() -> None:
             st.warning(
                 f"وصف الرحلة طويل جدًا (الحد الأقصى {_MAX_QUERY_LENGTH} حرفًا)."
             )
+        elif outcome == "invalid_dates":
+            st.warning("يجب أن يكون تاريخ النهاية مساويًا لتاريخ البداية أو بعده.")
         else:
             _execute_request()
 

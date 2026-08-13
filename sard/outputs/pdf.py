@@ -230,7 +230,10 @@ class _FooterCanvas(Canvas):
         # ReportLab otherwise salts the trailer ID with process randomness.
         # The itinerary's supplied ``generated_at`` remains the visible
         # generation timestamp in the document body.
-        kwargs.setdefault("invariant", 1)
+        # ``BaseDocTemplate`` supplies ``invariant=None`` explicitly, so
+        # ``setdefault`` would leave ReportLab's wall-clock CreationDate and
+        # ModDate enabled.  Force invariant output for identical typed input.
+        kwargs["invariant"] = 1
         super().__init__(*args, **kwargs)
         self.arabic_font = arabic_font
         self.latin_font = latin_font

@@ -327,14 +327,94 @@ deployment and reproducibility costs without solving a demonstrated gap.
 
 ## Streamlit application
 
+Step 7 provides the investor-ready Arabic-first interface. The presentation
+layer calls only the session-scoped `SardApplicationService`; it does not import
+LangGraph, Zvec, NVIDIA integrations, configuration factories, or Step 6
+renderers. The service owns graph execution, sanitized event adaptation,
+verified sources, mode attribution, artifact bytes, idempotency, and retained
+calendar snapshots.
+
+Install the live NVIDIA and test dependencies, prepare `.env`, and ingest the
+corpus before a live run:
+
+```powershell
+uv sync --extra nvidia --extra dev
+Copy-Item .env.example .env
+uv run python -m sard.cli.rag ingest data/corpus
+uv run streamlit run sard/ui/app.py
+```
+
+For the deterministic offline investor demo, no NVIDIA key, network access, or
+Zvec collection is required. Start the same app and choose **عرض تجريبي (بيانات
+ثابتة)**; the control always loads the supported hero fixture and is visibly
+labeled as simulated cached data:
+
 ```bash
 uv run streamlit run sard/ui/app.py
 ```
 
-The UI preserves the existing Step 2 chat experience. Its RAG toggle calls
-only `RAGService`; it does not call Zvec or NVIDIA integrations directly. If a
-collection is unavailable, the UI reports the condition and retains the
-existing direct-chat fallback.
+The supported hero query is:
+
+```text
+أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية
+```
+
+Two backup queries are available as one-click controls. Optional dates and
+preferences are included once in the structured application request. The UI
+shows the six graph stages, verified Arabic answer, source cards, actual model
+route metadata, and PDF/calendar/raw-text download state. A retry is explicit
+and receives a new run ID; Streamlit rerenders cannot execute the same run ID
+twice in one session.
+
+### Operational modes and fallbacks
+
+The mode badge uses this precedence: `cached_demo`, `unavailable`,
+`model_fallback`, `degraded_retrieval`, then `live`. Retrieval detail preserves
+`hybrid_reranked`, `hybrid_fused`, `dense_only`, `full_text_only`, or
+`unavailable`. Cached demo never falls through to live dependencies, and a live
+failure switches to demo only when the user presses the manual demo control.
+Resolved model names are taken from the route that actually succeeded; prompts,
+reasoning, provider payloads, headers, credentials, raw exceptions, and evidence
+content never cross the UI boundary.
+
+When the initial result lacks dates, PDF and raw text can still be downloaded
+while calendar is reported as skipped. Supplying dates afterward calls the
+existing verified calendar renderer on the retained itinerary; it does not
+rerun retrieval, generation, or verification. Identical date requests reuse an
+in-session result, while different dates publish to deterministic, no-overwrite
+calendar sub-run directories.
+
+### Step 7 safety and testing
+
+- Production retrieval is opened through `RAGService.open_readonly()` only.
+- Sources are projected from verified `CitationSource` records. The UI never
+  constructs source or citation records from answer text.
+- External links allow only HTTP(S), reject credentials, and escape HTML.
+- Created artifact bytes are read only after their resolved path is proven to
+  remain under the configured output root; filesystem paths are not exposed.
+- Each Streamlit session owns its service, completed snapshots, progress,
+  current request, retry/demo state, dates, and artifacts.
+
+Run the complete offline suite:
+
+```powershell
+uv sync --extra anthropic --extra openai --extra nvidia --extra dev
+uv run pytest -q
+```
+
+Run only Step 7 coverage during development:
+
+```powershell
+uv run pytest -q tests/application tests/ui
+```
+
+Known limitations: the cached demo intentionally supports only the exact hero
+query and uses clearly fictional `example.org` source URLs; it is not evidence
+of live NVIDIA or corpus health. Live results depend on configured NVIDIA NIM
+model availability and a compatible ingested Zvec collection. The pilot corpus
+and evaluation-label limitations described below still apply. Streamlit runs
+the graph synchronously in the session thread, so a long provider timeout can
+delay visual updates until the next yielded graph state.
 
 ## Step 5 LangGraph orchestration
 
