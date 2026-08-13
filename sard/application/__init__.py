@@ -15,10 +15,19 @@ from sard.application.contracts import (
     UIStage,
 )
 from sard.application.service import ApplicationServiceError, SardApplicationService
+from sard.application.demo import (
+    DemoQueryUnavailable,
+    HERO_QUERY,
+    build_demo_result,
+    is_hero_query,
+    make_demo_run_id,
+)
 
 __all__ = [
     "ApplicationServiceError",
     "CalendarAfterDateRequest",
+    "DemoQueryUnavailable",
+    "HERO_QUERY",
     "SardApplicationService",
     "UIArtifactView",
     "UIExecutionMode",
@@ -31,4 +40,7 @@ __all__ = [
     "UIRunResult",
     "UISourceView",
     "UIStage",
+    "build_demo_result",
+    "is_hero_query",
+    "make_demo_run_id",
 ]
