@@ -195,6 +195,8 @@ def test_artifact_status_label_covers_all_contract_statuses(value: str) -> None:
         "https://example.org:8080/path",
         "HTTPS://EXAMPLE.ORG/x",
         "https://sub.domain.example.co/travel/riyadh",
+        "https://example.org/saudi-arabia-cultural-heritage-guide?lang=ar",
+        "https://example.org/articles/understanding_saudi_heritage_sites",
     ],
 )
 def test_is_safe_external_url_accepts_http_https(url: str) -> None:
@@ -219,10 +221,14 @@ def test_is_safe_external_url_accepts_http_https(url: str) -> None:
         "https://example.org\n",  # control char
         "https://example.org:99999/",  # invalid port
         "https://example.org/private/token/abc",
+        "https://example.org/private/nvapi-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/document",
+        "https://example.org/private/bearer-abc123/document",
         "https://example.org/path?sig=abc",
         "https://example.org/path?X-Amz-Signature=abc",
+        "https://example.org/path?SharedAccessSignature=abc",
         "https://example.org/path#authorization-secret",
-        "https://example.org/path/abcdefghijklmnopqrstuvwx",
+        "https://example.org/path/aB9xQ2mN7pL4vR8sT1uW5yZ0cD3fG6hJ",
+        "https://example.org/path/qazwsxedcrfvtgbyhnujmikolpabcdefgh",
         "x" * 2049,  # over length bound
         "",
         None,

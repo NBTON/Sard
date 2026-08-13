@@ -35,7 +35,8 @@ import re
 import secrets
 from datetime import date as date_type
 from typing import TYPE_CHECKING, Optional
-from urllib.parse import parse_qsl, unquote, urlsplit
+
+from sard.url_policy import is_safe_external_url as _shared_is_safe_external_url
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
     from sard.application.contracts import (
@@ -266,65 +267,10 @@ def new_run_id(prefix: str = "step7") -> str:
 # Safe URL allowlisting
 # ---------------------------------------------------------------------------
 
-_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
-_MAX_URL_LENGTH = 2048
-
-_WHITESPACE_RE = re.compile(r"[\x00-\x20]")
-_SECRET_QUERY_KEY_RE = re.compile(
-    r"(?i)(api[_-]?key|authorization|credential|password|secret|token|"
-    r"sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|"
-    r"x-ms-signature|sharedaccesssignature|sas)"
-)
-_TOKEN_LIKE_RE = re.compile(r"(?i)(?:nvapi[-_])?[A-Za-z0-9_-]{24,}")
-_SECRET_COMPONENT_RE = re.compile(
-    r"(?i)(api[_-]?key|authorization|bearer|credential|password|secret|token|signature|sas)"
-)
-
-
 def is_safe_external_url(url: object) -> bool:
-    """Return True only for bounded http(s) URLs without credentials.
+    """Return whether a URL passes the shared application/UI source policy."""
 
-    Rejects non-string values, non-http(s) schemes, credential-bearing URLs,
-    empty hosts, control/whitespace characters, invalid ports and URLs longer
-    than ``_MAX_URL_LENGTH`` characters.
-    """
-    if not isinstance(url, str):
-        return False
-    if not url or len(url) > _MAX_URL_LENGTH:
-        return False
-    if _WHITESPACE_RE.search(url):
-        return False
-    value = url.strip()
-    if not value:
-        return False
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port  # raises ValueError for invalid ports
-    except ValueError:
-        return False
-    if parsed.scheme.lower() not in _ALLOWED_URL_SCHEMES:
-        return False
-    if not parsed.hostname:
-        return False
-    if parsed.username is not None or parsed.password is not None:
-        return False
-    decoded_path = unquote(parsed.path)
-    decoded_fragment = unquote(parsed.fragment)
-    if (
-        _SECRET_COMPONENT_RE.search(decoded_path)
-        or _TOKEN_LIKE_RE.search(decoded_path)
-        or _SECRET_COMPONENT_RE.search(decoded_fragment)
-        or _TOKEN_LIKE_RE.search(decoded_fragment)
-    ):
-        return False
-    for key, item in parse_qsl(parsed.query, keep_blank_values=True):
-        if (
-            _SECRET_QUERY_KEY_RE.fullmatch(key.strip())
-            or _SECRET_COMPONENT_RE.search(key)
-            or _TOKEN_LIKE_RE.search(unquote(item))
-        ):
-            return False
-    return True
+    return _shared_is_safe_external_url(url)
 
 
 def _markdown_url(url: str) -> str:

@@ -84,10 +84,15 @@ def test_concurrent_live_and_demo_pdfs_share_root_lock_and_restore_environment(
 def test_source_projection_fails_closed_for_signed_and_token_urls(tmp_path):
     malicious = (
         "https://example.org/private/nvapi-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/document?view=1",
+        "https://example.org/private/bearer-abc123/document",
+        "https://example.org/private/token-abc123/document",
         "https://example.org/doc?sig=abcdef",
         "https://example.org/doc?X-Amz-Signature=abcdef",
+        "https://example.org/doc?sv=1&SharedAccessSignature=abcdef",
         "https://user:password@example.org/doc",
         "https://example.org/doc#token-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "https://example.org/doc/aB9xQ2mN7pL4vR8sT1uW5yZ0cD3fG6hJ",
+        "https://example.org/doc/qazwsxedcrfvtgbyhnujmikolpabcdefgh",
     )
     for index, url in enumerate(malicious):
         root = tmp_path / str(index)
@@ -104,21 +109,28 @@ def test_source_projection_fails_closed_for_signed_and_token_urls(tmp_path):
         result = service.run(UIRunRequest("خطة", f"unsafe-url-{index}"))
         assert result.sources[0].url == ""
 
-    safe_root = tmp_path / "safe"
-    updates = _final_updates(safe_root)
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.org/guide?lang=ar&view=1#section",
+        "https://example.org/saudi-arabia-cultural-heritage-guide?lang=ar",
+        "https://example.org/articles/understanding_saudi_heritage_sites",
+    ],
+)
+def test_source_projection_preserves_safe_ordinary_and_long_slug_urls(tmp_path, url):
+    updates = _final_updates(tmp_path)
     itinerary = updates["itinerary"]
-    safe_source = replace(
-        itinerary.sources[0], url="https://example.org/guide?lang=ar&view=1#section"
-    )
+    safe_source = replace(itinerary.sources[0], url=url)
     itinerary = replace(itinerary, sources=(safe_source, *itinerary.sources[1:]))
     updates["sources"] = list(itinerary.sources)
     updates["itinerary"] = itinerary
     service = SardApplicationService(
-        GraphDependencies(output_root=str(safe_root)),
+        GraphDependencies(output_root=str(tmp_path)),
         graph_builder=GraphBuilder(FakeGraph(updates)),
     )
     result = service.run(UIRunRequest("خطة", "safe-url"))
-    assert result.sources[0].url == safe_source.url
+    assert result.sources[0].url == url
 
 
 @pytest.mark.parametrize(
