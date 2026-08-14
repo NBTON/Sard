@@ -37,6 +37,18 @@ from sard.rag.schemas import RewrittenQuery
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+# Conservative Arabic-only lexical expansions used when the rewrite model is
+# unavailable.  They are phrasing equivalents, not added facts.  Keeping them
+# here also gives the offline rehearsal the same query surface as production.
+_DETERMINISTIC_EQUIVALENTS = (
+    ("الينابيع الحارة", "العيون الحارة"),
+    ("الينابيع", "العيون المائية"),
+    ("تجفيف الروبيان", "الروبيان المجفف"),
+    ("حفظ الروبيان", "تخزين الروبيان"),
+    ("السياح", "الزوار"),
+    ("قديمًا", "تقليديًا"),
+)
+
 _SYSTEM_PROMPT = (
     "أنت أداة إعادة صياغة استعلامات بحث عربية لنظام استرجاع معلومات (RAG). "
     "لا تُجب عن السؤال، ولا تضف معلومات غير موجودة فيه، ولا تترجمه إلى لغة "
@@ -53,6 +65,26 @@ _SYSTEM_PROMPT = (
 class _RewriteCacheKey:
     normalized_query: str
     model_version: str
+
+
+def deterministic_query_variants(question: str) -> list[str]:
+    """Return bounded Arabic lexical variants without translating or adding facts."""
+
+    normalized = normalize_arabic(question)
+    if not normalized:
+        return [question] if question else []
+    variants = [normalized]
+    for left, right in _DETERMINISTIC_EQUIVALENTS:
+        left_normalized = normalize_arabic(left)
+        right_normalized = normalize_arabic(right)
+        if left_normalized in normalized:
+            variants.append(normalized.replace(left_normalized, right_normalized))
+        if right_normalized in normalized:
+            variants.append(normalized.replace(right_normalized, left_normalized))
+    original = question.strip()
+    if original and original not in variants:
+        variants.append(original)
+    return list(dict.fromkeys(value for value in variants if value))[:4]
 
 
 class QueryRewriteService:
@@ -81,13 +113,11 @@ class QueryRewriteService:
 
     def _deterministic_fallback(self, question: str) -> RewrittenQuery:
         normalized = normalize_arabic(question)
-        variants = [normalized]
-        if normalized != question.strip():
-            variants.append(question.strip())
+        variants = deterministic_query_variants(question)
         return RewrittenQuery(
             original_question=question,
             normalized_question=normalized,
-            search_variants=variants[:4] or [question],
+            search_variants=variants or [question],
             entities=[],
             topic_filter=None,
             exact_phrases=[],

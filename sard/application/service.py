@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import queue
 import re
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Generator, Iterator, Optional
@@ -44,6 +46,25 @@ _DEGRADED_RETRIEVAL_MODES = frozenset({"hybrid_fused", "dense_only", "full_text_
 _ARTIFACT_STATUSES = frozenset({"created", "skipped", "failed"})
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 _SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$")
+_HERO_QUERY = "أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if math.isfinite(parsed) and parsed > 0 else default
 
 
 class ApplicationServiceError(RuntimeError):
@@ -78,6 +99,8 @@ class SardApplicationService:
         *,
         graph_builder: Callable[[GraphDependencies], object] = build_graph,
         cached_demo_provider: Optional[Callable[[UIRunRequest], UIRunResult]] = None,
+        auto_demo_fallback: Optional[bool] = None,
+        fallback_timeout_seconds: Optional[float] = None,
     ) -> None:
         # Resolve live dependencies only when a live run actually starts.  An
         # explicitly cached-demo request must not open RAG or initialize model
@@ -94,6 +117,17 @@ class SardApplicationService:
         )
         self._graph_builder = graph_builder
         self._cached_demo_provider = cached_demo_provider
+        self._auto_demo_fallback = (
+            _env_bool("SARD_AUTO_DEMO_FALLBACK", True)
+            if auto_demo_fallback is None
+            else bool(auto_demo_fallback)
+        )
+        configured_timeout = (
+            _env_float("SARD_DEMO_FALLBACK_TIMEOUT_SECONDS", 45.0)
+            if fallback_timeout_seconds is None
+            else float(fallback_timeout_seconds)
+        )
+        self._fallback_timeout_seconds = max(0.05, configured_timeout)
         self._lock = threading.RLock()
         self._calendar_generation_lock = threading.Lock()
         self._started_run_ids: set[str] = set()
@@ -134,6 +168,8 @@ class SardApplicationService:
                 for event in result.progress_events:
                     progress.append(event)
                     yield event
+            elif self._should_auto_fallback(request):
+                result, progress = yield from self._stream_live_with_auto_fallback(request)
             else:
                 result, progress = yield from self._stream_live(request)
             snapshot = self._snapshot(result)
@@ -320,6 +356,99 @@ class SardApplicationService:
             result = self._failed_result(request, progress)
         return result, progress
 
+    def _should_auto_fallback(self, request: UIRunRequest) -> bool:
+        return (
+            self._auto_demo_fallback
+            and self._cached_demo_provider is not None
+            and " ".join(request.query.split()) == _HERO_QUERY
+        )
+
+    def _stream_live_with_auto_fallback(
+        self, request: UIRunRequest
+    ) -> Generator[UIProgressEvent, None, tuple[UIRunResult, list[UIProgressEvent]]]:
+        """Prefer live execution, then safely hand the exact hero query to cache.
+
+        The live worker is daemonized because Python cannot cancel an in-flight
+        provider request safely.  Its output is ignored after the deadline; the
+        provider-level timeout remains the primary cancellation boundary.
+        """
+
+        messages: queue.Queue[tuple[str, object]] = queue.Queue()
+
+        def consume_live() -> None:
+            generator = self._stream_live(request)
+            try:
+                while True:
+                    messages.put(("event", next(generator)))
+            except StopIteration as stopped:
+                messages.put(("terminal", stopped.value))
+            except Exception:
+                messages.put(("error", None))
+
+        threading.Thread(
+            target=consume_live,
+            name=f"sard-live-{request.run_id[:32]}",
+            daemon=True,
+        ).start()
+        deadline = time.monotonic() + self._fallback_timeout_seconds
+        progress: list[UIProgressEvent] = []
+        fallback_reason = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fallback_reason = (
+                    "انتهت مهلة التشغيل المباشر؛ عُرضت النسخة الاحتياطية المحفوظة مسبقًا، "
+                    "ولم يُقدَّم محتواها على أنه مولّد الآن."
+                )
+                break
+            try:
+                kind, payload = messages.get(timeout=remaining)
+            except queue.Empty:
+                fallback_reason = (
+                    "انتهت مهلة التشغيل المباشر؛ عُرضت النسخة الاحتياطية المحفوظة مسبقًا، "
+                    "ولم يُقدَّم محتواها على أنه مولّد الآن."
+                )
+                break
+            if kind == "event" and isinstance(payload, UIProgressEvent):
+                progress.append(payload)
+                yield payload
+                continue
+            if kind == "terminal" and isinstance(payload, tuple) and len(payload) == 2:
+                live_result, live_progress = payload
+                if isinstance(live_result, UIRunResult) and live_result.graph_outcome != "failed":
+                    return live_result, list(live_progress)
+                fallback_reason = (
+                    "تعذّر إكمال خدمة خارجية في التشغيل المباشر؛ عُرضت النسخة الاحتياطية "
+                    "المحفوظة مسبقًا، ولم يُقدَّم محتواها على أنه مولّد الآن."
+                )
+                break
+            fallback_reason = (
+                "تعذّر تشغيل المسار المباشر؛ عُرضت النسخة الاحتياطية المحفوظة مسبقًا، "
+                "ولم يُقدَّم محتواها على أنه مولّد الآن."
+            )
+            break
+
+        cached_request = replace(
+            request,
+            execution_mode=UIExecutionMode.CACHED_DEMO,
+            trip_dates=(),
+            preferences=(),
+        )
+        cached = self._run_cached_demo(cached_request)
+        rebased_events = tuple(
+            replace(event, sequence=len(progress) + index)
+            for index, event in enumerate(cached.progress_events, start=1)
+        )
+        for event in rebased_events:
+            progress.append(event)
+            yield event
+        result = replace(
+            cached,
+            progress_events=tuple(progress),
+            warnings=tuple(dict.fromkeys((fallback_reason, *cached.warnings))),
+        )
+        return result, progress
+
     def _run_cached_demo(self, request: UIRunRequest) -> UIRunResult:
         if self._cached_demo_provider is None:
             return self._failed_result(request, [], cached_demo=True)
@@ -383,7 +512,8 @@ class SardApplicationService:
             coverage_ratio=coverage_ratio,
             warnings=warnings,
             error_message=(
-                "تعذّر إكمال الطلب بأمان. يرجى المحاولة مجددًا بمعرّف تشغيل جديد."
+                "لم يكتمل مسار التخطيط بسبب عدم توفر نموذج أو دليل صالح. "
+                "استخدم زر إعادة المحاولة؛ وللاستعلام الرئيسي يمكنك تشغيل النسخة الاحتياطية المحفوظة."
                 if outcome == "failed"
                 else ""
             ),
@@ -400,6 +530,16 @@ class SardApplicationService:
             UIExecutionMode.CACHED_DEMO if cached_demo else request.execution_mode
         )
         kind = UIModeKind.CACHED_DEMO if cached_demo else UIModeKind.UNAVAILABLE
+        warning = (
+            "تعذر التحقق من حزمة النسخة الاحتياطية أو قراءة ملفاتها. شغّل أمر الفحص الذاتي قبل العرض."
+            if cached_demo
+            else "تعذر الوصول إلى خدمة خارجية أو تهيئة مسار التشغيل المباشر."
+        )
+        message = (
+            "النسخة الاحتياطية غير متاحة بأمان. شغّل: uv run sard-demo check"
+            if cached_demo
+            else "لم يكتمل التشغيل المباشر. أعد المحاولة؛ وللاستعلام الرئيسي استخدم النسخة الاحتياطية المحفوظة."
+        )
         return UIRunResult(
             run_id=request.run_id,
             final_answer="",
@@ -414,8 +554,8 @@ class SardApplicationService:
             itinerary=None,
             artifacts=(),
             progress_events=tuple(progress),
-            warnings=("تعذر إكمال التشغيل ضمن الوضع المحدد.",),
-            error_message="تعذّر إكمال الطلب بأمان. يرجى المحاولة مجددًا بمعرّف تشغيل جديد.",
+            warnings=(warning,),
+            error_message=message,
         )
 
     def _artifact_view(self, artifact: object) -> Optional[UIArtifactView]:
@@ -486,9 +626,8 @@ def _source_view(source: object) -> Optional[UISourceView]:
         section=(sanitize_ui_text(source.section, limit=240) if source.section else None),
         publication_date=source.publication_date,
         metadata_complete=(
-            source.page is not None
-            and source.section is not None
-            and source.publication_date is not None
+            source.section is not None
+            and (source.page is not None or source.publication_date is not None)
         ),
         citation_verified=True,
     )

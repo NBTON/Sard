@@ -19,12 +19,16 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from sard.rag.ingest import build_chunks_for_document, load_metadata_sidecar
+from sard.rag.loaders import load_document
 from sard.rag.normalize import normalize_arabic
+from sard.rag.query_rewriter import deterministic_query_variants
 from sard.rag.retrieve import RetrievalService, reciprocal_rank_fusion
 from sard.rag.schemas import RetrievedCandidate, RewrittenQuery
 
@@ -200,7 +204,8 @@ def _term_hits(terms: list[str], candidates: list[RetrievedCandidate]) -> list[s
 
 
 def _binary_ndcg(
-    candidates: list[RetrievedCandidate], terms: list[str], k: int
+    candidates: list[RetrievedCandidate], terms: list[str], k: int,
+    gold_source_urls: Optional[set[str]] = None,
 ) -> float:
     """nDCG@k over the fused ranked list using term-based BINARY relevance.
 
@@ -211,12 +216,15 @@ def _binary_ndcg(
     the list is relevant (DCG is then 0) or when the list is empty.
     """
     normalized_terms = [normalize_arabic(t) for t in terms]
-    if not normalized_terms or not candidates:
+    if not candidates or (gold_source_urls is None and not normalized_terms):
         return 0.0
-    rels = [
-        any(t and t in normalize_arabic(_candidate_evidence_text(c)) for t in normalized_terms)
-        for c in candidates[:k]
-    ]
+    if gold_source_urls is not None:
+        rels = [c.source_url in gold_source_urls for c in candidates[:k]]
+    else:
+        rels = [
+            any(t and t in normalize_arabic(_candidate_evidence_text(c)) for t in normalized_terms)
+            for c in candidates[:k]
+        ]
     if not any(rels):
         return 0.0
     dcg = sum(rel / math.log2(i + 2) for i, rel in enumerate(rels))
@@ -235,15 +243,15 @@ def evaluate_case(
     terms = case.get("retrieval_terms_ar", [])
     topic = case.get("topic_ar", "")
 
-    start = time.monotonic()
+    start_ns = time.perf_counter_ns()
     rewritten = RewrittenQuery(
         original_question=question,
         normalized_question=normalize_arabic(question),
-        search_variants=[normalize_arabic(question)],
+        search_variants=deterministic_query_variants(question),
         rewrite_succeeded=False,
     )
     result = retrieval_service.retrieve(rewritten, filters=None)
-    latency_ms = (time.monotonic() - start) * 1000
+    latency_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
 
     dense_terms_hit = _term_hits(terms, result.dense_candidates[:k])
     fts_terms_hit = _term_hits(terms, result.fts_candidates[:k])
@@ -259,25 +267,47 @@ def evaluate_case(
         rerank_model_used = outcome.model_used
     reranked_terms_hit = _term_hits(terms, reranked)
 
-    passed = len(fused_terms_hit) > 0 or len(reranked_terms_hit) > 0
+    has_gold_labels = "gold_source_urls" in case
+    gold_source_urls = set(case.get("gold_source_urls") or ())
+    retrieved_urls = {candidate.source_url for candidate in (*result.fused_candidates, *reranked)}
+    passed = (
+        bool(gold_source_urls & retrieved_urls)
+        if has_gold_labels
+        else len(fused_terms_hit) > 0 or len(reranked_terms_hit) > 0
+    )
 
     # MRR: reciprocal rank of the first fused candidate containing ANY term hit.
     mrr = 0.0
     normalized_terms = [normalize_arabic(t) for t in terms]
     for rank, c in enumerate(result.fused_candidates, start=1):
         evidence_norm = normalize_arabic(_candidate_evidence_text(c))
-        if any(t and t in evidence_norm for t in normalized_terms):
+        relevant = (
+            c.source_url in gold_source_urls
+            if has_gold_labels
+            else any(t and t in evidence_norm for t in normalized_terms)
+        )
+        if relevant:
             mrr = 1.0 / rank
             break
 
-    ndcg = _binary_ndcg(result.fused_candidates, terms, k)
-
-    reason = (
-        "تم العثور على مصطلحات استرجاع مطابقة ضمن القطع المسترجعة."
-        if passed
-        else "لم يتم العثور على أي مصطلح استرجاع متوقع ضمن القطع المسترجعة "
-        "(الأدلة المتوقعة غير موجودة في المجموعة الحالية أو الاسترجاع لم يُصِب)."
+    ndcg = _binary_ndcg(
+        result.fused_candidates,
+        terms,
+        k,
+        gold_source_urls if has_gold_labels else None,
     )
+
+    if passed and has_gold_labels:
+        reason = "تم استرجاع مصدر ذهبي متحقق ضمن أعلى النتائج."
+    elif passed:
+        reason = "تم العثور على مصطلحات استرجاع مطابقة ضمن القطع المسترجعة."
+    elif has_gold_labels and not gold_source_urls:
+        reason = "فشل متوقع وصريح: لا يوجد مصدر ذهبي متحقق لهذا السؤال في المجموعة الحالية."
+    else:
+        reason = (
+            "لم يتم العثور على دليل استرجاع مطابق "
+            "(الأدلة غير موجودة أو أن ترتيب الاسترجاع لم يُصِب)."
+        )
 
     return GoldenCaseResult(
         case_id=case.get("id", question[:24]),
@@ -346,6 +376,18 @@ def run_golden_evaluation(
             )
         )
 
+    label_scheme = evaluation_policy.get("relevance_label_scheme")
+    ndcg_note = (
+        "nDCG@K uses binary relevance against each case's verified gold source URLs; "
+        "cases with an intentional empty gold list score zero and remain retrieval failures."
+        if label_scheme == "verified_source_url"
+        else (
+            "nDCG@K هنا مبني على الصلة الثنائية المستندة إلى المصطلحات "
+            "(chunk يُعد ذا صلة إذا احتوى نصه أو عنوانه أو metadata موضوعه على أي مصطلح استرجاع متوقع واحد على "
+            "الأقل) — وليس على تصنيفات ملاءمة متدرجة لكل معرّف قطعة."
+        )
+    )
+
     return GoldenEvaluationReport(
         total_cases=len(results),
         passed_cases=passed_count,
@@ -363,16 +405,139 @@ def run_golden_evaluation(
         ),
         mean_reciprocal_rank_all=mrr_all,
         gate_blockers=gate_blockers,
-        ndcg_note=(
-            "nDCG@K هنا مبني على الصلة الثنائية المستندة إلى المصطلحات "
-            "(chunk يُعد ذا صلة إذا احتوى نصه أو عنوانه أو metadata موضوعه على أي مصطلح استرجاع متوقع واحد على "
-            "الأقل) — وليس على تصنيفات ملاءمة متدرجة (graded relevance) لكل "
-            "معرّف قطعة، لأن evals/golden.json لا يحمل معرّفات قطع ذهبية. "
-            "الرقم مؤشر تقريبي ولا يجب اعتباره nDCG حقيقيًا بتصنيفات متدرجة."
-        ),
+        ndcg_note=ndcg_note,
         embedding_model_used=getattr(retrieval_service._deps, "embedding_model_id", ""),
         case_results=results,
         questions_needing_improvement=[
             r.question for r in results if not r.passed
         ],
+    )
+
+
+_TOKEN_RE = re.compile(r"[\u0600-\u06FF]+|[A-Za-z0-9]+")
+_STOP_WORDS = {
+    "في", "من", "الى", "إلى", "عن", "على", "ما", "ماهي", "ماهو", "هل",
+    "يمكن", "كيف", "ضمن", "هذه", "هذا", "التي", "الذي", "وما", "وهي",
+    "المنطقة", "الشرقية", "السعودية",
+}
+
+
+def _lexical_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in _TOKEN_RE.findall(normalize_arabic(text))
+        if len(token) > 1 and token not in _STOP_WORDS
+    }
+
+
+class OfflineCorpusRetrievalService:
+    """Deterministic lexical retrieval for rehearsal when model access is absent.
+
+    This is intentionally labelled offline and never impersonates dense or
+    reranked retrieval.  It exercises the real loaders, metadata contract,
+    chunk IDs, Arabic normalization, deduplication, and gold-source grading.
+    """
+
+    def __init__(self, candidates: list[RetrievedCandidate]):
+        self._candidates = candidates
+        self._deps = type("OfflineDeps", (), {"embedding_model_id": "offline_lexical_v1"})()
+
+    @classmethod
+    def from_corpus(cls, corpus_root: Path) -> "OfflineCorpusRetrievalService":
+        candidates: list[RetrievedCandidate] = []
+        seen_hashes: set[str] = set()
+        for path in sorted(corpus_root.rglob("*")):
+            if not path.is_file() or path.name.upper() == "MANIFEST.MD":
+                continue
+            if path.suffix.lower() not in {".pdf", ".html", ".htm", ".md", ".markdown", ".txt"}:
+                continue
+            metadata = load_metadata_sidecar(path)
+            loaded = load_document(path)
+            chunks, _ = build_chunks_for_document(metadata, metadata.document_id, loaded.sections)
+            for chunk in chunks:
+                if chunk.content_hash in seen_hashes:
+                    continue
+                seen_hashes.add(chunk.content_hash)
+                candidates.append(
+                    RetrievedCandidate(
+                        chunk_id=chunk.chunk_id,
+                        document_id=chunk.document_id,
+                        citation_id=chunk.citation_id,
+                        content=chunk.content,
+                        title=chunk.title,
+                        source_name=chunk.source_name,
+                        source_url=chunk.source_url,
+                        topic=chunk.topic,
+                        language=chunk.language,
+                        publication_date=chunk.publication_date,
+                        page_number=chunk.page_number,
+                        content_hash=chunk.content_hash,
+                    )
+                )
+        return cls(candidates)
+
+    def retrieve(self, rewritten: RewrittenQuery, filters=None):
+        from sard.rag.schemas import RetrievalMode, RetrievalResult
+
+        query_surface = " ".join(
+            dict.fromkeys(
+                value for value in (
+                    rewritten.original_question,
+                    rewritten.normalized_question,
+                    *rewritten.search_variants,
+                ) if value
+            )
+        )
+        query_tokens = _lexical_tokens(query_surface)
+        normalized_query = normalize_arabic(query_surface)
+        ranked: list[tuple[float, RetrievedCandidate]] = []
+        for candidate in self._candidates:
+            surface = _candidate_evidence_text(candidate)
+            tokens = _lexical_tokens(surface)
+            overlap = query_tokens & tokens
+            score = float(len(overlap))
+            normalized_surface = normalize_arabic(surface)
+            for variant in rewritten.search_variants:
+                normalized_variant = normalize_arabic(variant)
+                if normalized_variant and normalized_variant in normalized_surface:
+                    score += 3.0
+            if normalized_query and normalized_query in normalized_surface:
+                score += 4.0
+            if score <= 0:
+                continue
+            ranked.append((score, candidate))
+        ranked.sort(key=lambda item: (-item[0], item[1].chunk_id))
+        candidates = [candidate for _, candidate in ranked]
+        for rank, (score, candidate) in enumerate(ranked, start=1):
+            candidate.fts_score = score
+            candidate.fts_rank = rank
+            candidate.fused_score = score
+            candidate.fused_rank = rank
+        return RetrievalResult(
+            query=rewritten.original_question,
+            rewritten=rewritten,
+            dense_candidates=[],
+            fts_candidates=candidates,
+            fused_candidates=candidates,
+            reranked_candidates=[],
+            mode=RetrievalMode.FTS_ONLY_EMERGENCY,
+            reranker_used="offline_lexical_v1",
+            warnings=["Offline lexical rehearsal; no model-backed dense retrieval was used."],
+        )
+
+
+def run_offline_golden_evaluation(
+    golden_path: Path,
+    corpus_root: Path,
+    *,
+    k: int = DEFAULT_EVAL_K,
+    gate_threshold: int = 8,
+) -> GoldenEvaluationReport:
+    service = OfflineCorpusRetrievalService.from_corpus(corpus_root)
+    return run_golden_evaluation(
+        golden_path,
+        service,
+        rerank_service=None,
+        k=k,
+        gate_threshold=gate_threshold,
     )

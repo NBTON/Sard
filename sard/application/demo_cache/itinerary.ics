@@ -1,0 +1,82 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Sard//Arabic Itinerary Step 6//EN
+CALSCALE:GREGORIAN
+X-WR-CALNAME:برنامج يومين في المنطقة الشرقية (
+ نسخة احتياطية محفوظة)
+X-WR-TIMEZONE:Asia/Riyadh
+BEGIN:VTIMEZONE
+TZID:Asia/Riyadh
+COMMENT:This timezone only works from 1970-01-01 to 2038-01-01.
+BEGIN:STANDARD
+DTSTART:19700101T000000
+TZNAME:+03
+TZOFFSETFROM:+0300
+TZOFFSETTO:+0300
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+SUMMARY:جلسة تعريفية عن عيون الأحساء
+DTSTART;TZID=Asia/Riyadh:20261101T090000
+DTEND;TZID=Asia/Riyadh:20261101T110000
+DTSTAMP:20260813T100000Z
+UID:a39681d8-6a21-5a48-8a82-199055719b7d@sard.local
+DESCRIPTION:الأحساء\nتعرّف إلى شبكة العيون الط
+ بيعية التي اعتمدت عليها واحات الأحساء في
+  الري التقليدي [CIT-3AE406450E19].\nهذا وقت مقترح 
+ في النسخة المحفوظة، وليس موعد تشغيل منشو
+ رًا.\nالاستشهادات: [CIT-3AE406450E19]\nالمصادر: https
+ ://saudipedia.com/%D8%A7%D9%84%D8%B9%D9%8A%D9%88%D9%86-%D8%A7%D9%84%D9%85%
+ D8%A7%D8%A6%D9%8A%D8%A9-%D9%81%D9%8A-%D8%A7%D9%84%D8%A3%D8%AD%D8%B3%D8%A7%
+ D8%A1
+LOCATION:الأحساء
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:زيارة مائية مشروطة بالتحقق
+DTSTART;TZID=Asia/Riyadh:20261101T130000
+DTEND;TZID=Asia/Riyadh:20261101T150000
+DTSTAMP:20260813T100000Z
+UID:72817274-7cbb-5d10-88a8-2c507da5ce05@sard.local
+DESCRIPTION:الأحساء — يحدد الموقع بعد التحقق\n
+ تشير المصادر إلى تحويل بعض العيون إلى وج
+ هات واستثمارات سياحية، دون إثبات حالتها 
+ الحالية [CIT-3AE406450E19] [CIT-A6E7E5FB5C8B].\nلا تتوجه إ
+ لى موقع محدد قبل تأكيد الفتح والسلامة من 
+ جهة تشغيل رسمية.\nالاستشهادات: [CIT-3AE406450E19] 
+ [CIT-A6E7E5FB5C8B]\nالمصادر: https://saudipedia.com/%D8%A7%D9%84%D8
+ %B9%D9%8A%D9%88%D9%86-%D8%A7%D9%84%D9%85%D8%A7%D8%A6%D9%8A%D8%A9-%D9%81%D9
+ %8A-%D8%A7%D9%84%D8%A3%D8%AD%D8%B3%D8%A7%D8%A1\nhttps://www.aleqt.com/2013
+ /04/04/article_744655.html
+LOCATION:الأحساء — يحدد الموقع بعد التحقق
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:جلسة عن المطبخ الساحلي وحفظ الغذاء
+DTSTART;TZID=Asia/Riyadh:20261102T100000
+DTEND;TZID=Asia/Riyadh:20261102T120000
+DTSTAMP:20260813T100000Z
+UID:e1c0d8ba-2584-5e87-9cbc-f6816cf41a73@sard.local
+DESCRIPTION:القطيف\nاستعرض دور المنتجات البحر
+ ية والروبيان في المطبخ المحلي وسياق حفظ 
+ الغذاء تقليديًا [CIT-D69B54CB0B4C].\nالمكان والوق
+ ت مقترحان تنظيميًا؛ نسّق جلسة فعلية قبل 
+ السفر.\nالاستشهادات: [CIT-D69B54CB0B4C]\nالمصادر: h
+ ttps://saudiency.kapl.org.sa/Loader.aspx?BookID=60&PID=42&pageid=22
+LOCATION:القطيف
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:قصة حفظ الروبيان قديمًا
+DTSTART;TZID=Asia/Riyadh:20261102T153000
+DTEND;TZID=Asia/Riyadh:20261102T173000
+DTSTAMP:20260813T100000Z
+UID:5699727d-33d1-5605-9d3b-bd2895fff0b4@sard.local
+DESCRIPTION:القطيف — جلسة معرفية وليست عرضًا 
+ تجاريًا مؤكدًا\nتشرح المقابلة سلق فائض ا
+ لروبيان في ماء قليل الملح ثم تجفيفه وتخز
+ ينه للشتاء [CIT-32EF35918C4D].\nلا يوجد دليل متحقق
+  على عرض حي متاح للزوار؛ لا تقدمه كحجز مؤ
+ كد.\nالاستشهادات: [CIT-32EF35918C4D]\nالمصادر: https:/
+ /alqhat.com/q/176172
+LOCATION:القطيف — جلسة معرفية وليست عرضًا تج
+ اريًا مؤكدًا
+END:VEVENT
+END:VCALENDAR

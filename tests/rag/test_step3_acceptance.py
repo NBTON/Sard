@@ -136,4 +136,6 @@ def test_cli_and_golden_policy_are_explicit():
     commands = set(build_parser()._subparsers._group_actions[0].choices)
     assert {"create-collection", "resume-ingest", "hybrid-search", "evaluate", "doctor"} <= commands
     golden = json.loads(open("evals/golden.json", encoding="utf-8").read())
-    assert golden["evaluation_policy"]["gate_eligible"] is False
+    assert golden["evaluation_policy"]["gate_eligible"] is True
+    assert golden["evaluation_policy"]["relevance_label_scheme"] == "verified_source_url"
+    assert all("gold_source_urls" in case for case in golden["golden_cases"])

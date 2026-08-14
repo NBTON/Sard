@@ -163,15 +163,16 @@ def test_sources_stable_citations_and_metadata(tmp_path):
     result = demo.build_demo_result(_request(), output_root=tmp_path)
     assert len(result.sources) == 4
     assert [source.citation_id for source in result.sources] == [
-        "CIT-DEMO-EAST-01",
-        "CIT-DEMO-EAST-02",
-        "CIT-DEMO-EAST-03",
-        "CIT-DEMO-EAST-04",
+        "CIT-3AE406450E19",
+        "CIT-A6E7E5FB5C8B",
+        "CIT-D69B54CB0B4C",
+        "CIT-32EF35918C4D",
     ]
-    assert all(source.metadata_complete for source in result.sources)
+    assert sum(source.metadata_complete for source in result.sources) == 3
     assert all(source.citation_verified for source in result.sources)
     assert all(source.title.strip() for source in result.sources)
-    assert all(source.url.startswith("https://example.org/offline-demo/") for source in result.sources)
+    assert all(source.url.startswith("https://") for source in result.sources)
+    assert all("example.org" not in source.url for source in result.sources)
 
 
 def test_itinerary_verified_with_default_dates(tmp_path):
@@ -216,7 +217,7 @@ def test_raw_text_contains_verified_answer(tmp_path):
     raw = next(artifact for artifact in result.artifacts if artifact.artifact_type == "raw_text")
     text = raw.download_bytes.decode("utf-8")
     assert "المنطقة الشرقية" in text
-    assert "[CIT-DEMO-EAST-01]" in text
+    assert "[CIT-3AE406450E19]" in text
     assert "حالة التحقق: verified" in text
     assert DEMO_WARNING in text
 

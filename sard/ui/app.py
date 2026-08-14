@@ -296,7 +296,7 @@ def _render_hero() -> tuple[str, bool, bool]:
         )
     with col_demo:
         demo_clicked = st.button(
-            "عرض تجريبي (بيانات ثابتة)",
+            "تشغيل النسخة الاحتياطية يدويًا",
             key="step7_btn_demo",
             use_container_width=True,
         )
@@ -322,7 +322,7 @@ def _render_mode_and_metrics(result: UIRunResult) -> None:
     st.markdown(ui.mode_banner_html(result.mode, demo=demo), unsafe_allow_html=True)
     if demo:
         st.caption(
-            "هذا عرض تجريبي ببيانات ثابتة: لا استدعاء مباشر للمصادر أو النماذج."
+            "هذه نسخة احتياطية محفوظة مسبقًا: لم يُنشأ المحتوى عند عرضه، ولا توجد استدعاءات مباشرة للمصادر أو النماذج."
         )
     col_a, col_b = st.columns(2)
     with col_a:
@@ -432,8 +432,8 @@ def _render_failure_backup(result: UIRunResult) -> None:
     st.error(result.error_message or ui.graph_outcome_label(result.graph_outcome))
     last_query = st.session_state.get(SS["last_query"]) or ""
     st.caption(
-        "يمكنك إعادة المحاولة مباشرة بنفس الطلب، أو عرض النموذج التجريبي "
-        "ببيانات ثابتة (يدويًا فقط — لا تحويل تلقائي)."
+        "يمكنك إعادة المحاولة مباشرة بنفس الطلب، أو تشغيل النسخة الاحتياطية "
+        "المحفوظة مسبقًا يدويًا. الاستعلام الرئيسي يتحول إليها تلقائيًا عند انتهاء المهلة أو فشل خدمة خارجية."
     )
     col_a, col_b = st.columns(2)
     with col_a:
@@ -448,7 +448,7 @@ def _render_failure_backup(result: UIRunResult) -> None:
             st.rerun()
     with col_b:
         if st.button(
-            "عرض بالوضع التجريبي",
+            "تشغيل النسخة الاحتياطية",
             key="step7_btn_demo_fallback",
             use_container_width=True,
             disabled=False,
@@ -486,7 +486,7 @@ def _render_sidebar() -> None:
         if result is not None:
             st.write(ui.mode_status_line(result.mode))
         if bool(st.session_state.get(SS["demo_flag"], False)):
-            st.warning("عرض تجريبي ببيانات ثابتة.")
+            st.warning("نسخة احتياطية محفوظة مسبقًا — ليست نتيجة مولّدة الآن.")
         st.markdown("---")
         st.caption("التحكم")
         if st.button(
@@ -531,7 +531,7 @@ def main() -> None:
         elif outcome == "invalid_dates":
             st.warning("يجب أن يكون تاريخ النهاية مساويًا لتاريخ البداية أو بعده.")
         elif outcome == "demo_dates":
-            st.warning("العرض التجريبي ليومين يتطلب تاريخي بداية ونهاية متتاليين.")
+            st.warning("النسخة الاحتياطية ليومين تتطلب تاريخي بداية ونهاية متتاليين.")
         else:
             _execute_request()
 

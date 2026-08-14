@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Optional
 
-from sard.application.contracts import UIExecutionMode, UIProgressEvent, UIRunRequest, UIRunResult
+from sard.application.contracts import (
+    UIExecutionMode,
+    UIModeKind,
+    UIProgressEvent,
+    UIRunRequest,
+    UIRunResult,
+)
 
 
 KEYS = {
@@ -97,6 +103,7 @@ def append_progress(state: MutableMapping[str, Any], event: UIProgressEvent) -> 
 def finish_run(state: MutableMapping[str, Any], result: UIRunResult) -> None:
     state[KEYS["result"]] = result
     state[KEYS["error"]] = result.error_message or None
+    state[KEYS["demo_flag"]] = result.mode.kind is UIModeKind.CACHED_DEMO
 
 
 def terminal_status(result: Optional[UIRunResult]) -> tuple[str, str]:

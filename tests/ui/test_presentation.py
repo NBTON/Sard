@@ -398,7 +398,7 @@ def test_mode_status_line_marks_cached_demo_as_simulated_without_live_routes() -
             model_fallback_used=True,
         )
     )
-    assert line == "عرض تجريبي محفوظ — مراحل ومخرجات محاكاة ثابتة"
+    assert line == "نسخة احتياطية محفوظة مسبقًا — لم يُنشأ المحتوى الآن"
     assert "الاسترجاع" not in line
     assert "نموذج احتياطي" not in line
 
@@ -440,7 +440,8 @@ def test_artifact_download_label_with_zero_size() -> None:
 
 def test_mode_banner_html_marks_demo() -> None:
     out = ui.mode_banner_html(_mode_status(kind="cached_demo"), demo=True)
-    assert "عرض تجريبي" in out
+    assert "نسخة احتياطية محفوظة" in out
+    assert "ليست مولّدة الآن" in out
     assert 'class="sard-mode-banner demo"' in out
 
 

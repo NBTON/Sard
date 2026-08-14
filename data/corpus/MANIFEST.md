@@ -41,12 +41,17 @@ document is added):
 
 ## Pilot topic 2 — تجفيف الروبيان بوصفه ممارسة تراثية ساحلية (traditional shrimp drying)
 
-**Status: NO documents ingested. This topic has zero corpus coverage.**
+**Status: partially seeded with 2 verified, source-grounded evidence records.**
+
+| File | Source | Type | Verified |
+|---|---|---|---|
+| `coastal/alqhat-2019-shrimp-memory.md` | صحيفة الخط/القطيف اليوم، مقابلة مع النوخذة السابق رضا العيسى، 2019-08-29 | Curated evidence record from a named oral-history/news interview | Yes — the published page directly describes boiling, salting, drying, winter storage, and inland trade of shrimp. |
+| `coastal/kapl-eastern-cuisine.md` | موسوعة المملكة العربية السعودية، مكتبة الملك عبدالعزيز العامة | Curated evidence record from an institutionally published, scientifically reviewed encyclopedia chapter | Yes — the page establishes Eastern Province coastal-food and traditional preservation context, while the record explicitly avoids extending fish-drying evidence to shrimp. |
 
 Searches were run against Saudi Heritage Commission, Visit Saudi, Culinary
-Arts Commission, and general Arabic web sources for a verified account of
-shrimp-drying (تجفيف الروبيان) specifically as a heritage practice on the
-Eastern Province coast. Results found:
+Arts Commission, institutional collections, and Arabic local-history sources.
+The two records above now support the definition/method and a limited
+economic-social account. They do **not** close every gap:
 
 - Recent news coverage of "مهرجان روبيان الشرقية" (an annual Eastern
   Province shrimp *festival* run by the Ministry of Environment, Water and
@@ -63,8 +68,7 @@ Eastern Province coast. Results found:
   misattribute a related-but-distinct practice/geography, which the task
   explicitly disallows ("Do not fabricate... documents").
 
-**Action required before this topic can be evaluated honestly:** source
-and add one or more of:
+**Remaining action required:** source and add one or more of:
 
 1. A Saudi Heritage Commission (هيئة التراث) publication on coastal
    food-preservation crafts in the Eastern Province.
@@ -75,9 +79,18 @@ and add one or more of:
 4. A recorded oral-history/interview transcript with named provenance from
    a Saudi heritage or municipal body.
 
-Until one of these is added, any golden-set question under
-`SARD-EP-SHRIMP-*` **must be reported as failing retrieval** (no evidence
-in corpus) — never as passing based on a generated-but-unsourced answer.
+Golden cases about current visitor access or a bookable demonstration remain
+unsupported and must fail retrieval. Cases about method, conservative history,
+and economic/social context may pass only when the retrieved evidence includes
+the directly relevant records above and the answer preserves their limitations.
+
+### Evidence-record policy
+
+The new `coastal/*.md` files are concise, source-grounded summaries rather than
+verbatim article copies. Their sidecars identify this with
+`evidence_record=curated_source-grounded_summary`, record the verification date,
+and retain the exact public URL. A summary must state source limitations and may
+not introduce a factual claim absent from the linked source.
 
 ## Adding documents to this corpus
 

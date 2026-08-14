@@ -7,8 +7,10 @@ __pycache__/
 .env
 data/zvec/
 data/fonts/
-output/pdf/
-output/runs/
+output/
 tmp/pdfs/
 tmp/
 .streamlit/
+dist/
+build/
+*.egg-info/

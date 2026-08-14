@@ -5,6 +5,22 @@ provider-independent RAG foundation, typed LangGraph pipeline, RTL PDF
 generation, and deterministic PDF/calendar/raw-answer artifacts while
 preserving the provider-neutral Step 2 chat service.
 
+## Step 8 investor demo
+
+Run the readiness gate before starting the UI:
+
+```powershell
+uv run sard-demo check
+uv run sard-demo evaluate --json-out output/evaluation/final-evaluation.json
+uv run streamlit run sard/ui/app.py
+```
+
+The exact hero query prefers live execution and can switch automatically to
+the visibly labelled, integrity-checked packaged fallback. See
+[`docs/demo-runbook.md`](docs/demo-runbook.md) for setup, deployment, backup
+video, and presenter steps, and [`docs/final-evaluation.md`](docs/final-evaluation.md)
+for the honest 8/10 golden-set result and remaining evidence gaps.
+
 ## Requirements
 
 - Windows, Linux, or macOS with Python 3.11 or newer.

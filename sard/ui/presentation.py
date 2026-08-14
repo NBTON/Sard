@@ -74,13 +74,13 @@ _MODE_KIND_LABELS: dict[str, str] = {
     "live": "وضع مباشر",
     "degraded_retrieval": "استرجاع مخفَّض",
     "model_fallback": "نموذج احتياطي",
-    "cached_demo": "عرض تجريبي",
+    "cached_demo": "نسخة احتياطية محفوظة",
     "unavailable": "غير متاح",
 }
 
 _EXECUTION_MODE_LABELS: dict[str, str] = {
     "live": "مباشر",
-    "cached_demo": "عرض تجريبي",
+    "cached_demo": "نسخة احتياطية محفوظة",
 }
 
 _RETRIEVAL_MODE_LABELS: dict[str, str] = {
@@ -414,7 +414,7 @@ def mode_status_line(mode_status: object) -> str:
     execution_mode = getattr(mode_status, "execution_mode", None)
 
     if _value_of(execution_mode) == "cached_demo" or _value_of(kind) == "cached_demo":
-        return "عرض تجريبي محفوظ — مراحل ومخرجات محاكاة ثابتة"
+        return "نسخة احتياطية محفوظة مسبقًا — لم يُنشأ المحتوى الآن"
 
     parts: list[str] = []
     if execution_mode is not None:
@@ -480,7 +480,7 @@ def mode_banner_html(mode_status: object, *, demo: bool = False) -> str:
     banner_class = "sard-mode-banner demo" if demo else "sard-mode-banner"
     body = escape_html(mode_status_line(mode_status))
     note = (
-        '<span class="sard-badge sard-badge-warn">عرض تجريبي — بيانات ثابتة دون اتصال</span>'
+        '<span class="sard-badge sard-badge-warn">نسخة احتياطية محفوظة مسبقًا — ليست مولّدة الآن</span>'
         if demo
         else ""
     )

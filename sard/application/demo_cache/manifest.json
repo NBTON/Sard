@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "hero_query": "أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية",
+  "generated_at": "2026-08-13T10:00:00+00:00",
+  "mode": "cached_demo",
+  "notice_ar": "نسخة احتياطية محفوظة مسبقًا؛ لم يُنشأ هذا المحتوى عند عرضه.",
+  "citation_ids": [
+    "CIT-3AE406450E19",
+    "CIT-A6E7E5FB5C8B",
+    "CIT-D69B54CB0B4C",
+    "CIT-32EF35918C4D"
+  ],
+  "artifacts": {
+    "raw_text": {
+      "filename": "answer.txt",
+      "size_bytes": 2206,
+      "sha256": "5f90216ae658cb8eeaa92d27366ce781172d43e9964cd6c504508acb29a636f7"
+    },
+    "pdf": {
+      "filename": "itinerary.pdf",
+      "size_bytes": 41330,
+      "sha256": "feedfed693c2c99c894bd366e8fd1b9d1662f963a9fc29b4ebf5839a14e937c3"
+    },
+    "calendar": {
+      "filename": "itinerary.ics",
+      "size_bytes": 3885,
+      "sha256": "d3824c897c63661d185ecb82f990df55dfbb63fec0120afe92b1fbe95b05b835"
+    }
+  }
+}
