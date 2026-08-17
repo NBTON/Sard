@@ -1,0 +1,91 @@
+@import url('https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700&family=Tajawal:wght@300;400;500;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-arabic: 'IBM Plex Sans Arabic', 'Tajawal', 'Almarai', sans-serif;
+  --font-sans: 'Outfit', 'Inter', sans-serif;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(110, 25, 70, 0.35); /* MOC Plum */
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(235, 90, 60, 0.6); /* MOC Coral */
+}
+
+/* Base body styles */
+body {
+  font-family: var(--font-arabic);
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Dark Navy Theme (Official Default: MOC Dark Navy + Plum + Coral) */
+body.theme-dark {
+  background-color: #08161F;
+  color: #F0F6F9;
+  background-image: 
+    radial-gradient(circle at 15% 15%, rgba(110, 25, 70, 0.28) 0%, transparent 45%),
+    radial-gradient(circle at 85% 85%, rgba(235, 90, 60, 0.12) 0%, transparent 45%),
+    radial-gradient(circle at 50% 50%, rgba(15, 40, 55, 0.6) 0%, transparent 100%);
+}
+
+/* MOC Royal Theme (Rich Plum & Dark Navy Dominance) */
+body.theme-moc {
+  background-color: #0F2837;
+  color: #FFFFFF;
+  background-image: 
+    radial-gradient(circle at 20% 20%, rgba(110, 25, 70, 0.45) 0%, transparent 55%),
+    radial-gradient(circle at 80% 80%, rgba(235, 90, 60, 0.18) 0%, transparent 50%),
+    radial-gradient(circle at 50% 10%, rgba(145, 185, 180, 0.12) 0%, transparent 100%);
+}
+
+/* Light Theme (MOC Alabaster Sand + Dark Navy Text) */
+body.theme-light {
+  background-color: #F8F6F1;
+  color: #0F2837;
+  background-image: 
+    radial-gradient(circle at 20% 20%, rgba(250, 195, 155, 0.35) 0%, transparent 50%),
+    radial-gradient(circle at 80% 80%, rgba(145, 185, 180, 0.25) 0%, transparent 50%);
+}
+
+body.theme-light .prose {
+  color: #0F2837;
+}
+
+/* Subtle Saudi Geometric Arabesque Background Pattern */
+.bg-arabesque {
+  background-image: radial-gradient(rgba(145, 185, 180, 0.08) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+/* Respect user's motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

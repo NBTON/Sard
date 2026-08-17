@@ -1,19 +1,19 @@
 [project]
 name = "sard-mvp"
 version = "0.2.0"
-description = "Sard — Arabic-first travel planning assistant (MVP)"
+description = "Sard — Arabic-first cultural and travel assistant"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # Provider-neutral LangChain core + orchestration + UI. No CHAT provider
-    # SDK is a direct dependency here — those live in the optional groups
-    # below and are only imported inside sard/config/models.py.
+    # Provider-neutral LangChain core + orchestration + API.
     "langchain-core>=0.3.0",
     "langgraph>=0.2.0",
-    "streamlit>=1.38.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "sse-starlette>=2.1.0",
+    "pydantic>=2.7.0",
     "python-dotenv>=1.0.1",
-    # Local, in-process vector database used by the RAG foundation (Step 3).
-    # See README "Why Zvec" for the rationale.
+    # Local, in-process vector database used by the RAG foundation.
     "zvec>=0.6.0",
     # Document parsing/ingestion utilities used by sard/rag/loaders.py.
     "pypdf>=4.0.0",
@@ -29,28 +29,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Install only the provider(s) you intend to use.
 anthropic = [
     "langchain-anthropic>=0.2.0",
 ]
 openai = [
     "langchain-openai>=0.2.0",
 ]
-# NVIDIA NIM: the only remote/self-hosted AI provider used by the RAG
-# foundation (chat/query-rewrite, embeddings, reranking). Imported ONLY
-# inside sard/config/rag.py, sard/rag/embeddings.py, sard/rag/rerank.py,
-# and sard/rag/query_rewriter.py.
 nvidia = [
     "langchain-nvidia-ai-endpoints>=1.4.3",
 ]
 dev = [
     "pytest>=8.0.0",
+    "httpx>=0.27.0",
 ]
 
 [project.scripts]
 sard-rag = "sard.cli.rag:main"
 sard-agent = "sard.cli.agent:main"
 sard-demo = "sard.cli.demo:main"
+sard-api = "sard.api.server:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -68,4 +65,5 @@ markers = [
 [dependency-groups]
 dev = [
     "pymupdf>=1.24.0",
+    "httpx>=0.27.0",
 ]

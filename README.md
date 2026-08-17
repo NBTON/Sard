@@ -336,22 +336,117 @@ and in the final source list. ReportLab markup metacharacters are escaped when
 markup is needed; itinerary content is currently drawn as plain canvas text,
 so it is never interpreted as markup.
 
+
+### Font setup and license
+
+The repository deliberately bundles `NotoNaskhArabic-Regular.ttf` (178,388
+bytes) and the `NotoSans-Regular.ttf` Latin companion (569,208 bytes) so
+Arabic plus URLs/English render deterministically and offline. Both are pinned to
+notofonts/noto-fonts commit
+`ffebf8c1ee449e544955a7e813c54f9b73848eac`, SHA-256
+`2f4b88e6ee50fa82c617e2d1d4ba18281cb1c6cd71c3af3ec64970c23995db4b`
+and `b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5`,
+and distributed under the SIL Open Font License 1.1 in
+`sard/outputs/assets/OFL.txt`. The upstream source is:
+
+https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoNaskhArabic
+
+Verify the bundled file (or restore the exact pinned download if it was
+removed) with:
+
+```bash
+uv run python -m sard.outputs.sample --download-font --output font-check.pdf
+```
+
+Set `SARD_ARABIC_FONT_PATH` to switch deliberately to another Arabic-capable
+TTF. A missing configured file raises `ArabicFontError`; there is no silent
+Helvetica or system-font fallback. Any alternative font's embedding and
+distribution license must be reviewed by the deployer.
+
+### Generate and inspect the fixture
+
+The sample is prominently labeled fixture-only and uses invented
+`example.org`/`example.com` sources; it is not travel advice:
+
+```bash
+uv sync --extra dev
+uv run python -m sard.outputs.sample --output step4-arabic-rtl-sample.pdf
+```
+
+The default output is
+`output/pdf/step4-arabic-rtl-sample.pdf`. Set `SARD_PDF_OUTPUT_ROOT` to choose
+another root. Relative output paths are resolved beneath that root; absolute
+paths outside it, non-PDF suffixes, traversal, and overwriting an existing file
+are rejected. Generated PDFs and page images under `output/pdf/` and
+`tmp/pdfs/` are ignored by Git.
+
+Render every page for visual review with PyMuPDF:
+
+```bash
+uv run python -c "import fitz,pathlib; d=fitz.open('output/pdf/step4-arabic-rtl-sample.pdf'); o=pathlib.Path('tmp/pdfs'); o.mkdir(parents=True,exist_ok=True); [p.get_pixmap(matrix=fitz.Matrix(2,2),alpha=False).save(o/f'page-{i+1}.png') for i,p in enumerate(d)]"
+```
+
+Inspection should confirm joined Arabic glyphs, right alignment, readable
+mixed Arabic/English, unchanged URLs and citation IDs, wrapped long lines,
+portrait A4 margins, non-overlapping footers, and sequential page numbers.
+The checked Step 4 artifact was rendered as three 595 x 842 point pages and
+rasterized to three 1191 x 1684 PNGs at 2x. Visual review found joined Arabic,
+complete Latin runs/URLs/IDs, clean wrapping and margins, and no clipping,
+overlap, tofu glyphs, or black squares. PyMuPDF extraction also recovered both
+full citation IDs and both fixture URLs; all 285 text spans remained within the
+physical page bounds.
+
+### Citation flow and fallback decision
+
+Each `TextBlock` carries stable citation IDs and may also display them inline.
+Before any file is created, `Itinerary.validate_citations()` rejects duplicate
+source IDs and every unknown declared or inline `CIT-*` ID. The renderer uses
+only the supplied title, URL, page, section, and publication date; absent
+optional metadata stays absent. IDs appear inline, in per-page source notes,
+and in the final source list. ReportLab markup metacharacters are escaped when
+markup is needed; itinerary content is currently drawn as plain canvas text,
+so it is never interpreted as markup.
+
 ReportLab meets the spike criteria with explicit line-level Arabic reshaping
 and bidi processing. The proposed HTML-to-PDF fallback is therefore not
 implemented and remains disabled; adding a browser rendering stack would add
 deployment and reproducibility costs without solving a demonstrated gap.
 
-## Streamlit application
+## Web Application (Next.js + FastAPI)
 
-Step 7 provides the investor-ready Arabic-first interface. The presentation
-layer calls only the session-scoped `SardApplicationService`; it does not import
-LangGraph, Zvec, NVIDIA integrations, configuration factories, or Step 6
-renderers. The service owns graph execution, sanitized event adaptation,
-verified sources, mode attribution, artifact bytes, idempotency, and retained
-calendar snapshots.
+Sard features a production-ready web interface built with Next.js and styled according to the official **Saudi Ministry of Culture (MOC March 2019 Brand Guidelines)**, featuring dark navy/plum/coral palettes, Arabic (RTL) typography, Always-On RAG streaming, and interactive PDF/iCalendar artifact downloads.
 
-Install the live NVIDIA and test dependencies, prepare `.env`, and ingest the
-corpus before a live run:
+### 1. Start the FastAPI Backend Server
+
+```bash
+uv run sard-api
+# Or directly via uvicorn:
+# uv run uvicorn sard.api.server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+The API server runs on `http://127.0.0.1:8000` with endpoints:
+- `POST /api/chat` (SSE Streaming response with Always-On RAG, citations, and artifacts)
+- `POST /api/itinerary` (LangGraph itinerary generation with PDF & iCalendar)
+- `GET /api/health` & `GET /api/status` (Health and RAG index status)
+- `GET /api/artifacts/{filename}` (Artifact downloads)
+
+### 2. Start the Next.js Web Frontend
+
+```bash
+cd web
+npm run dev
+```
+
+Open `http://localhost:3000` in your browser. The interface includes:
+- **Ministry of Culture (MOC) Brand System:** Official Dark Navy (`#0F2837`), Plum (`#6E1946`), Coral (`#EB5A3C`), Sage (`#91B9B4`), and Light Peach (`#FAC39B`).
+- **ChatGPT-Style Conversational UX:** Collapsible sidebar with chat history, session renaming/deletion, and `Ctrl+K` shortcut.
+- **Always-On RAG:** Instant background retrieval with citations displayed in collapsible reference cards.
+- **Interactive Artifact Downloads:** Directly download PDF itineraries and `.ics` calendars for scheduled trips.
+- **Arabic / English Support:** Native RTL with one-click bilingual switching and text-to-speech audio reading.
+
+## Streamlit Application & Step 8 Investor Demo
+
+Step 7/8 provides the investor-ready Arabic-first Streamlit interface and CLI tools.
 
 ```powershell
 uv sync --extra nvidia --extra dev
@@ -360,56 +455,15 @@ uv run python -m sard.cli.rag ingest data/corpus
 uv run streamlit run sard/ui/app.py
 ```
 
-For the deterministic offline investor demo, no NVIDIA key, network access, or
-Zvec collection is required. Start the same app and choose **عرض تجريبي (بيانات
-ثابتة)**; the control always loads the supported hero fixture and is visibly
-labeled as simulated cached data:
-
-```bash
-uv run streamlit run sard/ui/app.py
-```
-
-The supported hero query is:
+For the deterministic offline investor demo, start the app and choose **عرض تجريبي (بيانات ثابتة)**. The supported hero query is:
 
 ```text
 أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية
 ```
 
-Two backup queries are available as one-click prefill controls. Optional dates and
-preferences are included once in the structured application request. The UI
-shows the six graph stages, verified Arabic answer, source cards, actual model
-route metadata, and PDF/calendar/raw-text download state. A retry is explicit
-and receives a new run ID; Streamlit rerenders cannot execute the same run ID
-twice in one session.
-
 ### Operational modes and fallbacks
 
-The mode badge uses this precedence: `cached_demo`, `unavailable`,
-`model_fallback`, `degraded_retrieval`, then `live`. Retrieval detail preserves
-`hybrid_reranked`, `hybrid_fused`, `dense_only`, `full_text_only`, or
-`unavailable`. Cached demo never falls through to live dependencies, and a live
-failure switches to demo only when the user presses the manual demo control.
-Resolved model names are taken from the route that actually succeeded; prompts,
-reasoning, provider payloads, headers, credentials, raw exceptions, and evidence
-content never cross the UI boundary.
-
-When the initial result lacks dates, PDF and raw text can still be downloaded
-while calendar is reported as skipped. Supplying dates afterward calls the
-existing verified calendar renderer on the retained itinerary; it does not
-rerun retrieval, generation, or verification. Identical date requests reuse an
-in-session result, while different dates publish to deterministic, no-overwrite
-calendar sub-run directories.
-
-### Step 7 safety and testing
-
-- Production retrieval is opened through `RAGService.open_readonly()` only.
-- Sources are projected from verified `CitationSource` records. The UI never
-  constructs source or citation records from answer text.
-- External links allow only HTTP(S), reject credentials, and escape HTML.
-- Created artifact bytes are read only after their resolved path is proven to
-  remain under the configured output root; filesystem paths are not exposed.
-- Each Streamlit session owns its service, completed snapshots, progress,
-  current request, retry/demo state, dates, and artifacts.
+The mode badge uses this precedence: `cached_demo`, `unavailable`, `model_fallback`, `degraded_retrieval`, then `live`. Retrieval detail preserves `hybrid_reranked`, `hybrid_fused`, `dense_only`, `full_text_only`, or `unavailable`.
 
 Run the complete offline suite:
 
@@ -418,25 +472,7 @@ uv sync --extra anthropic --extra openai --extra nvidia --extra dev
 uv run pytest -q
 ```
 
-Run only Step 7 coverage during development:
-
-```powershell
-uv run pytest -q tests/application tests/ui
-```
-
-Known limitations: the cached demo intentionally supports only the exact hero
-query and uses clearly fictional `example.org` source URLs; it is not evidence
-of live NVIDIA or corpus health. Live results depend on configured NVIDIA NIM
-model availability and a compatible ingested Zvec collection. The pilot corpus
-and evaluation-label limitations described below still apply. Streamlit runs
-the graph synchronously in the session thread, so a long provider timeout can
-delay visual updates until the next yielded graph state.
-
 ## Step 5 LangGraph orchestration
-
-The typed orchestration layer runs `understand -> plan -> retrieve -> compose
--> verify -> render`. Failed verification returns structured feedback to
-`compose`; the re-composition count is capped and exhaustion returns only an
 honest verified subset. Agent nodes use the centralized LangChain model service
 and the public `RAGService` boundary, never NVIDIA endpoints or Zvec directly.
 
