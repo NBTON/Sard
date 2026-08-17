@@ -1,20 +1,57 @@
+# Virtual environments
+.venv
 .venv/
+.venv*
+.venv-*/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / cache files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+
+# Environment variables
 .env
+.env.*
+!.env.example
+
+# Local data & vector DBs
 data/zvec/
 data/fonts/
+
+# Outputs and temp files
 output/
-tmp/pdfs/
 tmp/
+tmp/pdfs/
+*.log
+
+# Streamlit
 .streamlit/
+
+# Python packaging & distribution
 dist/
 build/
 *.egg-info/
+*.egg
+
+# Node.js & Next.js
 node_modules/
 .next/
 out/
+
+# IDE & Editor files
+.vscode/
+.idea/
 .agents/
+.DS_Store
+Thumbs.db
+
