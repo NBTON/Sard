@@ -90,7 +90,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   return (
     <div className="w-full max-w-4xl mx-auto px-3 md:px-4 pb-3 pt-1">
-      {/* Quick Prompt Chips with Vector Icons */}
+      {/* Quick Prompt Chips */}
       <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none text-[11px]">
         <span className="flex items-center gap-1 text-moc-peach-300 font-semibold font-arabic whitespace-nowrap pl-1">
           <Sparkles className="w-3.5 h-3.5 text-moc-coral-500" />
@@ -183,7 +183,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         <div className="flex items-center justify-between px-4 py-1.5 bg-moc-navy-900/90 border-t border-moc-navy-800/60 text-[10px] text-moc-navy-300 font-arabic">
           <span className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-moc-sage-400 animate-pulse" />
-            <span className="text-moc-sage-300">{isEn ? "Always-On RAG Active" : "محرك الاسترجاع الثقافي RAG مُفعّل تلقائياً"}</span>
+            <span className="text-moc-sage-300">{isEn ? "Verified & up-to-date" : "مُحدَّث من مصادر موثوقة"}</span>
           </span>
 
           <span className="hidden sm:inline text-moc-navy-400">

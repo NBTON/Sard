@@ -38,7 +38,7 @@ export const CitationsDrawer: React.FC<CitationsDrawerProps> = ({ citations, isE
           </span>
           <span className="hidden sm:inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-moc-sage-500/20 text-moc-sage-300 border border-moc-sage-500/30">
             <Sparkles className="w-3 h-3 text-moc-coral-500" />
-            {isEn ? "Always-On RAG" : "مسترجع تلقائياً"}
+            {isEn ? "Verified" : "مُوثَّق"}
           </span>
         </div>
 

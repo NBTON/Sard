@@ -312,8 +312,6 @@ export default function Home() {
                           isStreaming: false,
                           statusText: undefined,
                           timings: meta.timings_ms,
-                          modelUsed: meta.model,
-                          retrievalMode: meta.retrieval_mode,
                         }
                       : m
                   ),

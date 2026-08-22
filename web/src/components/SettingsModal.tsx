@@ -145,12 +145,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* AI Model & RAG Status */}
+          {/* System Status - Public Presentation */}
           <div className="p-4 rounded-2xl bg-moc-navy-900/80 border border-moc-navy-700/70 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-xs font-bold text-moc-peach-300 font-arabic">
                 <Cpu className="w-4 h-4 text-moc-coral-500" />
-                <span>{isEn ? "Active Model & Pipeline" : "النموذج ومحرك الذكاء الاصطناعي"}</span>
+                <span>{isEn ? "System Status" : "حالة النظام"}</span>
               </div>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-moc-sage-500/20 text-moc-sage-300 border border-moc-sage-500/30">
                 {isEn ? "Operational" : "جاهز للعمل"}
@@ -159,21 +159,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             <div className="text-xs space-y-1.5 font-arabic text-moc-navy-200">
               <div className="flex justify-between">
-                <span className="text-moc-navy-400">مزود النموذج:</span>
-                <span className="font-mono text-white font-semibold">
-                  {systemStatus?.model?.provider || "NVIDIA NIM / Anthropic"}
+                <span className="text-moc-navy-400">{isEn ? "Mode:" : "النمط:"}</span>
+                <span className="text-white font-semibold">
+                  {isEn ? "Auto" : "تلقائي"}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-moc-navy-400">اسم النموذج:</span>
-                <span className="font-mono text-moc-peach-300">
-                  {systemStatus?.model?.model_name || "Nemotron-3-Super-120b"}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-moc-navy-400">قاعدة المتجهات (Zvec):</span>
+                <span className="text-moc-navy-400">{isEn ? "Sources:" : "المصادر:"}</span>
                 <span className="text-moc-sage-400">
-                  {systemStatus?.rag?.available ? "مفهرسة وجاهزة للاسترجاع" : "متاحة (وضع المحادثة)"}
+                  {(systemStatus?.sources?.verified ?? systemStatus?.verified) ? (isEn ? "Verified & up-to-date" : "موثَّقة ومُحدَّثة") : (isEn ? "Ready" : "جاهز")}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-moc-navy-400">{isEn ? "Authority:" : "الجهة:"}</span>
+                <span className="text-moc-peach-300">
+                  {isEn ? "Ministry of Culture" : "وزارة الثقافة"}
                 </span>
               </div>
             </div>

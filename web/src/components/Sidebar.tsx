@@ -72,7 +72,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     setEditingSessionId(null);
   };
 
-  const isRagReady = systemStatus?.rag?.available ?? false;
+  const isSourcesReady = systemStatus?.sources?.verified ?? systemStatus?.verified ?? false;
 
   return (
     <>
@@ -241,22 +241,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
           )}
         </div>
 
-        {/* System & RAG Status Widget (MOC Sage & Plum Highlights) */}
+        {/* System Status Widget (MOC Sage & Plum Highlights) */}
         <div className="p-3.5 mx-3 mb-2.5 rounded-2xl bg-gradient-to-br from-moc-navy-900/90 via-moc-navy-800/50 to-moc-plum-950/40 border border-moc-navy-700/60 shadow-inner">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5 text-xs font-bold text-moc-peach-300 font-arabic">
               <Database className="w-3.5 h-3.5 text-moc-coral-500" />
-              <span>{isEn ? "Cultural Knowledge Base" : "المعرفة الثقافية (RAG)"}</span>
+              <span>{isEn ? "Cultural Knowledge Base" : "المعرفة الثقافية"}</span>
             </div>
             <span
               className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                isRagReady
+                isSourcesReady
                   ? "bg-moc-sage-500/20 text-moc-sage-300 border border-moc-sage-500/30"
                   : "bg-moc-orange-500/20 text-moc-orange-300 border border-moc-orange-500/30"
               }`}
             >
               <ShieldCheck className="w-3 h-3" />
-              {isRagReady ? (isEn ? "Active" : "مفهرس وجاهز") : (isEn ? "Direct Chat" : "محادثة مباشرة")}
+              {isSourcesReady ? (isEn ? "Active" : "مفهرس وجاهز") : (isEn ? "Ready" : "جاهز")}
             </span>
           </div>
 

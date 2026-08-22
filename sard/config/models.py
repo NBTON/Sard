@@ -49,7 +49,7 @@ class ModelSettings:
 
 
 # Register newly supported providers here.
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("nvidia", "anthropic", "openai")
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("nvidia", "anthropic", "openai", "openrouter")
 
 
 def _read_settings() -> ModelSettings:
@@ -164,11 +164,39 @@ def _build_nvidia(settings: ModelSettings) -> BaseChatModel:
     return ChatNVIDIA(**kwargs)
 
 
+def _build_openrouter(settings: ModelSettings) -> BaseChatModel:
+    """Build chat model via OpenRouter OpenAI-compatible endpoint."""
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise ModelConfigError(
+            "مفتاح OPENROUTER_API_KEY غير موجود. الرجاء إضافته إلى ملف .env بعد التدوير."
+        )
+    base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError as exc:
+        raise ModelConfigError(
+            "حزمة langchain-openai غير مثبّتة. ثبّتها عبر: uv sync --extra openai"
+        ) from exc
+    # OpenRouter uses OpenAI-compatible interface; do not expose key in logs
+    return ChatOpenAI(
+        model=settings.model_name,
+        temperature=settings.temperature,
+        api_key=api_key,
+        base_url=base_url,
+        default_headers={
+            "HTTP-Referer": os.environ.get("OPENROUTER_REFERER", "https://sard.local"),
+            "X-Title": os.environ.get("OPENROUTER_TITLE", "Sard Cultural Assistant"),
+        },
+    )
+
+
 # Provider name -> builder function. Add new providers here.
 _PROVIDER_BUILDERS: Dict[str, Callable[[ModelSettings], BaseChatModel]] = {
     "nvidia": _build_nvidia,
     "anthropic": _build_anthropic,
     "openai": _build_openai,
+    "openrouter": _build_openrouter,
 }
 
 

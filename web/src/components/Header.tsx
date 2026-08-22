@@ -33,7 +33,7 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleLang,
   onClearSession,
 }) => {
-  const isRagReady = systemStatus?.rag?.available ?? false;
+  const isSourcesReady = systemStatus?.sources?.verified ?? systemStatus?.verified ?? false;
 
   return (
     <header className="sticky top-0 z-30 flex items-center justify-between h-16 px-3 md:px-6 bg-moc-navy-950/90 md:bg-moc-navy-950/80 backdrop-blur-2xl border-b border-moc-navy-700/50 select-none transition-colors duration-200">
@@ -71,7 +71,7 @@ export const Header: React.FC<HeaderProps> = ({
         <span className="text-moc-navy-500">•</span>
         <div className="flex items-center gap-1.5 text-moc-sage-400 text-[11px] font-arabic">
           <ShieldCheck className="w-3.5 h-3.5 text-moc-sage-400" />
-          <span>{isRagReady ? (isEn ? "Always-On RAG" : "مُسنَد بالمصادر") : (isEn ? "Direct Chat" : "محادثة مباشرة")}</span>
+          <span>{isSourcesReady ? (isEn ? "Verified Sources" : "مُسنَد بالمصادر") : (isEn ? "Ready" : "جاهز")}</span>
         </div>
       </div>
 

@@ -80,6 +80,22 @@ def safe_external_url(value: object) -> str:
         return ""
     if username is not None or password is not None:
         return ""
+    # SSRF: block localhost and private networks
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or hostname.lower() == "localhost":
+            return ""
+    except ValueError:
+        if hostname.lower() in ("localhost", "127.0.0.1", "::1") or hostname.startswith("10.") or hostname.startswith("192.168.") or hostname.startswith("172."):
+            # conservative string check before DNS; detailed IP check above handles parsed IPs
+            if hostname.lower() == "localhost":
+                return ""
+        # also block 0.0.0.0 etc via ip check already; skip DNS resolution here to avoid lookup
+        pass
+    # Explicit block for commonly abused private hostnames
+    if hostname.lower() in ("localhost", "metadata.google.internal"):
+        return ""
 
     for component in (unquote(parsed.path), unquote(parsed.fragment)):
         if _SENSITIVE_MARKER_RE.search(component):

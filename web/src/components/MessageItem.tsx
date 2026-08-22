@@ -10,11 +10,6 @@ import {
   Volume2,
   VolumeX,
   Sparkles,
-  Info,
-  ChevronDown,
-  ChevronUp,
-  Clock,
-  Cpu,
   User,
 } from "lucide-react";
 
@@ -97,7 +92,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, isEn = false 
               </span>
               {!isUser && (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-moc-plum-900/50 text-moc-peach-300 border border-moc-plum-700/40 font-medium">
-                  {message.modelUsed || (isEn ? "MOC Engine" : "منظومة الثقافة")}
+                  {isEn ? "Verified" : "موثَّق"}
                 </span>
               )}
             </div>
@@ -219,43 +214,12 @@ export const MessageItem: React.FC<MessageItemProps> = ({ message, isEn = false 
                 </button>
               </div>
 
-              {/* Technical Details Inspector */}
-              <div className="relative">
-                <button
-                  onClick={() => setShowTechDetails(!showTechDetails)}
-                  className="flex items-center gap-1 text-[11px] text-moc-navy-400 hover:text-moc-peach-300 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moc-coral-500 rounded px-1.5 py-0.5 transition-colors"
-                >
-                  <Info className="w-3.5 h-3.5" />
-                  <span className="font-arabic">{isEn ? "Details" : "مسار الاستجابة"}</span>
-                  {showTechDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                </button>
-
-                {showTechDetails && (
-                  <div className="absolute left-0 sm:right-0 mt-2 w-64 p-3 rounded-xl bg-moc-navy-900 border border-moc-navy-700 shadow-xl z-20 text-[11px] font-mono text-moc-navy-200 animate-fade-in">
-                    <div className="flex items-center gap-2 mb-2 pb-1.5 border-b border-moc-navy-800 text-moc-peach-300 font-bold font-arabic">
-                      <Cpu className="w-3.5 h-3.5 text-moc-coral-500" />
-                      <span>{isEn ? "Technical Metadata" : "بيانات المعالجة والنموذج"}</span>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <div className="flex justify-between">
-                        <span className="text-moc-navy-400">النموذج:</span>
-                        <span className="text-white truncate max-w-[120px]">{message.modelUsed || "سرد"}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-moc-navy-400">نمط الاسترجاع:</span>
-                        <span className="text-moc-coral-400">{message.retrievalMode || "Always-On RAG"}</span>
-                      </div>
-                      {message.timings?.total_ms && (
-                        <div className="flex justify-between items-center">
-                          <span className="text-moc-navy-400 flex items-center gap-1">
-                            <Clock className="w-3 h-3" /> زمن الاستجابة:
-                          </span>
-                          <span className="text-moc-sage-400 font-bold">{message.timings.total_ms} ms</span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
+              {/* Sources Indicator */}
+              <div className="flex items-center gap-1 text-[11px] text-moc-sage-300 font-arabic">
+                <Sparkles className="w-3 h-3 text-moc-sage-400" />
+                <span>{message.citations && message.citations.length > 0 ? (isEn ? `Verified from ${message.citations.length} sources` : `موثَّق من ${message.citations.length} مصادر`) : (isEn ? "Sources checked" : "تم التحقق من المصادر")}</span>
+                {message.timings?.total_ms && (
+                  <span className="text-moc-navy-400 ml-2">• {new Date().toLocaleDateString(isEn ? "en-US" : "ar-SA")}</span>
                 )}
               </div>
             </div>

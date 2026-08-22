@@ -109,15 +109,13 @@ def _check_rag_readiness() -> dict:
         settings = get_rag_settings()
         collection_path = Path(settings.zvec_collection_path)
         exists = collection_path.exists() and any(collection_path.iterdir()) if collection_path.exists() else False
+        # Public contract: only availability, no internal paths or model IDs
         return {
             "available": exists,
-            "collection_path": str(collection_path),
-            "embedding_model": settings.embedding_route.primary,
         }
-    except Exception as exc:
+    except Exception:
         return {
             "available": False,
-            "error": str(exc),
         }
 
 
@@ -125,37 +123,43 @@ def _check_rag_readiness() -> dict:
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint - public contract only."""
     rag_info = _check_rag_readiness()
     return {
         "status": "ok",
         "service": "sard-agent",
         "timestamp": time.time(),
-        "model_status": current_status_label(),
+        "verified": rag_info.get("available", False),
+        "sources": {"verified": rag_info.get("available", False)},
         "rag": rag_info,
     }
 
 
 @app.get("/api/status")
 async def system_status():
-    """Returns detailed configuration status for the UI status badge."""
+    """Returns public system status without exposing internal model/provider IDs."""
     rag_info = _check_rag_readiness()
-    try:
-        model_settings = get_model_settings()
-        model_info = {
-            "provider": model_settings.provider,
-            "model_name": model_settings.model_name,
-            "temperature": model_settings.temperature,
-        }
-    except Exception as exc:
-        model_info = {"provider": "unknown", "model_name": "unknown", "error": str(exc)}
-
-    return {
-        "status_label": current_status_label(),
-        "model": model_info,
+    # Public status hides provider/model IDs; internal details via SARD_ENABLE_DEV_OBSERVABILITY
+    enable_dev = os.environ.get("SARD_ENABLE_DEV_OBSERVABILITY", "").lower() in ("1", "true", "yes")
+    base = {
+        "status_label": "جاهز" if rag_info.get("available") else "جاهز",
+        "verified": rag_info.get("available", False),
+        "sources": {"verified": rag_info.get("available", False)},
         "rag": rag_info,
+        "model": {"mode": "auto", "preference": "auto"},
         "moc_branding": "Saudi Ministry of Culture (MOC) 2026",
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if enable_dev:
+        try:
+            model_settings = get_model_settings()
+            base["dev"] = {
+                "provider": model_settings.provider,
+                "model_name": model_settings.model_name,
+            }
+        except Exception:
+            base["dev"] = {"provider": "unknown"}
+    return base
 
 
 @app.get("/api/corpus")
@@ -252,14 +256,14 @@ async def generate_full_itinerary(req: ItineraryRequest):
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
-    """Always-On RAG Streaming Chat endpoint.
+    """ Streaming Chat endpoint with public progress telemetry.
     
     Streams Server-Sent Events (SSE):
-    - event: status (real-time progress in Arabic)
-    - event: citations (extracted references)
+    - event: status (public cultural stages, no internal terminology)
+    - event: citations (verified references)
     - event: delta (text tokens)
     - event: artifacts (downloadable PDF / ICS if applicable)
-    - event: done (final metadata, timings)
+    - event: done (verified, sources_count, timings)
     """
     user_query = _extract_latest_user_query(req)
     if not user_query:
@@ -270,8 +274,7 @@ async def chat_endpoint(req: ChatRequest):
         citations_sent = []
         artifacts_sent = []
         full_response_text = ""
-        model_used = "sard-agent"
-        retrieval_mode = "always-on-rag"
+        verified = False
 
         # 1. Initial Status Event
         yield {
@@ -310,8 +313,7 @@ async def chat_endpoint(req: ChatRequest):
             if rag_answer_obj and rag_answer_obj.answer_text:
                 rag_succeeded = True
                 full_response_text = rag_answer_obj.answer_text
-                model_used = rag_answer_obj.model_route.get("generation") or "NVIDIA NIM (RAG)"
-                retrieval_mode = rag_answer_obj.retrieval_mode
+                verified = len(rag_answer_obj.citations) > 0
 
                 # Format and send citations
                 candidate_map = {c.citation_id: c.content for c in (rag_answer_obj.selected_context or [])}
@@ -356,13 +358,11 @@ async def chat_endpoint(req: ChatRequest):
             
             if chat_res.ok and chat_res.text:
                 full_response_text = chat_res.text
-                model_used = current_status_label()
-                retrieval_mode = "direct-chat-fallback"
+                verified = False
             else:
                 # Provide a rich offline response for demo resilience if no API key is provided
                 full_response_text = _generate_cultural_fallback_answer(user_query)
-                model_used = "سرد المعرفي (سياحة وثقافة)"
-                retrieval_mode = "cultural-knowledge-engine"
+                verified = False
 
         # 4. Stream tokens smoothly
         chunk_size = 4  # Characters or words per token chunk for natural typing feel
@@ -404,17 +404,17 @@ async def chat_endpoint(req: ChatRequest):
             except Exception as e:
                 logger.debug("Artifact generator skipped: %s", e)
 
-        # 6. Final Done Event
+        # 6. Final Done Event - public contract only
         total_time_ms = (time.monotonic() - t_start) * 1000
         yield {
             "event": "done",
             "data": json.dumps({
-                "model": model_used,
-                "retrieval_mode": retrieval_mode,
+                "verified": verified,
+                "sources_count": len(citations_sent),
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "timings_ms": {
                     "total_ms": round(total_time_ms, 1),
                 },
-                "citations_count": len(citations_sent),
                 "artifacts_count": len(artifacts_sent),
                 "session_id": req.session_id or str(uuid.uuid4()),
             }, ensure_ascii=False)

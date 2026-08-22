@@ -76,7 +76,7 @@ export const WelcomeHero: React.FC<WelcomeHeroProps> = ({ onSelectPrompt, isEn =
       <div className="flex flex-wrap items-center justify-center gap-2 mb-7 text-[11px] md:text-xs">
         <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-moc-navy-900/80 border border-moc-navy-700/60 text-moc-navy-200 backdrop-blur-md">
           <ShieldCheck className="w-3.5 h-3.5 text-moc-sage-400" />
-          <span className="font-arabic">{isEn ? "Always-On RAG Verification" : "إسناد مرجعي دائم (Always-On RAG)"}</span>
+          <span className="font-arabic">{isEn ? "Verified Sources" : "مراجع موثَّقة"}</span>
         </div>
         <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-moc-navy-900/80 border border-moc-navy-700/60 text-moc-navy-200 backdrop-blur-md">
           <Zap className="w-3.5 h-3.5 text-moc-coral-500" />

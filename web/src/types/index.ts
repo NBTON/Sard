@@ -29,8 +29,6 @@ export interface Message {
     retrieve_ms?: number;
     generation_ms?: number;
   };
-  modelUsed?: string;
-  retrievalMode?: string;
 }
 
 export interface ChatSession {
@@ -43,17 +41,11 @@ export interface ChatSession {
 
 export interface SystemStatus {
   status_label: string;
-  model: {
-    provider: string;
-    model_name: string;
-    temperature?: number;
-    error?: string;
-  };
-  rag: {
-    available: boolean;
-    collection_path?: string;
-    embedding_model?: string;
-    error?: string;
+  verified: boolean;
+  sources_count?: number;
+  updated_at?: string;
+  sources: {
+    verified: boolean;
   };
   moc_branding: string;
 }

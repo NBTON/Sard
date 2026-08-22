@@ -23,7 +23,7 @@ export interface StreamChatOptions {
   onCitations?: (citations: Citation[]) => void;
   onDelta?: (deltaText: string) => void;
   onArtifacts?: (artifacts: Artifact[]) => void;
-  onDone?: (meta: { model?: string; timings_ms?: { total_ms?: number }; retrieval_mode?: string }) => void;
+  onDone?: (meta: { verified?: boolean; sources_count?: number; timings_ms?: { total_ms?: number }; updated_at?: string }) => void;
   onError?: (error: Error) => void;
 }
 
