@@ -1,8 +1,8 @@
 """Structured request-extraction node: ``understand``.
 
 Semantic extraction only, with bounded model retry (via the injected model
-service) and a deterministic Arabic fallback for basic fields.  No itinerary
-or evidence is produced here.
+service), deterministic Arabic fallback for basic fields, and multimodal
+file reference extraction.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from sard.agent.prompts.understand import (
     UNDERSTAND_SYSTEM_PROMPT,
     UNDERSTAND_USER_TEMPLATE,
 )
+from sard.agent.state import MultimodalItem
+from sard.agent.tools.multimodal_tools import extract_multimodal_context
 from sard.agent.util import coerce_int, deterministic_extraction
 from sard.rag.normalize import normalize_arabic
 
@@ -63,6 +65,21 @@ def understand(state: dict, deps) -> dict:
 
     events = [
         make_event(EVENT_STARTED, run, "understand", "started", summary="بدء فهم الطلب")
+    ]
+
+    # Extract any multimodal file references in the request
+    mm_extracted = extract_multimodal_context(request)
+    multimodal_items = [
+        MultimodalItem(
+            filename=item.filename,
+            file_type=item.file_type,
+            extracted_text=item.extracted_text,
+            description=item.description,
+            source_path=item.source_path,
+            extraction_method=item.extraction_method,
+            metadata=item.metadata,
+        )
+        for item in mm_extracted
     ]
 
     degraded = False
@@ -128,6 +145,7 @@ def understand(state: dict, deps) -> dict:
     return {
         "normalized_request": normalize_arabic(request) or request,
         "request_language": "ar",
+        "multimodal_inputs": multimodal_items,
         "intent": intent,
         "destination": destination,
         "duration_days": duration_days,

@@ -51,7 +51,12 @@ export function Landing({
           className="landing-grid"
         >
           {/* Copy column */}
-          <div style={{ minWidth: 0 }}>
+          <div
+            data-dir-animate="hero-copy"
+            data-dir-id="landing-hero-copy"
+            data-dir-stagger="15"
+            style={{ minWidth: 0, textAlign: "start" }}
+          >
             <div
               style={{
                 fontSize: 12,
@@ -125,6 +130,9 @@ export function Landing({
 
           {/* Weave card: rounded ivory / cream card, thin warm-beige border, soft shadow */}
           <div
+            data-dir-animate="card"
+            data-dir-id="landing-weave-card"
+            data-dir-stagger="35"
             style={{
               background: "#FAF7F1",
               borderRadius: 28,
@@ -151,6 +159,7 @@ export function Landing({
               color: "#3A342E",
               letterSpacing: 0.4,
               marginBottom: 14,
+              textAlign: "start",
             }}
           >
             {t("sectorsTitle", lang)}
@@ -163,12 +172,15 @@ export function Landing({
             }}
             className="sectors-grid"
           >
-            {SECTORS.map((s) => (
+            {SECTORS.map((s, idx) => (
               <button
                 key={s.id}
+                data-dir-animate="card"
+                data-dir-id={`sector_tile_${s.id}`}
+                data-dir-stagger={String(40 + (idx % 4) * 20 + Math.floor(idx / 4) * 25)}
                 onClick={() => onSectorPrompt(lang === "en" ? s.promptEn : s.promptAr)}
                 style={{
-                  textAlign: isAr ? "right" : "left",
+                  textAlign: "start",
                   background: "#FAF7F1",
                   border: "1px solid #D4CBBD",
                   borderRadius: 16,

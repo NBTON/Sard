@@ -45,6 +45,9 @@ export function Composer({
       }}
     >
       <div
+        data-dir-animate="composer-bar"
+        data-dir-id="composer-input-bar"
+        data-dir-stagger="40"
         style={{
           maxWidth: 860,
           margin: "0 auto",

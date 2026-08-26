@@ -117,10 +117,82 @@ body::before {
 /* Selection */
 ::selection { background: rgba(190,74,36,0.16); }
 
-/* Reduce motion */
+/* =========================================================================
+   Bidirectional Fluid RTL / LTR Motion System
+   ========================================================================= */
+
+:root {
+  --dir-transition-duration: 580ms;
+  --dir-travel-easing: cubic-bezier(0.22, 1, 0.36, 1);
+  --dir-spring-easing: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dir-stage-easing: cubic-bezier(0.33, 1, 0.68, 1);
+  --dir-delta: 1; /* 1 = switching to RTL, -1 = switching to LTR */
+}
+
+/* While direction switch is animating, disable unwanted hover jumps and smooth layout shift */
+html[data-direction-switching="true"] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+html[data-direction-switching="true"] * {
+  pointer-events: none !important;
+}
+
+/* 3D Stage Turn Viewport */
+.sard-stage-viewport {
+  transform-origin: center center;
+  transform-style: preserve-3d;
+}
+
+/* Directional Icon flip mechanics */
+.directional-icon-wrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center center;
+  transition: transform 480ms var(--dir-spring-easing);
+  will-change: transform;
+}
+
+[dir="rtl"] .directional-icon-wrapper[data-behavior="flip"] {
+  transform: scaleX(-1);
+}
+
+[dir="rtl"] .directional-icon-wrapper[data-behavior="rotate"] {
+  transform: rotate(180deg);
+}
+
+[dir="ltr"] .directional-icon-wrapper[data-behavior="flip"],
+[dir="ltr"] .directional-icon-wrapper[data-behavior="rotate"] {
+  transform: none;
+}
+
+/* Text alignment follows dir logically */
+.text-start-logical { text-align: start; }
+.text-end-logical { text-align: end; }
+
+/* Subtle Stagger Ripple Helper */
+[data-dir-animate] {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+/* Reduce motion override */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .sard-stage-viewport,
+  .sard-direction-sweep,
+  .directional-icon-wrapper,
+  [data-dir-animate] {
+    transform: none !important;
+    animation: none !important;
+    transition: none !important;
   }
 }
+

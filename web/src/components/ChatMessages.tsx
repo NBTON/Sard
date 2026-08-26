@@ -30,13 +30,17 @@ function UserBubble({ m, lang }: { m: Message; lang: Lang }) {
       }}
     >
       <div
+        data-dir-animate="user-bubble"
+        data-dir-id={m.id}
         style={{
           maxWidth: "75%",
           background: "#141210",
           color: "#F3EEE4",
           borderRadius: 18,
-          borderBottomRightRadius: isAr ? 18 : 4,
-          borderBottomLeftRadius: isAr ? 4 : 18,
+          borderEndEndRadius: 4,
+          borderEndStartRadius: 18,
+          borderStartStartRadius: 18,
+          borderStartEndRadius: 18,
           padding: "13px 20px",
           fontSize: 15,
           lineHeight: 1.75,
@@ -44,6 +48,7 @@ function UserBubble({ m, lang }: { m: Message; lang: Lang }) {
           wordBreak: "break-word",
           boxShadow: "0 2px 10px -2px rgba(20,18,16,0.14)",
           animation: "fade-in 0.2s ease",
+          textAlign: "start",
         }}
         dir={isAr ? "rtl" : "ltr"}
       >
@@ -56,10 +61,24 @@ function UserBubble({ m, lang }: { m: Message; lang: Lang }) {
 function AgentCard({ m, lang }: { m: Message; lang: Lang }) {
   const isAr = lang === "ar";
   const factChips = !m.isThinking && !m.error ? extractFacts(m.content) : null;
-  const isVerified = Boolean(m.citations && m.citations.length > 0);
+  // Deduplicate citations by unique source / citation_id
+  const citations = React.useMemo(() => {
+    if (!m.citations || m.citations.length === 0) return [];
+    const seen = new Set<string>();
+    return m.citations.filter((c) => {
+      const key = c.citation_id || c.source_url || c.title || "";
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [m.citations]);
+
+  const isVerified = Boolean(citations.length > 0);
 
   return (
     <div
+      data-dir-animate="agent-card"
+      data-dir-id={m.id}
       style={{
         background: "#FAF7F1",
         border: m.error ? "1px solid #BE4A24" : "1px solid #D4CBBD",
@@ -299,7 +318,7 @@ function AgentCard({ m, lang }: { m: Message; lang: Lang }) {
           )}
 
           {/* Source Pills (olive text, paper chip, 1px line) */}
-          {m.citations && m.citations.length > 0 && (
+          {citations.length > 0 && (
             <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid #E8E0D2" }}>
               <div
                 style={{
@@ -309,12 +328,12 @@ function AgentCard({ m, lang }: { m: Message; lang: Lang }) {
                   marginBottom: 8,
                 }}
               >
-                {t("sources", lang)} • {m.citations.length}
+                {t("sources", lang)} • {citations.length}
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {m.citations.map((c: Citation) => (
+                {citations.map((c: Citation, idx: number) => (
                   <a
-                    key={c.citation_id}
+                    key={`${c.citation_id || c.source_url || "cit"}-${idx}`}
                     href={c.source_url || "#"}
                     target={c.source_url ? "_blank" : undefined}
                     rel="noreferrer"

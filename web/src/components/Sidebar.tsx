@@ -19,6 +19,8 @@ export function ChatSidebar({
 
   return (
     <aside
+      data-dir-animate="sidebar"
+      data-dir-id="chat-sidebar"
       style={{
         width: 300,
         minWidth: 300,
@@ -76,6 +78,7 @@ export function ChatSidebar({
               color: "#3A342E",
               marginBottom: 10,
               letterSpacing: 0.2,
+              textAlign: "start",
             }}
           >
             {t("startersLabel", lang)}
@@ -84,6 +87,9 @@ export function ChatSidebar({
             {STARTERS.map((s, i) => (
               <button
                 key={i}
+                data-dir-animate="chip"
+                data-dir-id={`starter_chip_${i}`}
+                data-dir-stagger={String(20 + i * 15)}
                 onClick={() => onStarter(isAr ? s.ar : s.en)}
                 style={{
                   background: "#F3EEE4",
@@ -93,7 +99,7 @@ export function ChatSidebar({
                   padding: "8px 14px",
                   fontSize: 13,
                   cursor: "pointer",
-                  textAlign: isAr ? "right" : "left",
+                  textAlign: "start",
                   lineHeight: 1.4,
                   transition: "border-color 0.15s ease, background 0.15s ease",
                 }}
@@ -124,6 +130,7 @@ export function ChatSidebar({
           lineHeight: 1.6,
           color: "#8A8178",
           background: "rgba(243, 238, 228, 0.65)",
+          textAlign: "start",
         }}
       >
         {t("disclaimer", lang)}

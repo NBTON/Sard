@@ -5,12 +5,12 @@ import { Landing } from "@/components/Landing";
 import { ChatSidebar } from "@/components/Sidebar";
 import { ChatMessages } from "@/components/ChatMessages";
 import { Composer } from "@/components/Composer";
-import { Lang, Message, View } from "@/types";
-import { getStoredLang, setStoredLang } from "@/lib/storage";
+import { DirectionProvider, StageTurnContainer, useDirection } from "@/lib/direction";
+import { Message, View } from "@/types";
 import { streamChat } from "@/lib/api";
 
-export default function Home() {
-  const [lang, setLang] = useState<Lang>("ar");
+function ChatAppContent() {
+  const { lang, toggleDirection } = useDirection();
   const [view, setView] = useState<View>("landing");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -20,25 +20,6 @@ export default function Home() {
   );
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Initialize lang from localStorage
-  useEffect(() => {
-    const saved = getStoredLang();
-    setLang(saved);
-    document.documentElement.lang = saved;
-    document.documentElement.dir = saved === "en" ? "ltr" : "rtl";
-  }, []);
-
-  // Update HTML tag dir/lang on change
-  useEffect(() => {
-    document.documentElement.lang = lang;
-    document.documentElement.dir = lang === "en" ? "ltr" : "rtl";
-    setStoredLang(lang);
-  }, [lang]);
-
-  function toggleLang() {
-    setLang((prev) => (prev === "ar" ? "en" : "ar"));
-  }
 
   function goHome() {
     setView("landing");
@@ -209,7 +190,7 @@ export default function Home() {
   }, [messages, messages[messages.length - 1]?.content]);
 
   return (
-    <div
+    <StageTurnContainer
       style={{
         height: "100vh",
         display: "flex",
@@ -221,7 +202,7 @@ export default function Home() {
     >
       <Header
         lang={lang}
-        onToggleLang={toggleLang}
+        onToggleLang={() => toggleDirection()}
         onGoHome={goHome}
         view={view}
       />
@@ -291,6 +272,14 @@ export default function Home() {
           .chat-shell aside { display: none !important; }
         }
       `}</style>
-    </div>
+    </StageTurnContainer>
+  );
+}
+
+export default function Home() {
+  return (
+    <DirectionProvider>
+      <ChatAppContent />
+    </DirectionProvider>
   );
 }

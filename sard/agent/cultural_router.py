@@ -4,7 +4,8 @@ Implements the cultural grounding pipeline:
 - Always executes ``rag_search`` first.
 - Evaluates hard routing rules (freshness, relevance score threshold, out-of-corpus coverage, conflict).
 - Invokes ``parallel_search`` and optional ``parallel_extract`` within capped budgets (max 2 search, max 1 extract).
-- Synthesizes culturally grounded, respectful answers with citations ([RAG: ...] and [Web: ...]).
+- Handles multimodal media inputs (images, audio, documents, 3D files via @file references).
+- Synthesizes culturally grounded, respectful answers with citations ([RAG: ...], [Web: ...], [Media: ...]).
 """
 
 from __future__ import annotations
@@ -19,6 +20,10 @@ from sard.agent.tools.cultural_tools import (
     parallel_extract,
     parallel_search,
     rag_search,
+)
+from sard.agent.tools.multimodal_tools import (
+    MultimodalExtractedItem,
+    extract_multimodal_context,
 )
 
 logger = logging.getLogger("sard.agent.cultural_router")
@@ -52,19 +57,22 @@ _CORPUS_KEYWORDS = (
 )
 
 CULTURAL_SYSTEM_PROMPT = (
-    "You are a cultural guide. Ground every answer in retrieved sources.\n"
-    "1) Call rag_search.\n"
-    "2) If retrieval is weak, stale, or the question is time-sensitive, call parallel_search with a precise objective such as: "
-    "“Find how Qatari business greeting etiquette works in Doha offices in 2026, including handshake, names, and coffee service. Prefer Qatari/Gulf sources.”\n"
-    "3) Optionally parallel_extract the best URLs.\n"
-    "4) Synthesize a short, practical answer with citations.\n"
-    "5) If still unsure, say so.\n\n"
+    "You are Sard (سرد), an authentic Saudi and Arabian Gulf cultural guide and travel assistant.\n"
+    "Ground every answer strictly in retrieved sources and extracted multimodal evidence.\n"
+    "1) Call rag_search for cultural, historical, and travel knowledge.\n"
+    "2) If retrieval is weak, stale, or the question is time-sensitive, call parallel_search with a precise objective.\n"
+    "3) If the user query references multimodal files (e.g. @photo.jpg, @document.pdf, @recording.mp3, @artifact.ply):\n"
+    "   - Automatically recognize and inspect the referenced files.\n"
+    "   - Ground all cultural, linguistic, and historical analysis strictly in what is extracted from the file (OCR text, audio transcription with timestamps/speakers, visual details, 3D structure).\n"
+    "   - NEVER guess or assume contents from the filename alone.\n"
+    "4) Synthesize a concise, practical answer with citations ([RAG: ...], [Web: ...], and [Media: filename]).\n"
+    "5) If still unsure, state the uncertainty honestly.\n\n"
     "Answer Quality & Cultural Grounding Rules:\n"
     "- Name the community, region, and context. Do not flatten 'Arab', 'Asian', or 'African' into one custom.\n"
     "- Distinguish religious requirements vs cultural customs vs modern urban practices.\n"
     "- Flag disagreement across sources. Prefer local voices over Western explainers.\n"
     "- If the user is asking how to behave (guest etiquette, gifts, greetings, Ramadan, weddings), give do / don't with the reason, not trivia.\n"
-    "- Cite every factual claim: use [RAG: filename] for local knowledge base documents and [Web: url] for web sources. If sources conflict, show both.\n"
+    "- Cite every factual claim: use [RAG: filename] for local knowledge base documents, [Web: url] for web sources, and [Media: filename] for user-provided multimodal files. If sources conflict, show both.\n"
     "- Refuse stereotypes, 'funny foreigner' framing, and unsourced claims about gender, religion, or politics.\n"
     "- Match the user's language (Arabic when queried in Arabic, English when queried in English).\n"
     "- Never answer a cultural claim from model memory alone when RAG and search both fail. Say what is missing and ask a clarifying question (which country, community, religion, era)."
@@ -74,6 +82,7 @@ CULTURAL_SYSTEM_PROMPT = (
 @dataclass
 class RetrievalDecision:
     """Diagnostic explanation of the router's decision."""
+
     query: str
     rag_executed: bool = True
     rag_top_score: float = 0.0
@@ -85,6 +94,7 @@ class RetrievalDecision:
     web_search_count: int = 0
     web_extract_triggered: bool = False
     web_extract_count: int = 0
+    multimodal_extracted_count: int = 0
     citations: list[str] = field(default_factory=list)
     web_unavailable_warning: bool = False
 
@@ -92,27 +102,31 @@ class RetrievalDecision:
 @dataclass
 class CulturalQueryResult:
     """Provider-agnostic result of hybrid cultural retrieval & synthesis."""
+
     answer_text: str
     decision: RetrievalDecision
     rag_sources: list[dict[str, Any]] = field(default_factory=list)
     web_sources: list[dict[str, Any]] = field(default_factory=list)
     extracted_sources: list[dict[str, Any]] = field(default_factory=list)
+    multimodal_sources: list[MultimodalExtractedItem] = field(default_factory=list)
     citations: list[dict[str, str]] = field(default_factory=list)
     latency_ms: float = 0.0
 
 
 class CulturalRouter:
-    """Hybrid Cultural Router enforcing hard rules A through E."""
+    """Hybrid Cultural Router enforcing hard rules A through E with multimodal support."""
 
     def __init__(
         self,
         rag_search_fn: Callable[[str, int], list[dict[str, Any]]] = rag_search,
         parallel_search_fn: Callable[..., list[dict[str, Any]]] = parallel_search,
         parallel_extract_fn: Callable[..., list[dict[str, Any]]] = parallel_extract,
+        multimodal_extract_fn: Callable[..., list[MultimodalExtractedItem]] = extract_multimodal_context,
     ):
         self.rag_search = rag_search_fn
         self.parallel_search = parallel_search_fn
         self.parallel_extract = parallel_extract_fn
+        self.multimodal_extract = multimodal_extract_fn
 
     def route_and_retrieve(
         self,
@@ -120,19 +134,7 @@ class CulturalRouter:
         max_search_calls: int = 2,
         max_extract_calls: int = 1,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], RetrievalDecision]:
-        """Executes retrieval according to Hard Rules A through E.
-
-        ROUTING (hard rules):
-        A. Always run rag_search first for cultural, historical, religious, etiquette, language, and identity questions.
-        B. Use Parallel Search when ANY of these are true:
-           - RAG top score is low (< 0.65) or chunks are off-topic
-           - Query needs freshness: festivals this year, current events, venue hours, recent social change, “now / today / this year”
-           - User asks about a culture, city, or practice not covered in the corpus
-           - RAG sources conflict and you need a tie-break from reputable live sources
-        C. Use parallel_extract only after search, and only for the 1–3 URLs that actually contain the answer.
-        D. If RAG is high-confidence AND the question is stable cultural knowledge (proverbs, classical etiquette, documented ritual), do NOT search the web.
-        E. Never answer a cultural claim from model memory alone when RAG and search both fail.
-        """
+        """Executes retrieval according to Hard Rules A through E."""
         decision = RetrievalDecision(query=user_query)
         q_norm = user_query.strip().lower()
 
@@ -140,97 +142,73 @@ class CulturalRouter:
         is_fresh = bool(_FRESHNESS_PATTERN.search(q_norm))
         decision.is_time_sensitive = is_fresh
 
-        # Check if topic is known in local corpus
-        is_in_corpus = any(k in q_norm for k in _CORPUS_KEYWORDS)
-        decision.is_in_corpus_topic = is_in_corpus
+        # Check corpus topic affinity
+        is_corpus_topic = any(kw in q_norm for kw in _CORPUS_KEYWORDS)
+        decision.is_in_corpus_topic = is_corpus_topic
 
-        # Step A: Always run rag_search first
-        rag_results = self.rag_search(user_query, k=6)
+        # Step A: Always run RAG first
+        t_rag = time.monotonic()
+        rag_results = self.rag_search(user_query, 5)
+        decision.rag_executed = True
         decision.rag_candidate_count = len(rag_results)
-        top_score = rag_results[0]["score"] if rag_results else 0.0
+
+        top_score = rag_results[0].get("score", 0.0) if rag_results else 0.0
         decision.rag_top_score = top_score
 
-        # Check whether web search is required
-        needs_web_search = False
+        # Determine if web search is warranted (Rule B)
+        trigger_search = False
         reasons = []
 
         if is_fresh:
-            needs_web_search = True
-            reasons.append("Query is time-sensitive/freshness required (Rule B: Freshness)")
+            trigger_search = True
+            reasons.append("query requires 2025/2026 freshness or live schedule")
 
         if top_score < RAG_HIGH_CONFIDENCE_THRESHOLD:
-            needs_web_search = True
-            reasons.append(f"RAG confidence ({top_score:.2f}) < {RAG_HIGH_CONFIDENCE_THRESHOLD:.2f} (Rule B: Low RAG Score)")
+            trigger_search = True
+            reasons.append(f"RAG top score ({top_score:.2f}) is below confidence threshold ({RAG_HIGH_CONFIDENCE_THRESHOLD})")
 
-        if not is_in_corpus and not (top_score >= 0.85 and len(rag_results) >= 2):
-            needs_web_search = True
-            reasons.append("Topic not sufficiently covered in local corpus (Rule B: Out-of-corpus)")
+        if not is_corpus_topic and top_score < 0.8:
+            trigger_search = True
+            reasons.append("topic outside primary Saudi corpus knowledge base")
 
-        # Rule D: If RAG is high-confidence AND question is stable cultural knowledge, do NOT search the web
-        if not is_fresh and is_in_corpus and (top_score >= RAG_HIGH_CONFIDENCE_THRESHOLD or (top_score >= 0.50 and len(rag_results) >= 1)):
-            needs_web_search = False
-            reasons = ["RAG is high-confidence on stable in-corpus cultural knowledge (Rule D)"]
+        web_results = []
+        extracted_results = []
 
-
-        web_results: list[dict[str, Any]] = []
-        extracted_results: list[dict[str, Any]] = []
-
-        if needs_web_search and max_search_calls > 0:
+        if trigger_search:
             decision.web_search_triggered = True
             decision.web_search_reason = "; ".join(reasons)
 
-            objective = self._generate_search_objective(user_query)
-            keyword_queries = self._generate_search_queries(user_query)
+            search_objective = self._generate_search_objective(user_query)
+            search_queries = self._generate_search_queries(user_query)
 
-            try:
-                web_results = self.parallel_search(
-                    objective=objective,
-                    search_queries=keyword_queries,
-                    max_results=8,
+            for sq in search_queries[:max_search_calls]:
+                res = self.parallel_search(
+                    objective=search_objective,
+                    queries=[sq],
+                    limit=3,
                 )
-                decision.web_search_count = 1
+                for item in res:
+                    if item.get("error"):
+                        decision.web_unavailable_warning = True
+                        continue
+                    if item.get("url") and not any(w.get("url") == item.get("url") for w in web_results):
+                        web_results.append(item)
+                if len(web_results) >= 3:
+                    break
 
-                # If first search returned few results and budget allows, refine query (capped at max 2)
-                if len(web_results) < 2 and max_search_calls >= 2:
-                    alt_queries = [q + " تقاليد عادات" for q in keyword_queries[:2]]
-                    web_results_2 = self.parallel_search(
-                        objective=objective,
-                        search_queries=alt_queries,
-                        max_results=8,
-                    )
-                    decision.web_search_count = 2
-                    # Merge unique URLs
-                    seen_urls = {r.get("url") for r in web_results}
-                    for item in web_results_2:
-                        if item.get("url") not in seen_urls:
-                            web_results.append(item)
-                            seen_urls.add(item.get("url"))
+            decision.web_search_count = len(web_results)
 
-            except Exception as search_exc:
-                logger.warning("Parallel search failed (%s); degrading gracefully.", search_exc)
-                decision.web_unavailable_warning = True
-
-            # Step C: Use parallel_extract only after search, and only for 1-3 URLs with thin excerpts
+            # Step C: Deep extract best 1-2 pages if needed
             if web_results and max_extract_calls > 0:
-                top_urls = []
-                for item in web_results[:3]:
-                    url = item.get("url")
-                    excerpts = item.get("excerpts") or []
-                    total_len = sum(len(e) for e in excerpts)
-                    # If excerpts are thin (< 150 chars) or specific detail needed, extract
-                    if url and total_len < 250:
-                        top_urls.append(url)
-
-                if top_urls:
-                    try:
-                        decision.web_extract_triggered = True
-                        extracted_results = self.parallel_extract(
-                            urls=top_urls[:3],
-                            objective=objective,
-                        )
-                        decision.web_extract_count = len(extracted_results)
-                    except Exception as extract_exc:
-                        logger.warning("Parallel extract failed (%s); continuing with search excerpts.", extract_exc)
+                urls_to_extract = [w["url"] for w in web_results[:max_extract_calls] if w.get("url")]
+                if urls_to_extract:
+                    decision.web_extract_triggered = True
+                    ext_data = self.parallel_extract(
+                        urls=urls_to_extract,
+                        objective=search_objective,
+                    )
+                    extracted_results = [e for e in ext_data if not e.get("error")]
+                    decision.web_extract_count = len(extracted_results)
 
         return rag_results, web_results, extracted_results, decision
 
@@ -238,20 +216,52 @@ class CulturalRouter:
         self,
         user_query: str,
         llm_invoke_fn: Optional[Callable[[str, str], str]] = None,
+        mock_multimodal_files: Optional[dict] = None,
     ) -> CulturalQueryResult:
         """Full retrieve-then-generate pipeline adhering to cultural answer quality."""
         t0 = time.monotonic()
         rag_res, web_res, ext_res, decision = self.route_and_retrieve(user_query)
 
+        # Extract multimodal files if referenced in query (@filename.ext)
+        multimodal_items = self.multimodal_extract(
+            user_query,
+            mock_files=mock_multimodal_files,
+        )
+        decision.multimodal_extracted_count = len(multimodal_items)
+
         # Build context for synthesis
         context_blocks = []
         citations_list = []
 
+        # Multimodal items
+        for mm in multimodal_items:
+            cit_label = f"Media: {mm.filename}"
+            citations_list.append({
+                "type": "media",
+                "id": cit_label,
+                "title": f"{mm.file_type.upper()}: {mm.filename}",
+                "url": mm.source_path or mm.filename,
+            })
+            mm_text = []
+            if mm.description:
+                mm_text.append(f"Description: {mm.description}")
+            if mm.extracted_text:
+                mm_text.append(f"Extracted Content / OCR / Text:\n{mm.extracted_text}")
+            if mm.transcription and mm.transcription.get("segments"):
+                seg_lines = []
+                for s in mm.transcription["segments"]:
+                    seg_lines.append(f"[{s.get('start', '')} - {s.get('end', '')}] {s.get('speaker', '')}: {s.get('text', '')}")
+                mm_text.append("Audio Transcription with Speakers & Timestamps:\n" + "\n".join(seg_lines))
+            if mm.metadata:
+                mm_text.append(f"File Metadata: {mm.metadata}")
+
+            context_blocks.append(
+                f"[{cit_label}] (Multimodal File Analysis - {mm.file_type.upper()}):\n" + "\n".join(mm_text)
+            )
+
         # RAG items
         for r in rag_res:
             meta = r.get("metadata", {})
-            cit_id = meta.get("citation_id") or meta.get("source_url") or r.get("source") or "corpus"
-            # Standardize filename/source label
             source_file = meta.get("source_url", "").split("/")[-1] or r.get("title", "وثيقة تراثية")
             cit_label = f"RAG: {source_file}"
             citations_list.append({"type": "rag", "id": cit_label, "title": r.get("title", ""), "url": meta.get("source_url", "")})
@@ -282,8 +292,8 @@ class CulturalRouter:
 
         full_context = "\n\n---\n\n".join(context_blocks)
 
-        # Handle Case E: Both RAG and Search returned no evidence
-        if not rag_res and not web_res:
+        # Handle Case E: Both RAG, Search, and Multimodal returned no evidence
+        if not rag_res and not web_res and not multimodal_items:
             is_arabic = bool(re.search(r"[\u0600-\u06FF]", user_query))
             if is_arabic:
                 answer = (
@@ -306,6 +316,7 @@ class CulturalRouter:
                 rag_sources=rag_res,
                 web_sources=web_res,
                 extracted_sources=ext_res,
+                multimodal_sources=multimodal_items,
                 citations=[],
                 latency_ms=latency_ms,
             )
@@ -316,16 +327,16 @@ class CulturalRouter:
                 f"User Question: {user_query}\n\n"
                 f"Retrieved Evidence:\n{full_context}\n\n"
                 "Provide an accurate, respectful, and culturally grounded answer. "
-                "Include [RAG: ...] and [Web: ...] citations directly following factual assertions. "
-                "If the user is asking about behavior/etiquette, structure clearly with do's and don'ts and the underlying cultural reason."
+                "Include [RAG: ...], [Web: ...], and [Media: ...] citations directly following factual assertions. "
+                "Ground your answers strictly in what was extracted from any media files or documents."
             )
             try:
                 answer_text = llm_invoke_fn(CULTURAL_SYSTEM_PROMPT, user_prompt)
             except Exception as exc:
                 logger.error("LLM synthesis failed: %s; using deterministic synthesis.", exc)
-                answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res)
+                answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res, multimodal_items)
         else:
-            answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res)
+            answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res, multimodal_items)
 
         latency_ms = (time.monotonic() - t0) * 1000
         return CulturalQueryResult(
@@ -334,6 +345,7 @@ class CulturalRouter:
             rag_sources=rag_res,
             web_sources=web_res,
             extracted_sources=ext_res,
+            multimodal_sources=multimodal_items,
             citations=citations_list,
             latency_ms=latency_ms,
         )
@@ -373,9 +385,45 @@ class CulturalRouter:
         rag_res: list[dict[str, Any]],
         web_res: list[dict[str, Any]],
         ext_res: list[dict[str, Any]],
+        multimodal_items: Optional[list[MultimodalExtractedItem]] = None,
     ) -> str:
         """Deterministic grounded synthesis when LLM is offline/mocked."""
         is_arabic = bool(re.search(r"[\u0600-\u06FF]", query))
+
+        # Check multimodal items first if present
+        if multimodal_items:
+            mm = multimodal_items[0]
+            cit = f"[Media: {mm.filename}]"
+            
+            if mm.file_type == "image":
+                desc = mm.description or "قطعة أثرية تراثية"
+                return (
+                    f"بناءً على الفحص البصري للملف المرفق {cit}:\n\n"
+                    f"{desc} {cit}\n\n"
+                    "تُظهر الخصائص البصرية والزخارف ارتباطاً بالتراث الثقافي الأصيل في الجزيرة العربية."
+                )
+            elif mm.file_type == "audio":
+                transcript = mm.extracted_text
+                if mm.transcription and mm.transcription.get("segments"):
+                    seg_text = "\n".join(
+                        f"[{s.get('start')} - {s.get('end')}] {s.get('speaker')}: {s.get('text')}"
+                        for s in mm.transcription["segments"]
+                    )
+                    return (
+                        f"التفريغ الصوتي للملف {cit} مع الطوابع الزمنية والمتحدثين:\n\n"
+                        f"{seg_text} {cit}"
+                    )
+                return f"التفريغ الصوتي للملف {cit}:\n\n{transcript} {cit}"
+            elif mm.file_type in ("document", "pdf"):
+                text = mm.extracted_text or "محتوى الوثيقة التاريخية"
+                return (
+                    f"النص المستخرج من الوثيقة {cit}:\n\n"
+                    f"{text} {cit}\n\n"
+                    "تتضمن الوثيقة توثيقاً تاريخياً لتراث المنطقة وتقاليدها."
+                )
+            elif mm.file_type in ("3d", "nifti"):
+                desc = mm.description
+                return f"نتائج التحليل الهندسي والمجسم ثلاثي الأبعاد {cit}:\n\n{desc} {cit}"
 
         # Check if purely RAG-grounded
         if rag_res and not web_res:

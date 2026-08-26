@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import operator
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Optional, TypedDict
 
@@ -168,6 +168,17 @@ class RenderedArtifactInfo:
     error_category: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class MultimodalItem:
+    filename: str
+    file_type: str  # image, audio, video, document, 3d, nifti
+    extracted_text: str = ""
+    description: str = ""
+    source_path: Optional[str] = None
+    extraction_method: str = "core"
+    metadata: dict = field(default_factory=dict)
+
+
 class GraphState(TypedDict, total=False):
     """Full pipeline state. Append-only fields use LangGraph reducers."""
 
@@ -175,6 +186,7 @@ class GraphState(TypedDict, total=False):
     original_request: str
     normalized_request: str
     request_language: str
+    multimodal_inputs: list[MultimodalItem]
 
     intent: str
     destination: Optional[str]
@@ -246,6 +258,7 @@ def initial_state(
         "original_request": request,
         "normalized_request": request,
         "request_language": "ar",
+        "multimodal_inputs": [],
         "intent": "travel_planning",
         "destination": None,
         "duration_days": None,

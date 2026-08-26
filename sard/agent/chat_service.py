@@ -62,8 +62,12 @@ class ChatService:
             return self._injected_model
         return get_chat_model()
 
-    def ask_cultural(self, user_query: str) -> CulturalQueryResult:
-        """Run the hybrid cultural router and synthesize an answer grounded in RAG/Web sources."""
+    def ask_cultural(
+        self,
+        user_query: str,
+        mock_multimodal_files: Optional[dict] = None,
+    ) -> CulturalQueryResult:
+        """Run the hybrid cultural router and synthesize an answer grounded in RAG/Web/Multimodal sources."""
         def _invoke_llm(sys_p: str, user_p: str) -> str:
             if self._injected_model is not None:
                 model = self._injected_model
@@ -82,6 +86,7 @@ class ChatService:
         return self.router.answer_query(
             user_query,
             llm_invoke_fn=_invoke_llm if self._injected_model is not None else None,
+            mock_multimodal_files=mock_multimodal_files,
         )
 
 

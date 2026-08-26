@@ -36,6 +36,9 @@ export function Header({
     >
       {/* Start: 13-thread mark + سرد + tagline */}
       <div
+        data-dir-animate="header-brand"
+        data-dir-id="header-brand"
+        data-dir-stagger="10"
         onClick={onGoHome}
         style={{
           display: "flex",
@@ -77,7 +80,12 @@ export function Header({
       </div>
 
       {/* End: AR | EN pills + Home control */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div
+        data-dir-animate="header-actions"
+        data-dir-id="header-actions"
+        data-dir-stagger="30"
+        style={{ display: "flex", alignItems: "center", gap: 10 }}
+      >
         {/* عربي | EN pills */}
         <div
           role="group"
@@ -104,7 +112,7 @@ export function Header({
               cursor: "pointer",
               background: lang === "ar" ? "#141210" : "transparent",
               color: lang === "ar" ? "#F3EEE4" : "#3A342E",
-              transition: "all 0.18s ease",
+              transition: "all 0.22s ease",
             }}
           >
             عربي
@@ -121,7 +129,7 @@ export function Header({
               cursor: "pointer",
               background: lang === "en" ? "#141210" : "transparent",
               color: lang === "en" ? "#F3EEE4" : "#3A342E",
-              transition: "all 0.18s ease",
+              transition: "all 0.22s ease",
             }}
           >
             EN
@@ -140,7 +148,7 @@ export function Header({
             color: view === "landing" ? "#FAF7F1" : "#141210",
             border: "1px solid #D4CBBD",
             cursor: "pointer",
-            transition: "all 0.18s ease",
+            transition: "all 0.22s ease",
           }}
           aria-label={t("home", lang)}
         >

@@ -24,7 +24,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 from dotenv import load_dotenv
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -57,6 +57,8 @@ class ModelSettings:
 
 # Register newly supported providers here.
 SUPPORTED_PROVIDERS: tuple[str, ...] = ("nvidia", "anthropic", "openai", "openrouter")
+
+
 def _read_settings() -> ModelSettings:
     """Read and validate model configuration from environment variables.
 
@@ -183,7 +185,6 @@ def _build_openrouter(settings: ModelSettings) -> BaseChatModel:
         raise ModelConfigError(
             "حزمة langchain-openai غير مثبّتة. ثبّتها عبر: uv sync --extra openai"
         ) from exc
-    # OpenRouter uses OpenAI-compatible interface; do not expose key in logs
     return ChatOpenAI(
         model=settings.model_name,
         temperature=settings.temperature,
@@ -249,3 +250,13 @@ def get_chat_model() -> BaseChatModel:
             "تعذّر تهيئة نموذج الدردشة بسبب خطأ غير متوقع. "
             "راجع سجلات التشغيل المحلية للتفاصيل."
         ) from exc
+
+
+def get_dashscope_key() -> Optional[str]:
+    """Retrieve DashScope API key for Qwen multimodal features if set."""
+    return os.environ.get("DASHSCOPE_API_KEY", "").strip() or None
+
+
+def has_dashscope_multimodal() -> bool:
+    """Check if DashScope multimodal API is configured."""
+    return bool(get_dashscope_key())
