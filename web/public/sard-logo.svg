@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" role="img" aria-labelledby="title desc">
+  <title>Sard — سرد</title>
+  <desc>13 vertical threads representing the 13 regions of Saudi Arabia</desc>
+  <!-- Outer rounded square — ink #141210 -->
+  <rect width="120" height="120" rx="22" fill="#141210" stroke="#D4CBBD" stroke-opacity="0.35" stroke-width="1.2"/>
+  <!-- 13 bars — paper #F3EEE4, bottom-aligned, irregular heights -->
+  <!-- usable area: x 18..102, y 18..102 (84x84), barW ~4.15, gap 2.5 -->
+  <g fill="#F3EEE4">
+    <!-- Riyadh 76% --><rect x="18.00" y="38.16" width="4.15" height="63.84" rx="2.07"/>
+    <!-- Makkah 92% --><rect x="24.65" y="24.72" width="4.15" height="77.28" rx="2.07"/>
+    <!-- Madinah 64% --><rect x="31.30" y="48.24" width="4.15" height="53.76" rx="2.07"/>
+    <!-- Eastern 82% --><rect x="37.95" y="33.12" width="4.15" height="68.88" rx="2.07"/>
+    <!-- Asir 88% --><rect x="44.60" y="28.08" width="4.15" height="73.92" rx="2.07"/>
+    <!-- Tabuk 56% --><rect x="51.25" y="54.96" width="4.15" height="47.04" rx="2.07"/>
+    <!-- Hail 70% --><rect x="57.90" y="43.20" width="4.15" height="58.80" rx="2.07"/>
+    <!-- Qassim 50% --><rect x="64.55" y="60.00" width="4.15" height="42.00" rx="2.07"/>
+    <!-- Jazan 68% --><rect x="71.20" y="44.88" width="4.15" height="57.12" rx="2.07"/>
+    <!-- Najran 78% --><rect x="77.85" y="36.48" width="4.15" height="65.52" rx="2.07"/>
+    <!-- Baha 54% --><rect x="84.50" y="56.64" width="4.15" height="45.36" rx="2.07"/>
+    <!-- Jouf 46% --><rect x="91.15" y="63.36" width="4.15" height="38.64" rx="2.07"/>
+    <!-- Northern Borders 62% --><rect x="97.80" y="49.92" width="4.15" height="52.08" rx="2.07"/>
+  </g>
+</svg>

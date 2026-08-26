@@ -1,7 +1,7 @@
 # Sard (سرد) — Arabic-First Saudi Cultural & Travel Assistant
 
 <p align="center">
-  <img src="web/public/sard-logo.png" alt="Sard Logo" width="120" onerror="this.style.display='none'"/>
+  <img src="web/public/sard-logo.svg" alt="Sard — سرد Logo: 13 threads for the 13 Saudi regions" width="112" height="112" />
 </p>
 
 <p align="center">
@@ -25,9 +25,9 @@
 
 1. [Overview & Core Philosophy](#-overview--core-philosophy)
 2. [Agent Architecture & How It Works](#-agent-architecture--how-it-works)
-   - [LangGraph Agent Pipeline](#1-langgraph-agent-pipeline-mermaid)
-   - [Hybrid Cultural Retrieval & Routing](#2-hybrid-cultural-retrieval--routing-mermaid)
-   - [End-to-End System Architecture](#3-end-to-end-system-architecture-mermaid)
+   - [LangGraph Agent Pipeline](#1-langgraph-agent-pipeline)
+   - [Hybrid Cultural Retrieval & Routing](#2-hybrid-cultural-retrieval--routing)
+   - [End-to-End System Architecture](#3-end-to-end-system-architecture)
 3. [Key Features](#-key-features)
 4. [Project Structure](#-project-structure)
 5. [LangGraph Execution Lifecycle](#-langgraph-execution-lifecycle)
@@ -58,145 +58,156 @@
 
 ## 🧠 Agent Architecture & How It Works
 
-### 1. LangGraph Agent Pipeline (Mermaid)
+### 1. LangGraph Agent Pipeline
 
 The Sard agent core executes a stateful, cyclical LangGraph workflow. Claims generated in the `compose` node must pass the strict `verify` gate before reaching `render`. If verification finds unsupported assertions or citation errors, it loops back to `compose` with corrective feedback (up to `compose_max_retries`).
 
 ```mermaid
+%% Sard LangGraph pipeline — 6 stages + verify gate with bounded retry
 flowchart TD
-    START([🚀 Start: User Query]) --> NodeUnderstand["🧠 1. Understand<br/>• Classify Intent<br/>• Extract Dates, Regions & Pace<br/>• Sanitize & Format Query"]
-    
-    NodeUnderstand --> NodePlan["📋 2. Plan<br/>• Decompose Travel Tasks<br/>• Formulate Sub-Queries<br/>• Set Retrieval Strategy"]
-    
-    NodePlan --> NodeRetrieve["🔍 3. Retrieve<br/>• Hybrid Search (Dense + FTS)<br/>• Reciprocal Rank Fusion (RRF)<br/>• Cross-Encoder Reranking<br/>• Dynamic Web Fallback"]
-    
-    NodeRetrieve --> NodeCompose["✍️ 4. Compose<br/>• Synthesize Arabic Itinerary<br/>• Inject [CIT-X] Grounded Citations<br/>• Structure Daily Activities"]
-    
-    NodeCompose --> NodeVerify{"🛡️ 5. Verify Gate<br/>• Fact-Check Against Chunks<br/>• Validate Citation IDs<br/>• Cultural Etiquette Audit"}
-    
-    NodeVerify -- "❌ Factual Gap / Missing Citation<br/>(Retry Count < Max)" --> NodeCompose
-    
-    NodeVerify -- "⚠️ Max Retries Exceeded" --> NodeExtractive["📝 Honest Extractive Fallback<br/>(Preserve Only Verified Facts)"]
-    
-    NodeVerify -- "✅ All Claims Verified" --> NodeRender["📦 6. Render<br/>• Generate Arabic RTL PDF<br/>• Build RFC 5545 iCalendar (.ics)<br/>• Compile Clean Raw Text (.txt)"]
-    
-    NodeExtractive --> NodeRender
-    
-    NodeRender --> END([🏁 End: Return Stream / Artifacts])
+    START([Start — User Query]) --> U["1 · Understand<br/>Classify intent · Extract dates / region / pace<br/>Sanitize and normalize Arabic"]
+    U --> P["2 · Plan<br/>Decompose travel tasks<br/>Formulate sub-queries · Set retrieval strategy"]
+    P --> R["3 · Retrieve<br/>Hybrid search — Dense + FTS · RRF<br/>Cross-encoder rerank · Web fallback if needed"]
+    R --> C["4 · Compose<br/>Synthesize Arabic itinerary<br/>Inject [CIT-X] grounded citations"]
+    C --> V{"5 · Verify Gate<br/>Fact-check vs retrieved chunks<br/>Validate citation IDs · Etiquette audit"}
+    V -- "Factual gap — retry < max" --> C
+    V -- "Max retries exceeded" --> E["Extractive Fallback<br/>Preserve only verified facts"]
+    V -- "All claims verified" --> N["6 · Render<br/>RTL PDF · RFC 5545 .ics (Asia/Riyadh) · answer.txt"]
+    E --> N
+    N --> END([End — Stream & Artifacts])
 
-    classDef stage fill:#0F2837,stroke:#91B9B4,stroke-width:2px,color:#fff;
-    classDef gate fill:#6E1946,stroke:#EB5A3C,stroke-width:2px,color:#fff;
-    classDef output fill:#1B4965,stroke:#FAC39B,stroke-width:2px,color:#fff;
-    
-    class NodeUnderstand,NodePlan,NodeRetrieve,NodeCompose stage;
-    class NodeVerify gate;
-    class NodeRender,NodeExtractive output;
+    classDef stage fill:#141210,stroke:#C4A46A,stroke-width:1.6px,color:#F3EEE4;
+    classDef gate fill:#6E1946,stroke:#FAC39B,stroke-width:1.8px,color:#FFFFFF;
+    classDef output fill:#1B4965,stroke:#91B9B4,stroke-width:1.6px,color:#FFFFFF;
+    classDef term fill:#FAF7F1,stroke:#D4CBBD,stroke-width:1.4px,color:#141210;
+    class U,P,R,C stage;
+    class V gate;
+    class N,E output;
+    class START,END term;
 ```
 
 ---
 
-### 2. Hybrid Cultural Retrieval & Routing (Mermaid)
+### 2. Hybrid Cultural Retrieval & Routing
 
 Sard combines an embedded, local vector database (`Zvec`) with an intelligent, budget-capped search router (`CulturalRouter`) to ensure speed, offline reliability, and freshness for live events.
 
 ```mermaid
-flowchart LR
-    Query([Query: User Prompt]) --> Router{"Cultural Router<br/>Evaluation"}
-    
-    subgraph LocalRAG ["📚 Local Knowledge Base (Always-On)"]
-        ZvecDense["Dense Vector Search<br/>(Nemotron / NV-Embed)"]
-        ZvecFTS["BM25 Full-Text Search<br/>(Arabic Normalization)"]
-        RRF["Reciprocal Rank Fusion<br/>(RRF Score)"]
-        Reranker["Cross-Encoder Reranker<br/>(Mistral Rerank / Fallback)"]
-        
-        ZvecDense & ZvecFTS --> RRF --> Reranker
-    end
-    
-    Router -->|"1. Always Run First"| LocalRAG
-    
-    subgraph DecisionEngine ["⚖️ Routing Decision Rules"]
-        Rule1{"High Confidence<br/>In Corpus?<br/>(Score >= 0.65)"}
-        Rule2{"Time-Sensitive /<br/>Freshness Needed?<br/>(e.g., 2026 events)"}
-        Rule3{"Corpus Missing<br/>Region / Topic?"}
-    end
-    
-    Reranker --> DecisionEngine
-    
-    subgraph WebExpansion ["🌐 Parallel Web Search (Capped Budget)"]
-        ParallelSearch["Parallel Search<br/>(Max 2 Requests)"]
-        ParallelExtract["Parallel Extract<br/>(Max 1 URL)"]
-        SourcePolicy["Cultural Source Policy<br/>(Prefer Local / Official Sources)"]
-        
-        ParallelSearch --> ParallelExtract --> SourcePolicy
-    end
-    
-    DecisionEngine -- "Yes (In Corpus & Stable)" --> Synthesis["Answer Synthesis<br/>• Tag [RAG: doc.pdf]<br/>• Tag [Web: url]<br/>• Flag Cross-Source Disagreements"]
-    DecisionEngine -- "Freshness Required / Low RAG Score" --> WebExpansion --> Synthesis
-    
-    Synthesis --> OutputResult([Final Cited Output])
+%% Sard Hybrid Cultural Retrieval — local-first, capped web expansion
+flowchart TD
+    Q([User Prompt]) --> LOCAL
 
-    classDef box fill:#0F2837,stroke:#91B9B4,stroke-width:2px,color:#fff;
-    classDef router fill:#6E1946,stroke:#FAC39B,stroke-width:2px,color:#fff;
-    class LocalRAG,WebExpansion,DecisionEngine box;
-    class Router,Synthesis router;
+    subgraph LOCAL ["Local Knowledge Base — Always Runs First"]
+        direction TB
+        D["Dense Vector Search<br/>Nemotron / NV-Embed"]
+        F["BM25 Full-Text Search<br/>Arabic normalization"]
+        RRF["Reciprocal Rank Fusion (RRF)"]
+        RK["Cross-Encoder Reranker<br/>Mistral Rerank / Fallback"]
+        D --> RRF
+        F --> RRF
+        RRF --> RK
+    end
+
+    RK --> DECIDE{"Routing Decision<br/>Score >= 0.65 ? · Freshness needed ?<br/>Region or topic missing ?"}
+
+    subgraph WEB ["Web Expansion — Capped Budget"]
+        direction LR
+        S["Parallel Search<br/>max 2 requests"]
+        E["Parallel Extract<br/>max 1 URL"]
+        POL["Cultural Source Policy<br/>Prefer official / local sources"]
+        S --> E --> POL
+    end
+
+    DECIDE -- "In corpus and stable" --> SYN["Answer Synthesis<br/>Tag [RAG: doc.pdf] · [Web: url]<br/>Flag cross-source disagreements"]
+    DECIDE -- "Freshness required or low RAG score" --> WEB
+    WEB --> SYN
+    SYN --> OUT([Final Cited Output])
+
+    classDef local fill:#141210,stroke:#C4A46A,stroke-width:1.5px,color:#F3EEE4;
+    classDef decision fill:#6E1946,stroke:#FAC39B,stroke-width:1.7px,color:#FFFFFF;
+    classDef web fill:#1B4965,stroke:#91B9B4,stroke-width:1.5px,color:#FFFFFF;
+    classDef term fill:#FAF7F1,stroke:#D4CBBD,stroke-width:1.4px,color:#141210;
+    class D,F,RRF,RK local;
+    class DECIDE,SYN decision;
+    class S,E,POL web;
+    class Q,OUT term;
 ```
 
 ---
 
-### 3. End-to-End System Architecture (Mermaid)
+### 3. End-to-End System Architecture
 
 ```mermaid
-graph TB
-    subgraph FrontendLayer ["💻 Presentation Layer (Bilingual RTL / LTR)"]
-        NextJS["Next.js 14 Web App<br/>(MOC Brand Theme, SSE Streaming,<br/>Chat History, Citations Drawer)"]
-        StreamlitApp["Streamlit Demo UI<br/>(Investor Dashboard & Offline Mode)"]
+%% Sard End-to-End Architecture — Presentation → API → Agent Core → Storage / Outputs
+flowchart TB
+
+    subgraph FE ["Presentation Layer — Bilingual RTL / LTR"]
+        direction TB
+        NextJS["Next.js 14 Web App<br/>MOC theme · SSE streaming<br/>Chat history · Citations drawer"]
+        StreamlitApp["Streamlit Demo UI<br/>Investor dashboard · Offline mode"]
     end
 
-    subgraph APILayer ["⚡ FastAPI Backend Layer"]
-        Server["FastAPI Application (sard.api.server)"]
-        ChatSSE["POST /api/chat (SSE Stream)"]
-        ItinEndpoint["POST /api/itinerary (Graph Run)"]
-        ArtifactsEndpoint["GET /api/artifacts/{filename}"]
-        HealthStatus["GET /api/health & /status"]
-        
-        Server --> ChatSSE & ItinEndpoint & ArtifactsEndpoint & HealthStatus
+    subgraph API ["FastAPI Backend — sard.api.server"]
+        direction TB
+        Server["FastAPI Server"]
+        ChatSSE["POST /api/chat<br/>SSE stream"]
+        ItinEP["POST /api/itinerary<br/>Graph run"]
+        ArtEP["GET /api/artifacts/{file}"]
+        HealthEP["GET /api/health & /status"]
+        Server --> ChatSSE
+        Server --> ItinEP
+        Server --> ArtEP
+        Server --> HealthEP
     end
 
-    subgraph AgentCore ["🧠 Sard Agent Core (LangGraph & RAG)"]
-        GraphEngine["LangGraph State Machine<br/>(understand → plan → retrieve → compose → verify → render)"]
-        ChatService["ChatService & CulturalRouter<br/>(Conversation Ledger & Hybrid Search)"]
-        ModelFactory["Centralized Model Factory<br/>(NVIDIA NIM / Anthropic / OpenAI / OpenRouter)"]
-        
-        GraphEngine <--> ChatService
+    subgraph CORE ["Sard Agent Core — LangGraph & RAG"]
+        direction TB
+        GraphEngine["LangGraph State Machine<br/>understand → plan → retrieve → compose → verify → render"]
+        ChatService["ChatService + CulturalRouter<br/>Conversation ledger · Hybrid search"]
+        ModelFactory["Model Factory<br/>NVIDIA NIM · Anthropic · OpenAI · OpenRouter"]
+        ChatService --> GraphEngine
+        GraphEngine --> ChatService
         ChatService --> ModelFactory
     end
 
-    subgraph RAGStorage ["🗄️ Storage & Retrieval Foundation"]
-        ZvecDB["Embedded Zvec DB<br/>(Dense + BM25 FTS Collections)"]
-        CorpusDocs["Verified Corpus Documents<br/>(PDF, HTML, MD + Meta Sidecars)"]
-        EvalGolden["Evaluation Suite<br/>(evals/golden.json - Golden Set)"]
+    subgraph STORE ["Storage & Retrieval Foundation"]
+        direction TB
+        ZvecDB["Embedded Zvec DB<br/>Dense + BM25 FTS collections"]
+        CorpusDocs["Verified Corpus Documents<br/>PDF · HTML · MD + meta sidecars"]
+        EvalGolden["Evaluation Suite<br/>evals/golden.json"]
     end
 
-    subgraph DeterministicOutputs ["📄 Output Artifact Generators"]
-        PDFGen["Arabic RTL PDF Renderer<br/>(ReportLab + NotoNaskhArabic)"]
-        ICSGen["iCalendar Generator<br/>(RFC 5545 Asia/Riyadh .ics)"]
-        RawGen["Plain Text Answer<br/>(answer.txt + Citation Manifest)"]
+    subgraph OUT ["Output Artifact Generators"]
+        direction TB
+        PDFGen["RTL PDF Renderer<br/>ReportLab + NotoNaskhArabic"]
+        ICSGen["iCalendar Generator<br/>RFC 5545 · Asia/Riyadh .ics"]
+        RawGen["Plain Text Answer<br/>answer.txt + citation manifest"]
     end
 
-    NextJS -->|SSE / REST| Server
-    StreamlitApp -->|Direct Ingestion / Application Service| AgentCore
-    APILayer --> AgentCore
-    AgentCore --> RAGStorage
-    AgentCore --> DeterministicOutputs
-    DeterministicOutputs -->|Serve Artifacts| ArtifactsEndpoint
+    NextJS -- "SSE / REST" --> Server
+    StreamlitApp -- "Direct service call" --> GraphEngine
+    ChatSSE --> ChatService
+    ItinEP --> GraphEngine
+    ChatService --> ZvecDB
+    GraphEngine --> ZvecDB
+    CorpusDocs -. "Ingested into" .-> ZvecDB
+    GraphEngine --> PDFGen
+    GraphEngine --> ICSGen
+    GraphEngine --> RawGen
+    PDFGen -- "Serve file" --> ArtEP
+    ICSGen -- "Serve file" --> ArtEP
+    RawGen -- "Serve file" --> ArtEP
 
-    classDef primary fill:#0F2837,stroke:#91B9B4,stroke-width:2px,color:#fff;
-    classDef secondary fill:#6E1946,stroke:#EB5A3C,stroke-width:2px,color:#fff;
-    classDef tertiary fill:#1B4965,stroke:#FAC39B,stroke-width:2px,color:#fff;
-    
-    class FrontendLayer,APILayer primary;
-    class AgentCore secondary;
-    class RAGStorage,DeterministicOutputs tertiary;
+    classDef fe fill:#141210,stroke:#C4A46A,stroke-width:1.5px,color:#F3EEE4;
+    classDef api fill:#0F2837,stroke:#91B9B4,stroke-width:1.5px,color:#FFFFFF;
+    classDef core fill:#6E1946,stroke:#FAC39B,stroke-width:1.6px,color:#FFFFFF;
+    classDef store fill:#1B4965,stroke:#91B9B4,stroke-width:1.5px,color:#FFFFFF;
+    classDef out fill:#2E4A3B,stroke:#C4A46A,stroke-width:1.5px,color:#FFFFFF;
+    class NextJS,StreamlitApp fe;
+    class Server,ChatSSE,ItinEP,ArtEP,HealthEP api;
+    class GraphEngine,ChatService,ModelFactory core;
+    class ZvecDB,CorpusDocs,EvalGolden store;
+    class PDFGen,ICSGen,RawGen out;
 ```
 
 ---
