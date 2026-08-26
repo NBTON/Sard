@@ -1,417 +1,296 @@
 "use client";
-
 import React, { useState, useEffect, useRef } from "react";
 import { Header } from "@/components/Header";
-import { Sidebar } from "@/components/Sidebar";
-import { ChatContainer } from "@/components/ChatContainer";
-import { ChatInput } from "@/components/ChatInput";
-import { SettingsModal } from "@/components/SettingsModal";
-import { Message, ChatSession, SystemStatus } from "@/types";
-import {
-  loadSessions,
-  saveSessions,
-  getActiveSessionId,
-  setActiveSessionId,
-  getStoredTheme,
-  setStoredTheme,
-  getStoredLang,
-  setStoredLang,
-} from "@/lib/storage";
-import { streamChat, fetchSystemStatus } from "@/lib/api";
+import { Landing } from "@/components/Landing";
+import { ChatSidebar } from "@/components/Sidebar";
+import { ChatMessages } from "@/components/ChatMessages";
+import { Composer } from "@/components/Composer";
+import { Lang, Message, View } from "@/types";
+import { getStoredLang, setStoredLang } from "@/lib/storage";
+import { streamChat } from "@/lib/api";
 
 export default function Home() {
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [activeSessionId, setActiveSessionIdState] = useState<string | null>(null);
-  const [isStreaming, setIsStreaming] = useState<boolean>(false);
-  const [theme, setTheme] = useState<"dark" | "light" | "moc">("dark");
-  const [lang, setLang] = useState<"ar" | "en">("ar");
-  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [lang, setLang] = useState<Lang>("ar");
+  const [view, setView] = useState<View>("landing");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [sessionId, setSessionId] = useState<string>(
+    () => `sard_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+  );
+  const abortRef = useRef<AbortController | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const abortControllerRef = useRef<AbortController | null>(null);
-
-  // Initialize from localStorage and fetch status
+  // Initialize lang from localStorage
   useEffect(() => {
-    const loadedSessions = loadSessions();
-    setSessions(loadedSessions);
-
-    const savedId = getActiveSessionId();
-    if (savedId && loadedSessions.some((s) => s.id === savedId)) {
-      setActiveSessionIdState(savedId);
-    } else if (loadedSessions.length > 0) {
-      setActiveSessionIdState(loadedSessions[0].id);
-      setActiveSessionId(loadedSessions[0].id);
-    }
-
-    const savedTheme = getStoredTheme();
-    setTheme(savedTheme);
-    document.body.className = `theme-${savedTheme}`;
-
-    const savedLang = getStoredLang();
-    setLang(savedLang);
-    document.documentElement.dir = savedLang === "en" ? "ltr" : "rtl";
-    document.documentElement.lang = savedLang;
-
-    // Fetch live system status
-    fetchSystemStatus().then((status) => {
-      if (status) setSystemStatus(status);
-    });
-
-    // Close sidebar on mobile screens initially
-    if (typeof window !== "undefined" && window.innerWidth < 768) {
-      setIsSidebarOpen(false);
-    }
+    const saved = getStoredLang();
+    setLang(saved);
+    document.documentElement.lang = saved;
+    document.documentElement.dir = saved === "en" ? "ltr" : "rtl";
   }, []);
 
-  // Update body class on theme change
+  // Update HTML tag dir/lang on change
   useEffect(() => {
-    document.body.className = `theme-${theme}`;
-    setStoredTheme(theme);
-  }, [theme]);
-
-  // Update HTML dir on language change
-  useEffect(() => {
-    document.documentElement.dir = lang === "en" ? "ltr" : "rtl";
     document.documentElement.lang = lang;
+    document.documentElement.dir = lang === "en" ? "ltr" : "rtl";
     setStoredLang(lang);
   }, [lang]);
 
-  // Keyboard shortcut for New Chat (Ctrl+K / Cmd+K)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        handleNewChat();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [sessions]);
+  function toggleLang() {
+    setLang((prev) => (prev === "ar" ? "en" : "ar"));
+  }
 
-  const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
-  const messages = activeSession ? activeSession.messages : [];
+  function goHome() {
+    setView("landing");
+  }
 
-  const handleNewChat = () => {
-    if (isStreaming) {
-      handleStopGeneration();
-    }
-    const newSession: ChatSession = {
-      id: `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      title: lang === "en" ? "New Cultural Conversation" : "محادثة ثقافية جديدة",
-      messages: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-
-    const updated = [newSession, ...sessions];
-    setSessions(updated);
-    saveSessions(updated);
-    setActiveSessionIdState(newSession.id);
-    setActiveSessionId(newSession.id);
-
-    // On mobile, close sidebar when new chat is started
-    if (typeof window !== "undefined" && window.innerWidth < 768) {
-      setIsSidebarOpen(false);
-    }
-  };
-
-  const handleSelectSession = (id: string) => {
-    if (isStreaming) {
-      handleStopGeneration();
-    }
-    setActiveSessionIdState(id);
-    setActiveSessionId(id);
-    if (typeof window !== "undefined" && window.innerWidth < 768) {
-      setIsSidebarOpen(false);
-    }
-  };
-
-  const handleDeleteSession = (id: string) => {
-    const updated = sessions.filter((s) => s.id !== id);
-    setSessions(updated);
-    saveSessions(updated);
-
-    if (activeSessionId === id) {
-      const nextId = updated.length > 0 ? updated[0].id : null;
-      setActiveSessionIdState(nextId);
-      setActiveSessionId(nextId);
-    }
-  };
-
-  const handleRenameSession = (id: string, newTitle: string) => {
-    const updated = sessions.map((s) => (s.id === id ? { ...s, title: newTitle, updatedAt: Date.now() } : s));
-    setSessions(updated);
-    saveSessions(updated);
-  };
-
-  const handleClearSession = () => {
-    if (!activeSessionId) return;
-    const updated = sessions.map((s) => (s.id === activeSessionId ? { ...s, messages: [], updatedAt: Date.now() } : s));
-    setSessions(updated);
-    saveSessions(updated);
-  };
-
-  const handleClearAllSessions = () => {
-    setSessions([]);
-    saveSessions([]);
-    setActiveSessionIdState(null);
-    setActiveSessionId(null);
-  };
-
-  const handleToggleTheme = () => {
-    const nextTheme = theme === "dark" ? "moc" : theme === "moc" ? "light" : "dark";
-    setTheme(nextTheme);
-  };
-
-  const handleToggleLang = () => {
-    const nextLang = lang === "ar" ? "en" : "ar";
-    setLang(nextLang);
-  };
-
-  const handleStopGeneration = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
+  function handleNewChat() {
+    const newId = `sard_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    setSessionId(newId);
+    setMessages([]);
+    setView("chat");
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
     }
     setIsStreaming(false);
-  };
+    setInput("");
+  }
 
-  const handleSendMessage = async (text: string) => {
-    if (!text.trim() || isStreaming) return;
+  function openChat() {
+    setView("chat");
+  }
 
-    let targetSessionId = activeSessionId;
-    let currentSessions = [...sessions];
+  async function sendPrompt(prompt: string) {
+    const trimmed = prompt.trim();
+    if (!trimmed || isStreaming) return;
+    setView("chat");
+    await doSend(trimmed);
+  }
 
-    // Auto-create session if none active
-    if (!targetSessionId || !currentSessions.some((s) => s.id === targetSessionId)) {
-      const newSession: ChatSession = {
-        id: `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        title: text.substring(0, 36) + (text.length > 36 ? "..." : ""),
-        messages: [],
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-      currentSessions = [newSession, ...currentSessions];
-      targetSessionId = newSession.id;
-      setActiveSessionIdState(targetSessionId);
-      setActiveSessionId(targetSessionId);
-    }
+  async function doSend(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed || isStreaming) return;
 
     const userMsg: Message = {
-      id: `msg_${Date.now()}_user`,
+      id: `u_${Date.now()}`,
       role: "user",
-      content: text,
+      content: trimmed,
       timestamp: Date.now(),
     };
-
-    const assistantMsgId = `msg_${Date.now()}_agent`;
-    const assistantMsg: Message = {
-      id: assistantMsgId,
+    const thinkId = `a_${Date.now()}`;
+    const thinkingMsg: Message = {
+      id: thinkId,
       role: "assistant",
       content: "",
       timestamp: Date.now(),
+      isThinking: true,
       isStreaming: true,
-      statusText: lang === "en" ? "Analyzing inquiry & retrieving cultural archives..." : "جارٍ تحليل الاستفسار واسترجاع المعارف الثقافية...",
     };
 
-    // Update active session with user and placeholder assistant message
-    const updatedWithUser = currentSessions.map((s) => {
-      if (s.id === targetSessionId) {
-        const isFirst = s.messages.length === 0;
-        const newTitle = isFirst ? text.substring(0, 36) + (text.length > 36 ? "..." : "") : s.title;
-        return {
-          ...s,
-          title: newTitle,
-          messages: [...s.messages, userMsg, assistantMsg],
-          updatedAt: Date.now(),
-        };
-      }
-      return s;
-    });
-
-    setSessions(updatedWithUser);
-    saveSessions(updatedWithUser);
+    setMessages((prev) => [...prev, userMsg, thinkingMsg]);
+    setInput("");
     setIsStreaming(true);
 
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
+    setTimeout(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTo({
+          top: scrollRef.current.scrollHeight,
+          behavior: "smooth",
+        });
+      }
+    }, 50);
 
-    // Stream the response
+    const history = [...messages, userMsg].map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    let gotFirstToken = false;
+
     await streamChat({
-      messages: [...(activeSession?.messages || []), userMsg].map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
-      query: text,
-      sessionId: targetSessionId,
+      messages: history,
+      query: trimmed,
+      sessionId,
       signal: controller.signal,
       onStatus: (statusText) => {
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === targetSessionId
-              ? {
-                  ...s,
-                  messages: s.messages.map((m) => (m.id === assistantMsgId ? { ...m, statusText } : m)),
-                }
-              : s
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === thinkId ? { ...m, statusStage: statusText } : m
           )
+        );
+      },
+      onDelta: (delta) => {
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id !== thinkId) return m;
+            const nextContent = (gotFirstToken ? m.content : "") + delta;
+            if (!gotFirstToken) gotFirstToken = true;
+            return {
+              ...m,
+              content: nextContent,
+              isThinking: false,
+              isStreaming: true,
+            };
+          })
         );
       },
       onCitations: (citations) => {
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === targetSessionId
-              ? {
-                  ...s,
-                  messages: s.messages.map((m) => (m.id === assistantMsgId ? { ...m, citations } : m)),
-                }
-              : s
-          )
-        );
-      },
-      onDelta: (deltaText) => {
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === targetSessionId
-              ? {
-                  ...s,
-                  messages: s.messages.map((m) =>
-                    m.id === assistantMsgId ? { ...m, content: m.content + deltaText } : m
-                  ),
-                }
-              : s
-          )
+        setMessages((prev) =>
+          prev.map((m) => (m.id === thinkId ? { ...m, citations } : m))
         );
       },
       onArtifacts: (artifacts) => {
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === targetSessionId
-              ? {
-                  ...s,
-                  messages: s.messages.map((m) => (m.id === assistantMsgId ? { ...m, artifacts } : m)),
-                }
-              : s
-          )
+        setMessages((prev) =>
+          prev.map((m) => (m.id === thinkId ? { ...m, artifacts } : m))
         );
       },
-      onDone: (meta) => {
+      onDone: () => {
         setIsStreaming(false);
-        abortControllerRef.current = null;
-
-        setSessions((prev) => {
-          const finalSessions = prev.map((s) =>
-            s.id === targetSessionId
-              ? {
-                  ...s,
-                  messages: s.messages.map((m) =>
-                    m.id === assistantMsgId
-                      ? {
-                          ...m,
-                          isStreaming: false,
-                          statusText: undefined,
-                          timings: meta.timings_ms,
-                        }
-                      : m
-                  ),
-                }
-              : s
-          );
-          saveSessions(finalSessions);
-          return finalSessions;
-        });
+        abortRef.current = null;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === thinkId
+              ? { ...m, isThinking: false, isStreaming: false }
+              : m
+          )
+        );
       },
       onError: (err) => {
         setIsStreaming(false);
-        abortControllerRef.current = null;
-
-        setSessions((prev) =>
-          prev.map((s) =>
-            s.id === targetSessionId
+        abortRef.current = null;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === thinkId
               ? {
-                  ...s,
-                  messages: s.messages.map((m) =>
-                    m.id === assistantMsgId
-                      ? {
-                          ...m,
-                          isStreaming: false,
-                          statusText: undefined,
-                          content:
-                            m.content ||
-                            (lang === "en"
-                              ? "An error occurred while connecting to the Sard assistant. Please try again."
-                              : "حدث خطأ أثناء الاتصال بالمساعد الثقافي. يُرجى المحاولة مرة أخرى."),
-                        }
-                      : m
-                  ),
+                  ...m,
+                  isThinking: false,
+                  isStreaming: false,
+                  error:
+                    lang === "en"
+                      ? "Could not complete the answer. Please try again."
+                      : "تعذّر إتمام الإجابة. حاول مرة أخرى.",
+                  content: m.content || "",
                 }
-              : s
+              : m
           )
         );
+        console.error("Chat error:", err);
       },
     });
-  };
+  }
+
+  function handleComposerSend() {
+    doSend(input);
+  }
+
+  function handleStop() {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setIsStreaming(false);
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.isStreaming
+          ? { ...m, isStreaming: false, isThinking: false }
+          : m
+      )
+    );
+  }
+
+  // Auto-scroll on update
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, messages[messages.length - 1]?.content]);
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-transparent">
-      {/* Sidebar */}
-      <Sidebar
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        systemStatus={systemStatus}
-        onSelectSession={handleSelectSession}
-        onNewChat={handleNewChat}
-        onDeleteSession={handleDeleteSession}
-        onRenameSession={handleRenameSession}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        isOpen={isSidebarOpen}
-        onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
-        isEn={lang === "en"}
+    <div
+      style={{
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        background: "#F3EEE4",
+        position: "relative",
+      }}
+    >
+      <Header
+        lang={lang}
+        onToggleLang={toggleLang}
+        onGoHome={goHome}
+        view={view}
       />
 
-      {/* Main Chat View */}
-      <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative">
-        {/* Header */}
-        <Header
-          activeSessionTitle={activeSession?.title}
-          systemStatus={systemStatus}
-          theme={theme}
-          isEn={lang === "en"}
-          onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
-          onToggleTheme={handleToggleTheme}
-          onToggleLang={handleToggleLang}
-          onClearSession={messages.length > 0 ? handleClearSession : undefined}
+      {view === "landing" ? (
+        <Landing
+          lang={lang}
+          onStartChat={openChat}
+          onSectorPrompt={(prompt) => sendPrompt(prompt)}
+          onSeedPrompt={(prompt) => sendPrompt(prompt)}
         />
+      ) : (
+        <div
+          style={{ flex: 1, display: "flex", minHeight: 0, overflow: "hidden" }}
+          className="chat-shell"
+        >
+          <ChatSidebar
+            lang={lang}
+            onNewChat={handleNewChat}
+            onStarter={(p) => doSend(p)}
+            open={true}
+          />
+          <div
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              minWidth: 0,
+              background: "#F3EEE4",
+              position: "relative",
+            }}
+          >
+            <div
+              ref={scrollRef}
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                minHeight: 0,
+                position: "relative",
+                zIndex: 1,
+              }}
+            >
+              <ChatMessages messages={messages} lang={lang} />
+            </div>
+            <div
+              style={{
+                position: "relative",
+                zIndex: 1,
+                borderTop: "1px solid transparent",
+              }}
+            >
+              <Composer
+                lang={lang}
+                value={input}
+                onChange={setInput}
+                onSend={handleComposerSend}
+                onStop={handleStop}
+                isStreaming={isStreaming}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
-        {/* Message Container */}
-        <ChatContainer
-          messages={messages}
-          onSelectPrompt={handleSendMessage}
-          isEn={lang === "en"}
-        />
-
-        {/* Floating Chat Input */}
-        <ChatInput
-          onSendMessage={handleSendMessage}
-          onStopGeneration={handleStopGeneration}
-          isStreaming={isStreaming}
-          isEn={lang === "en"}
-        />
-      </div>
-
-      {/* Settings Modal */}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        systemStatus={systemStatus}
-        theme={theme}
-        isEn={lang === "en"}
-        sessions={sessions}
-        onSelectTheme={setTheme}
-        onToggleLang={handleToggleLang}
-        onClearAllSessions={handleClearAllSessions}
-      />
+      <style>{`
+        @media (max-width: 860px) {
+          .chat-shell aside { display: none !important; }
+        }
+      `}</style>
     </div>
   );
 }

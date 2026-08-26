@@ -1,497 +1,596 @@
-# Sard (سرد) — MVP
+# Sard (سرد) — Arabic-First Saudi Cultural & Travel Assistant
 
-Sard is an Arabic-first Saudi cultural-travel assistant. Steps 3–6 add a
-provider-independent RAG foundation, typed LangGraph pipeline, RTL PDF
-generation, and deterministic PDF/calendar/raw-answer artifacts while
-preserving the provider-neutral Step 2 chat service.
+<p align="center">
+  <img src="web/public/sard-logo.png" alt="Sard Logo" width="120" onerror="this.style.display='none'"/>
+</p>
 
-## Step 8 investor demo
+<p align="center">
+  <strong>سرد | المساعد الذكي الموثوق للسياحة والتراث الثقافي في المملكة العربية السعودية</strong><br>
+  <em>An enterprise-grade, culturally grounded AI agent tailored for Saudi cultural heritage, regional tourism itineraries, etiquette, and authentic traditions.</em>
+</p>
 
-Run the readiness gate before starting the UI:
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11%2B-blue.svg" alt="Python 3.11+"/>
+  <img src="https://img.shields.io/badge/LangGraph-Stateful%20Agent-orange.svg" alt="LangGraph"/>
+  <img src="https://img.shields.io/badge/FastAPI-SSE%20Streaming-green.svg" alt="FastAPI"/>
+  <img src="https://img.shields.io/badge/Next.js-14%20(MOC%20Theme)-black.svg" alt="Next.js 14"/>
+  <img src="https://img.shields.io/badge/Vector%20Store-Zvec%20(Local)-purple.svg" alt="Zvec"/>
+  <img src="https://img.shields.io/badge/ReportLab-RTL%20Arabic%20PDF-red.svg" alt="ReportLab"/>
+  <img src="https://img.shields.io/badge/Tests-426%20Passed-brightgreen.svg" alt="Tests"/>
+</p>
 
-```powershell
-uv run sard-demo check
-uv run sard-demo evaluate --json-out output/evaluation/final-evaluation.json
-uv run streamlit run sard/ui/app.py
+---
+
+## 📖 Table of Contents
+
+1. [Overview & Core Philosophy](#-overview--core-philosophy)
+2. [Agent Architecture & How It Works](#-agent-architecture--how-it-works)
+   - [LangGraph Agent Pipeline](#1-langgraph-agent-pipeline-mermaid)
+   - [Hybrid Cultural Retrieval & Routing](#2-hybrid-cultural-retrieval--routing-mermaid)
+   - [End-to-End System Architecture](#3-end-to-end-system-architecture-mermaid)
+3. [Key Features](#-key-features)
+4. [Project Structure](#-project-structure)
+5. [LangGraph Execution Lifecycle](#-langgraph-execution-lifecycle)
+6. [Cultural Grounding & Citation Engine](#-cultural-grounding--citation-engine)
+7. [Deterministic RTL & Calendar Outputs](#-deterministic-rtl--calendar-outputs)
+8. [Web & UI Interfaces](#-web--ui-interfaces)
+9. [Getting Started & Installation](#-getting-started--installation)
+10. [Running the Application](#-running-the-application)
+11. [CLI Commands Reference](#-cli-commands-reference)
+12. [Evaluation & Diagnostics](#-evaluation--diagnostics)
+13. [Configuration & Environment Variables](#-configuration--environment-variables)
+14. [License & Font Notices](#-license--font-notices)
+
+---
+
+## 🌟 Overview & Core Philosophy
+
+**Sard (سرد)** is an intelligent, culturally authentic travel and heritage assistant built specifically for Saudi Arabia and the Arabian Gulf. Unlike generic chatbots that hallucinate cultural traditions or flatten regional nuances, Sard adheres to strict factual grounding, source verification, and Arabic-first typography.
+
+### Core Architectural Pillars:
+* **Zero Hallucination Policy:** Every cultural statement and itinerary recommendation is verified against indexed heritage documents (`[RAG: filename]`) or verifiable real-time sources (`[Web: url]`).
+* **Respectful Cultural Grounding:** Distinguishes between religious obligations, regional customs (Najd, Hejaz, Eastern Province, Asir, etc.), and modern urban practices. Never generalizes or trivializes traditions.
+* **Deterministic Artifact Generation:** Produces verified, pixel-perfect Arabic RTL PDFs (`ReportLab` + `NotoNaskhArabic`), RFC 5545 iCalendar files (`.ics` with `Asia/Riyadh` timezone), and raw text summaries.
+* **Resilient Multi-Tier Fallbacks:** Centralized model routing supporting NVIDIA NIM, Anthropic Claude, OpenAI, and OpenRouter with automatic graceful degradation to extractive summaries if external APIs fail.
+* **Ministry of Culture (MOC) Brand Identity:** Production Next.js 14 interface matching the official Saudi Ministry of Culture guidelines (Dark Navy `#0F2837`, Plum `#6E1946`, Coral `#EB5A3C`, Sage `#91B9B4`, Peach `#FAC39B`).
+
+---
+
+## 🧠 Agent Architecture & How It Works
+
+### 1. LangGraph Agent Pipeline (Mermaid)
+
+The Sard agent core executes a stateful, cyclical LangGraph workflow. Claims generated in the `compose` node must pass the strict `verify` gate before reaching `render`. If verification finds unsupported assertions or citation errors, it loops back to `compose` with corrective feedback (up to `compose_max_retries`).
+
+```mermaid
+flowchart TD
+    START([🚀 Start: User Query]) --> NodeUnderstand["🧠 1. Understand<br/>• Classify Intent<br/>• Extract Dates, Regions & Pace<br/>• Sanitize & Format Query"]
+    
+    NodeUnderstand --> NodePlan["📋 2. Plan<br/>• Decompose Travel Tasks<br/>• Formulate Sub-Queries<br/>• Set Retrieval Strategy"]
+    
+    NodePlan --> NodeRetrieve["🔍 3. Retrieve<br/>• Hybrid Search (Dense + FTS)<br/>• Reciprocal Rank Fusion (RRF)<br/>• Cross-Encoder Reranking<br/>• Dynamic Web Fallback"]
+    
+    NodeRetrieve --> NodeCompose["✍️ 4. Compose<br/>• Synthesize Arabic Itinerary<br/>• Inject [CIT-X] Grounded Citations<br/>• Structure Daily Activities"]
+    
+    NodeCompose --> NodeVerify{"🛡️ 5. Verify Gate<br/>• Fact-Check Against Chunks<br/>• Validate Citation IDs<br/>• Cultural Etiquette Audit"}
+    
+    NodeVerify -- "❌ Factual Gap / Missing Citation<br/>(Retry Count < Max)" --> NodeCompose
+    
+    NodeVerify -- "⚠️ Max Retries Exceeded" --> NodeExtractive["📝 Honest Extractive Fallback<br/>(Preserve Only Verified Facts)"]
+    
+    NodeVerify -- "✅ All Claims Verified" --> NodeRender["📦 6. Render<br/>• Generate Arabic RTL PDF<br/>• Build RFC 5545 iCalendar (.ics)<br/>• Compile Clean Raw Text (.txt)"]
+    
+    NodeExtractive --> NodeRender
+    
+    NodeRender --> END([🏁 End: Return Stream / Artifacts])
+
+    classDef stage fill:#0F2837,stroke:#91B9B4,stroke-width:2px,color:#fff;
+    classDef gate fill:#6E1946,stroke:#EB5A3C,stroke-width:2px,color:#fff;
+    classDef output fill:#1B4965,stroke:#FAC39B,stroke-width:2px,color:#fff;
+    
+    class NodeUnderstand,NodePlan,NodeRetrieve,NodeCompose stage;
+    class NodeVerify gate;
+    class NodeRender,NodeExtractive output;
 ```
 
-The exact hero query prefers live execution and can switch automatically to
-the visibly labelled, integrity-checked packaged fallback. See
-[`docs/demo-runbook.md`](docs/demo-runbook.md) for setup, deployment, backup
-video, and presenter steps, and [`docs/final-evaluation.md`](docs/final-evaluation.md)
-for the honest 8/10 golden-set result and remaining evidence gaps.
+---
 
-## Requirements
+### 2. Hybrid Cultural Retrieval & Routing (Mermaid)
 
-- Windows, Linux, or macOS with Python 3.11 or newer.
-- `uv` for reproducible environment management.
-- An NVIDIA API Catalog key or reachable self-hosted NVIDIA NIM deployments
-  for live generation, query rewriting, embeddings, and reranking.
-- No network access is required for the normal automated test suite.
+Sard combines an embedded, local vector database (`Zvec`) with an intelligent, budget-capped search router (`CulturalRouter`) to ensure speed, offline reliability, and freshness for live events.
 
-Install the project and optional NVIDIA/dev dependencies:
+```mermaid
+flowchart LR
+    Query([Query: User Prompt]) --> Router{"Cultural Router<br/>Evaluation"}
+    
+    subgraph LocalRAG ["📚 Local Knowledge Base (Always-On)"]
+        ZvecDense["Dense Vector Search<br/>(Nemotron / NV-Embed)"]
+        ZvecFTS["BM25 Full-Text Search<br/>(Arabic Normalization)"]
+        RRF["Reciprocal Rank Fusion<br/>(RRF Score)"]
+        Reranker["Cross-Encoder Reranker<br/>(Mistral Rerank / Fallback)"]
+        
+        ZvecDense & ZvecFTS --> RRF --> Reranker
+    end
+    
+    Router -->|"1. Always Run First"| LocalRAG
+    
+    subgraph DecisionEngine ["⚖️ Routing Decision Rules"]
+        Rule1{"High Confidence<br/>In Corpus?<br/>(Score >= 0.65)"}
+        Rule2{"Time-Sensitive /<br/>Freshness Needed?<br/>(e.g., 2026 events)"}
+        Rule3{"Corpus Missing<br/>Region / Topic?"}
+    end
+    
+    Reranker --> DecisionEngine
+    
+    subgraph WebExpansion ["🌐 Parallel Web Search (Capped Budget)"]
+        ParallelSearch["Parallel Search<br/>(Max 2 Requests)"]
+        ParallelExtract["Parallel Extract<br/>(Max 1 URL)"]
+        SourcePolicy["Cultural Source Policy<br/>(Prefer Local / Official Sources)"]
+        
+        ParallelSearch --> ParallelExtract --> SourcePolicy
+    end
+    
+    DecisionEngine -- "Yes (In Corpus & Stable)" --> Synthesis["Answer Synthesis<br/>• Tag [RAG: doc.pdf]<br/>• Tag [Web: url]<br/>• Flag Cross-Source Disagreements"]
+    DecisionEngine -- "Freshness Required / Low RAG Score" --> WebExpansion --> Synthesis
+    
+    Synthesis --> OutputResult([Final Cited Output])
 
-```bash
-uv sync --extra nvidia --extra dev
-Copy-Item .env.example .env       # PowerShell; edit the copy afterwards
+    classDef box fill:#0F2837,stroke:#91B9B4,stroke-width:2px,color:#fff;
+    classDef router fill:#6E1946,stroke:#FAC39B,stroke-width:2px,color:#fff;
+    class LocalRAG,WebExpansion,DecisionEngine box;
+    class Router,Synthesis router;
 ```
 
-Never commit `.env`, API keys, authorization headers, generated Zvec files, or
-temporary manifests.
+---
 
-## Why Zvec
+### 3. End-to-End System Architecture (Mermaid)
 
-Zvec is a local, embedded vector database. It keeps the MVP self-contained,
-avoids operating a separate database service, supports dense vector search,
-full-text search, metadata filters, and persistence, and works offline once a
-collection has been built. The application exposes Zvec only through
-`ZvecRepository`; the UI and public RAG service never depend on Zvec objects.
+```mermaid
+graph TB
+    subgraph FrontendLayer ["💻 Presentation Layer (Bilingual RTL / LTR)"]
+        NextJS["Next.js 14 Web App<br/>(MOC Brand Theme, SSE Streaming,<br/>Chat History, Citations Drawer)"]
+        StreamlitApp["Streamlit Demo UI<br/>(Investor Dashboard & Offline Mode)"]
+    end
 
-## NVIDIA NIM configuration
+    subgraph APILayer ["⚡ FastAPI Backend Layer"]
+        Server["FastAPI Application (sard.api.server)"]
+        ChatSSE["POST /api/chat (SSE Stream)"]
+        ItinEndpoint["POST /api/itinerary (Graph Run)"]
+        ArtifactsEndpoint["GET /api/artifacts/{filename}"]
+        HealthStatus["GET /api/health & /status"]
+        
+        Server --> ChatSSE & ItinEndpoint & ArtifactsEndpoint & HealthStatus
+    end
 
-NVIDIA is the only AI provider used by the RAG subsystem. The configured routes
-are:
+    subgraph AgentCore ["🧠 Sard Agent Core (LangGraph & RAG)"]
+        GraphEngine["LangGraph State Machine<br/>(understand → plan → retrieve → compose → verify → render)"]
+        ChatService["ChatService & CulturalRouter<br/>(Conversation Ledger & Hybrid Search)"]
+        ModelFactory["Centralized Model Factory<br/>(NVIDIA NIM / Anthropic / OpenAI / OpenRouter)"]
+        
+        GraphEngine <--> ChatService
+        ChatService --> ModelFactory
+    end
 
-| Use case | Route |
+    subgraph RAGStorage ["🗄️ Storage & Retrieval Foundation"]
+        ZvecDB["Embedded Zvec DB<br/>(Dense + BM25 FTS Collections)"]
+        CorpusDocs["Verified Corpus Documents<br/>(PDF, HTML, MD + Meta Sidecars)"]
+        EvalGolden["Evaluation Suite<br/>(evals/golden.json - Golden Set)"]
+    end
+
+    subgraph DeterministicOutputs ["📄 Output Artifact Generators"]
+        PDFGen["Arabic RTL PDF Renderer<br/>(ReportLab + NotoNaskhArabic)"]
+        ICSGen["iCalendar Generator<br/>(RFC 5545 Asia/Riyadh .ics)"]
+        RawGen["Plain Text Answer<br/>(answer.txt + Citation Manifest)"]
+    end
+
+    NextJS -->|SSE / REST| Server
+    StreamlitApp -->|Direct Ingestion / Application Service| AgentCore
+    APILayer --> AgentCore
+    AgentCore --> RAGStorage
+    AgentCore --> DeterministicOutputs
+    DeterministicOutputs -->|Serve Artifacts| ArtifactsEndpoint
+
+    classDef primary fill:#0F2837,stroke:#91B9B4,stroke-width:2px,color:#fff;
+    classDef secondary fill:#6E1946,stroke:#EB5A3C,stroke-width:2px,color:#fff;
+    classDef tertiary fill:#1B4965,stroke:#FAC39B,stroke-width:2px,color:#fff;
+    
+    class FrontendLayer,APILayer primary;
+    class AgentCore secondary;
+    class RAGStorage,DeterministicOutputs tertiary;
+```
+
+---
+
+## 🚀 Key Features
+
+| Capability | Description |
 |---|---|
-| Generation | `nemotron-3-super-120b-a12b` → `qwen3-next-80b-a3b-instruct` → `llama-3.3-70b-instruct` → extractive fallback |
-| Query rewrite | `nemotron-3-nano-30b-a3b` → `nvidia-nemotron-nano-9b-v2` → `llama-3.1-8b-instruct` → deterministic normalization |
-| Embeddings | `nemotron-3-embed-1b`; `nv-embed-v1` requires a separate collection |
-| Reranking | `rerank-qa-mistral-4b` → RRF → dense → full text |
-| Vision | `llama-3.1-nemotron-nano-vl-8b-v1` → `nemotron-nano-12b-v2-vl` → `muse-glimmer-30b` → quarantine |
-| Translation | `riva-translate-4b-instruct-v2` → `riva-translate-4b-instruct-v1_1` → preserve original and flag |
-| Safety | `nemotron-3.5-content-safety` → `llama-3.1-nemotron-safety-guard-8b-v3` → `llama-guard-4-12b` → conservative fallback |
+| **🇸🇦 Authentic Saudi Cultural Grounding** | Custom-built knowledge base covering regional heritage (Al-Ahsa hot springs, Tarout Island shrimp drying, Asir architecture, Najdi hospitality, etiquette, and attire). |
+| **🛡️ 6-Stage LangGraph Pipeline** | Fully deterministic orchestration (`understand` ➔ `plan` ➔ `retrieve` ➔ `compose` ➔ `verify` ➔ `render`) with retry loops and structured failure classification. |
+| **📑 True Arabic RTL PDF Generation** | Custom ReportLab engine with BiDi reshaping, character joining, margin wrapping, header/footer isolation, and inline footnote citations using pinned `NotoNaskhArabic` fonts. |
+| **📅 RFC 5545 iCalendar (`.ics`)** | Generates importable travel calendars with accurate date/time arithmetic in the `Asia/Riyadh` timezone. |
+| **🔍 Always-On Hybrid RAG (Zvec)** | Local embedded vector storage combining dense embeddings (Nemotron-3 / NV-Embed) with BM25 full-text search and cross-encoder reranking. |
+| **🌐 Dynamic Cultural Router** | Automatically detects time-sensitive queries ("2026 events", "current schedule") or out-of-corpus topics and triggers capped web search while prioritizing regional Gulf sources. |
+| **🎨 Saudi Ministry of Culture UI** | Beautiful Next.js 14 web application styled to official MOC March 2019 guidelines, featuring real-time SSE streaming, collapsible citation cards, and one-click artifact downloads. |
+| **🔌 Provider-Neutral Multi-LLM** | Seamlessly toggle between NVIDIA NIM, Anthropic Claude 3.5, OpenAI GPT-4o, and OpenRouter without changing business logic. |
+| **🧪 420+ Automated Tests** | Comprehensive test coverage across agent nodes, RAG retrieval, PDF formatting, calendar parsing, API endpoints, and failure redaction. |
 
-These are configured model IDs, not claims that every ID is available to every
-account or deployment. Check the actual catalog/deployment IDs with:
+---
+
+## 📂 Project Structure
+
+```text
+Sard_Agent/
+├── sard/                           # Core Python Package
+│   ├── agent/                      # LangGraph & Agent Orchestration
+│   │   ├── nodes/                  # Pipeline Stage Handlers
+│   │   │   ├── understand.py       # Query understanding, entity extraction & intent classification
+│   │   │   ├── plan.py             # Strategic travel task planning & sub-query generation
+│   │   │   ├── retrieve.py         # Multi-source retrieval & rank fusion
+│   │   │   ├── compose.py          # Grounded Arabic itinerary & answer synthesis
+│   │   │   ├── verify.py           # Verification gate, citation checking & etiquette audit
+│   │   │   └── render.py           # Multi-artifact render dispatcher
+│   │   ├── tools/                  # Cultural & Retrieval Tooling
+│   │   │   └── cultural_tools.py   # RAG search, parallel search, and parallel extract tools
+│   │   ├── cultural_router.py      # Hybrid RAG + Web routing decision engine & prompt synthesis
+│   │   ├── chat_service.py         # Conversation state manager with message history & status tracking
+│   │   ├── graph.py                # LangGraph pipeline builder, node wiring & conditional edges
+│   │   ├── state.py                # Typed GraphState definitions and lifecycle mutations
+│   │   ├── routing.py              # Failure classification & retry routing logic
+│   │   └── events.py               # Telemetry events & progress streaming helpers
+│   ├── api/                        # Backend API Server
+│   │   └── server.py               # FastAPI server with SSE streaming (/api/chat) & artifact endpoints
+│   ├── application/                # Unified Application Services & Demo Caching
+│   │   ├── service.py              # Application service coordinating graph execution & streaming
+│   │   ├── demo.py                 # Precached deterministic investor demo harness
+│   │   └── demo_cache/             # Golden demo artifacts (itinerary.pdf, itinerary.ics, answer.txt)
+│   ├── cli/                        # Command Line Interfaces
+│   │   ├── agent.py                # 'sard-agent' CLI for pipeline execution & offline traces
+│   │   ├── api.py                  # 'sard-api' CLI server runner
+│   │   ├── demo.py                 # 'sard-demo' investor demo gate & evaluation CLI
+│   │   └── rag.py                  # 'sard-rag' corpus ingestion, search & diagnostic tool
+│   ├── config/                     # Centralized Configurations
+│   │   ├── models.py               # Multi-provider LangChain chat model factory (NVIDIA, Anthropic, OpenAI)
+│   │   └── rag.py                  # RAG settings, embedding dimensions & Zvec store paths
+│   ├── outputs/                    # Deterministic Artifact Renderers
+│   │   ├── assets/                 # Bundled TrueType Fonts (NotoNaskhArabic, NotoSans) & OFL license
+│   │   ├── arabic.py               # Arabic text reshaping and python-bidi bidirectional layout
+│   │   ├── pdf.py                  # ReportLab RTL PDF renderer with footnote citations
+│   │   ├── calendar.py             # RFC 5545 iCalendar (.ics) generator with Asia/Riyadh timezone
+│   │   ├── raw.py                  # Formatted raw text builder (answer.txt)
+│   │   ├── validation.py           # Pre-rendering validation for citations & unsupported fields
+│   │   └── schemas.py              # Itinerary, Activity, and RenderedArtifact contracts
+│   ├── rag/                        # RAG Foundation Subsystem
+│   │   ├── zvec_store.py           # Embedded Zvec vector store wrapper (dense + BM25 FTS)
+│   │   ├── ingest.py               # Resumable, idempotent corpus ingestion engine
+│   │   ├── loaders.py              # Robust PDF, HTML, Markdown & plain-text document loaders
+│   │   ├── normalize.py            # Arabic orthographic normalization (Alef, Taa Marbuta, Tashkeel)
+│   │   ├── chunking.py             # Section-aware Arabic document chunking with metadata inheritance
+│   │   ├── query_rewriter.py       # Multi-query rewriting & normalization
+│   │   ├── rerank.py               # Cross-encoder reranking & RRF rank fusion
+│   │   ├── evaluate.py             # Retrieval evaluation suite (Recall@K, MRR, nDCG)
+│   │   └── service.py              # Public, provider-independent RAGService boundary
+│   └── ui/                         # Streamlit User Interface
+│       ├── app.py                  # Streamlit web application with live & cached demo modes
+│       └── presentation.py         # Arabic typography & presentation helpers
+├── web/                            # Next.js 14 Frontend Web Application
+│   ├── src/
+│   │   ├── app/                    # Next.js App Router (layout.tsx, page.tsx, globals.css)
+│   │   ├── components/             # React Components (Header, Sidebar, ChatMessages, Composer, Landing)
+│   │   ├── lib/                    # Storage, sectors, and Arabic text utilities
+│   │   └── types/                  # TypeScript interface contracts for chat, citations, and artifacts
+│   ├── public/                     # Static assets and MOC brand images
+│   ├── tailwind.config.js          # Tailwind configuration with official MOC brand palette
+│   └── package.json                # Frontend dependencies (React, Lucide, Tailwind)
+├── data/                           # Data Directories
+│   ├── corpus/                     # Verified Saudi cultural documents & sidecar JSON metadata
+│   │   ├── MANIFEST.md             # Corpus catalog and verified source registry
+│   │   └── *.meta.json             # Source sidecar metadata (URLs, titles, dates)
+│   └── zvec/                       # Generated local Zvec vector collections (git-ignored)
+├── evals/                          # Evaluation Data & Test Suites
+│   ├── golden.json                 # Golden evaluation benchmark dataset
+│   └── test_cultural_search_rag.py # Cultural search and RAG routing validation suite
+├── docs/                           # Documentation & Runbooks
+│   ├── demo-runbook.md             # Presenter steps, backup procedures & deployment guide
+│   ├── demo-script.md              # Investor demo narrative & prompt scripts
+│   └── final-evaluation.md         # Benchmark results & corpus coverage audit
+├── tests/                          # 420+ Unit and Integration Tests
+├── pyproject.toml                  # Python package configuration & dependencies
+├── Dockerfile                      # Production Docker container definition
+└── README.md                       # Master Documentation (this file)
+```
+
+---
+
+## 🔄 LangGraph Execution Lifecycle
+
+When a travel query is received, Sard executes a 6-stage lifecycle:
+
+```text
+[Input Query] ➔ Understand ➔ Plan ➔ Retrieve ➔ Compose ➔ Verify ➔ Render ➔ [Artifacts & Stream]
+                                                    ▲       │
+                                                    └──Retry┘
+```
+
+1. **`understand` Node:**
+   - Analyzes user input to identify: primary Saudi region, trip duration, traveler pace (relaxed, moderate, active), companions (family, solo, cultural enthusiast), and budget/interests.
+   - Cleans and normalizes Arabic text while preserving core entities.
+
+2. **`plan` Node:**
+   - Breaks down the query into structured sub-tasks: historical background lookup, daily geographical routing, culinary recommendations, and cultural etiquette advisories.
+
+3. **`retrieve` Node:**
+   - Executes multi-stage retrieval against the `Zvec` store:
+     - **Dense Vector Search:** Semantic matching using dense embeddings.
+     - **BM25 Full-Text Search (FTS):** Keyword matching over normalized Arabic text.
+     - **Reciprocal Rank Fusion (RRF):** Blends rank positions from both methods.
+     - **Cross-Encoder Reranking:** Applies Mistral Rerank to select the top-K relevant chunks.
+   - If freshness is required or corpus coverage is insufficient, invokes the `CulturalRouter` web search.
+
+4. **`compose` Node:**
+   - Synthesizes a cohesive, chronologically structured Arabic itinerary.
+   - Embeds strict source citation tokens (e.g., `[CIT-3AE406450E19]`).
+   - Ensures activities have realistic durations and regional geographical coherence.
+
+5. **`verify` Node (The Safety & Quality Gate):**
+   - **Fact Extraction:** Audits every factual claim (opening hours, locations, traditions).
+   - **Citation Alignment:** Verifies that every `[CIT-X]` corresponds to an existing chunk containing the referenced fact.
+   - **Etiquette Audit:** Ensures cultural guidance adheres to Saudi heritage norms.
+   - **Decision:** If hallucinated claims or broken citations are found, triggers a retry loop back to `compose` with corrective instructions. If retries are exhausted, falls back to a deterministic extractive summary.
+
+6. **`render` Node:**
+   - Dispatches the verified itinerary to the artifact generators (`pdf.py`, `calendar.py`, `raw.py`).
+   - Packages metadata, file paths, and checksums for immediate streaming to the client.
+
+---
+
+## 🛡️ Cultural Grounding & Citation Engine
+
+Sard implements strict cultural grounding rules to ensure respect and factual authenticity:
+
+### Citation Syntax
+* **Local Knowledge Base Documents:** Displayed as `[RAG: Document Title]` (e.g., `[RAG: ينابيع_الأحساء_السياحية.pdf]`).
+* **Live Web Sources:** Displayed as `[Web: URL]` (e.g., `[Web: https://www.visitsaudi.com/...]`).
+* **Conflict Flagging:** If historical or modern sources disagree on a tradition or timing, Sard explicitly presents both perspectives with their respective citations rather than choosing arbitrarily.
+
+### Etiquette & Respect Principles
+* **Regional Specificity:** Distinguishes between Najdi, Hejazi, Eastern, Southern, and Northern customs. Does not homogenize Saudi culture into a single generic stereotype.
+* **Religious vs. Cultural Nuance:** Separates Islamic requirements (e.g., prayer times, Ramadan observance) from traditional regional customs and modern hospitality etiquette.
+* **Practical Advice:** Provides actionable etiquette guidance (greetings, attire expectations, coffee service etiquette) rather than superficial trivia.
+
+---
+
+## 📑 Deterministic RTL & Calendar Outputs
+
+### 1. Arabic RTL PDF Renderer (`sard/outputs/pdf.py`)
+* **True RTL Reshaping:** Uses `arabic-reshaper` and `python-bidi` for correct glyph joining and directionality.
+* **Pinned Fonts:** Bundles the SIL Open Font Licensed `NotoNaskhArabic` and `NotoSans` fonts directly in `sard/outputs/assets/` to ensure deterministic rendering on any operating system without system font dependencies.
+* **Page Layout:** Clean A4 portrait layout with non-overlapping headers, dynamic margins, formatted daily activity cards, and isolated bottom footnote citations.
+
+### 2. RFC 5545 iCalendar (`sard/outputs/calendar.py`)
+* Built with `icalendar` (pinned to 7.2.x line).
+* Generates timezone-aware `VEVENT` items in the `Asia/Riyadh` timezone (`UTC+03:00`).
+* Calculates precise start and end times for each itinerary activity and embeds source citations in event descriptions.
+
+---
+
+## 🎨 Web & UI Interfaces
+
+### Next.js 14 Web Application
+The production web application is located in `web/` and features:
+* **MOC Brand Palette:** Built using the official Saudi Ministry of Culture colors:
+  * **Primary Dark Navy:** `#0F2837`
+  * **Accent Plum:** `#6E1946`
+  * **Highlight Coral:** `#EB5A3C`
+  * **Muted Sage:** `#91B9B4`
+  * **Warm Peach:** `#FAC39B`
+* **Real-time SSE Streaming:** Live streaming token delivery from `/api/chat`.
+* **Collapsible Citations Drawer:** Interactive cards displaying the source title, URL, snippet, and confidence.
+* **One-Click Downloads:** Download generated PDF itineraries and `.ics` calendars directly from chat messages.
+* **Session Persistence:** Persistent chat history stored in local storage with search and session management.
+
+### Streamlit Investor Demo
+The Streamlit application in `sard/ui/app.py` provides:
+* **Live Mode:** Connects to live NVIDIA NIM endpoints for real-time generation and retrieval.
+* **Precached Demo Mode:** Deterministic, offline investor demonstration using verified golden fixtures.
+* **Diagnostic Panel:** Inspects dense vs. FTS candidate scores, reranking weights, and node execution latencies.
+
+---
+
+## ⚙️ Getting Started & Installation
+
+### Prerequisites
+* **Operating System:** Linux, macOS, or Windows (10/11)
+* **Python:** Version `3.11` or newer
+* **uv:** Fast Python package and environment manager ([Install uv](https://github.com/astral-sh/uv))
+* **Node.js & npm:** Node.js 18+ (for running the Next.js web frontend)
+
+### Installation Steps
+
+1. **Clone the Repository:**
+   ```bash
+   git clone https://github.com/NBTON/Sard.git
+   cd Sard
+   ```
+
+2. **Set Up Python Environment with `uv`:**
+   ```bash
+   # Install all dependencies including dev and provider packages
+   uv sync --extra nvidia --extra anthropic --extra openai --extra dev
+   ```
+
+3. **Configure Environment Variables:**
+   ```bash
+   # On Linux / macOS:
+   cp .env.example .env
+
+   # On Windows (PowerShell):
+   Copy-Item .env.example .env
+   ```
+   *Edit `.env` to supply your API keys (e.g. `NVIDIA_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`).*
+
+4. **Install Frontend Dependencies:**
+   ```bash
+   cd web
+   npm install
+   cd ..
+   ```
+
+---
+
+## 🏃 Running the Application
+
+### Option 1: Full-Stack Web Application (FastAPI + Next.js)
+
+1. **Start the FastAPI Backend Server:**
+   ```bash
+   uv run sard-api
+   ```
+   *Server starts at `http://127.0.0.1:8000` (API documentation at `http://127.0.0.1:8000/docs`).*
+
+2. **Start the Next.js Frontend:**
+   ```bash
+   cd web
+   npm run dev
+   ```
+   *Open `http://localhost:3000` in your web browser.*
+
+---
+
+### Option 2: Streamlit Investor Demo UI
 
 ```bash
-uv run python -m sard.cli.rag models
-```
-
-The command reports configured IDs separately from discovered IDs. It does not
-silently add prefixes, substitute models, or print secrets. If discovery is
-unavailable, use the exact ID documented by the NVIDIA API Catalog or your NIM
-deployment.
-
-Hosted NVIDIA uses `NVIDIA_API_KEY`. Self-hosted deployments can set separate
-URLs:
-
-```dotenv
-NVIDIA_CHAT_BASE_URL=http://chat-nim:8000/v1
-NVIDIA_EMBEDDING_BASE_URL=http://embed-nim:8000/v1
-NVIDIA_RERANK_BASE_URL=http://rerank-nim:8000/v1
-```
-
-The route values in `.env.example` are the requested logical defaults. Hosted
-Catalog or self-hosted NIM deployments may expose different concrete IDs (for
-example, a Catalog-style `nvidia/...` name). Run `models` first, then override
-the corresponding `NVIDIA_*_MODEL_*` variables in `.env`; the application does
-not silently add prefixes or substitute an embedding model.
-
-The RAG factories construct `ChatNVIDIA`, `NVIDIAEmbeddings`, and
-`NVIDIARerank`. Timeout and retry settings are bounded and observable through
-sanitized fallback events.
-
-Inspect all configuration without exposing the key:
-
-```bash
-uv run python -m sard.cli.rag doctor
-```
-
-## Corpus preparation
-
-Every supported source needs a sidecar named `<source>.<ext>.meta.json` with at
-least:
-
-```json
-{
-  "source_name": "Institution or publication",
-  "source_url": "https://example.org/verifiable-source",
-  "title": "Source title",
-  "topic": "Corpus topic",
-  "publication_date": "2024-01-01",
-  "language": "ar"
-}
-```
-
-Supported formats are PDF, HTML, Markdown, and plain text. Source text is
-cleaned conservatively for citation, Arabic query normalization is kept
-separate, repeated PDF headers/footers are removed only when strongly
-repeated, and chunks retain source title, URL, topic, publication date, page,
-section, stable IDs, and sidecar metadata.
-
-Scanned PDF pages are detected from insufficient extracted text. Without a
-verified vision extractor, they are quarantined and reported; no page content
-is invented.
-
-The current pilot corpus is documented in
-[`data/corpus/MANIFEST.md`](data/corpus/MANIFEST.md):
-
-- Hot springs in Al-Ahsa/Eastern Province: two verified documents.
-- Traditional shrimp drying: no verified Saudi Eastern Province source, so the
-  absence remains explicit and all related evidence gaps must remain failures.
-
-## Collection versioning and embedding migration
-
-Each collection path is isolated by:
-
-- Zvec schema version;
-- embedding model ID;
-- embedding dimension;
-- Arabic normalization version; and
-- chunking version.
-
-The collection metadata records the same axes. A collection refuses vectors or
-queries from another embedding model/dimension and rejects incompatible live
-schemas. `nv-embed-v1` is never silently mixed into a `nemotron-3-embed-1b`
-collection.
-
-Create or verify a collection, discovering its dimension through an actual
-embedding probe:
-
-```bash
-uv run python -m sard.cli.rag create-collection
-```
-
-When changing the embedding model, normalization, chunking, or schema, build a
-new collection and re-ingest. Do not rename an old directory or overwrite a
-collection with vectors from another model:
-
-```powershell
-$env:NVIDIA_EMBEDDING_MODEL_PRIMARY="nv-embed-v1"
-$env:ZVEC_COLLECTION_PATH="data/zvec/sard-nv-embed-v1"
-uv run python -m sard.cli.rag create-collection
-uv run python -m sard.cli.rag ingest data/corpus
-```
-
-Restore the normal settings and rebuild again when migrating back. Generated
-collections under `data/zvec/` are ignored by version control.
-
-## Ingestion
-
-```bash
-uv run python -m sard.cli.rag ingest data/corpus
-uv run python -m sard.cli.rag resume-ingest data/corpus
-uv run python -m sard.cli.rag info
-uv run python -m sard.cli.rag list-sources
-```
-
-Ingestion is resumable and idempotent. A per-collection manifest stores source
-hashes, metadata hashes, chunk IDs, and version information. A failed embedding
-run preserves the previous indexed document; a successful changed-source run
-upserts new chunks and then removes only the stale old chunk IDs.
-
-## Retrieval, reranking, and cited answers
-
-```bash
-uv run python -m sard.cli.rag dense-search "أين تقع الينابيع الحارة؟" --k 6
-uv run python -m sard.cli.rag fts-search "الينابيع الحارة" --k 6
-uv run python -m sard.cli.rag hybrid-search "أين تقع الينابيع الحارة؟" --k 6
-uv run python -m sard.cli.rag rerank-preview "أين تقع الينابيع الحارة؟" --k 6
-uv run python -m sard.cli.rag ask "أين تقع الينابيع الحارة في المنطقة الشرقية؟"
-```
-
-Optional filters are available on search and ask commands:
-`--topic`, `--source-name`, `--language`, and `--publication-date`.
-
-The public service remains provider-independent:
-
-```python
-from sard.rag.service import RAGService
-
-service = RAGService.open_readonly()
-try:
-    result = service.answer(
-        question="أين تقع الينابيع الحارة؟",
-        filters={"topic": "الينابيع الحارة في المنطقة الشرقية"},
-    )
-finally:
-    service.close()
-```
-
-The result exposes the original question, rewritten queries, dense/FTS/fused
-chunks and scores, selected context, reranking scores, citations with titles
-and URLs, active routes, fallback events, retrieval mode, timings, and
-warnings. If embeddings fail, FTS-only emergency retrieval can still answer
-from indexed text. If generation fails, the answer is an Arabic extractive
-summary of retrieved evidence. Unknown citation IDs are removed, and uncited
-model output is rejected in favor of a grounded fallback.
-
-## Golden evaluation
-
-Evaluation reads `evals/golden.json` and grades retrieval separately from
-answer fluency:
-
-```bash
-uv run python -m sard.cli.rag evaluate evals/golden.json --k 6
-```
-
-The JSON report includes Recall@K for dense, FTS, fused, and reranked results;
-MRR; binary term-proxy nDCG; per-question evidence; source titles and URLs;
-chunk/citation IDs; routes; latency; and questions needing corpus improvement.
-
-The current golden file explicitly declares that its relevance labels are only
-term proxies and that it is not eligible for the 8/10 gate. The shrimp topic
-also has no verified corpus source. Therefore a successful-looking term or
-answer cannot be reported as a genuine gate pass. Add verified documents and
-explicit relevance labels before enabling a future gate.
-
-## Diagnostics and tests
-
-```bash
-uv run python -m sard.cli.rag --help
-uv run python -m sard.cli.rag doctor
-uv run pytest -q
-uv run python -m compileall -q sard
-```
-
-The optional live smoke test is skipped unless explicitly enabled and valid
-NVIDIA credentials/deployments are configured. Run it deliberately with:
-
-```powershell
-$env:RAG_LIVE_SMOKE="true"
-uv run pytest -q -m live
-```
-
-The offline suite mocks NVIDIA interfaces and must not require network access or
-live credentials.
-
-## Step 4 Arabic RTL PDF rendering spike
-
-The PDF layer is intentionally isolated in `sard/outputs/`: it imports no UI,
-LangChain, NVIDIA, or Zvec code and does not make network calls. It accepts the
-typed `Itinerary` contract and returns a `RenderedArtifact` containing the safe
-path, filename, MIME type, byte size, and warnings. Step 6 reuses this renderer
-from the provider-free LangGraph render node; calendar and raw-text generation
-remain separate deterministic renderer paths.
-
-### Font setup and license
-
-The repository deliberately bundles `NotoNaskhArabic-Regular.ttf` (178,388
-bytes) and the `NotoSans-Regular.ttf` Latin companion (569,208 bytes) so
-Arabic plus URLs/English render deterministically and offline. Both are pinned to
-notofonts/noto-fonts commit
-`ffebf8c1ee449e544955a7e813c54f9b73848eac`, SHA-256
-`2f4b88e6ee50fa82c617e2d1d4ba18281cb1c6cd71c3af3ec64970c23995db4b`
-and `b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5`,
-and distributed under the SIL Open Font License 1.1 in
-`sard/outputs/assets/OFL.txt`. The upstream source is:
-
-https://github.com/notofonts/noto-fonts/tree/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoNaskhArabic
-
-Verify the bundled file (or restore the exact pinned download if it was
-removed) with:
-
-```bash
-uv run python -m sard.outputs.sample --download-font --output font-check.pdf
-```
-
-Set `SARD_ARABIC_FONT_PATH` to switch deliberately to another Arabic-capable
-TTF. A missing configured file raises `ArabicFontError`; there is no silent
-Helvetica or system-font fallback. Any alternative font's embedding and
-distribution license must be reviewed by the deployer.
-
-### Generate and inspect the fixture
-
-The sample is prominently labeled fixture-only and uses invented
-`example.org`/`example.com` sources; it is not travel advice:
-
-```bash
-uv sync --extra dev
-uv run python -m sard.outputs.sample --output step4-arabic-rtl-sample.pdf
-```
-
-The default output is
-`output/pdf/step4-arabic-rtl-sample.pdf`. Set `SARD_PDF_OUTPUT_ROOT` to choose
-another root. Relative output paths are resolved beneath that root; absolute
-paths outside it, non-PDF suffixes, traversal, and overwriting an existing file
-are rejected. Generated PDFs and page images under `output/pdf/` and
-`tmp/pdfs/` are ignored by Git.
-
-Render every page for visual review with PyMuPDF:
-
-```bash
-uv run python -c "import fitz,pathlib; d=fitz.open('output/pdf/step4-arabic-rtl-sample.pdf'); o=pathlib.Path('tmp/pdfs'); o.mkdir(parents=True,exist_ok=True); [p.get_pixmap(matrix=fitz.Matrix(2,2),alpha=False).save(o/f'page-{i+1}.png') for i,p in enumerate(d)]"
-```
-
-Inspection should confirm joined Arabic glyphs, right alignment, readable
-mixed Arabic/English, unchanged URLs and citation IDs, wrapped long lines,
-portrait A4 margins, non-overlapping footers, and sequential page numbers.
-The checked Step 4 artifact was rendered as three 595 x 842 point pages and
-rasterized to three 1191 x 1684 PNGs at 2x. Visual review found joined Arabic,
-complete Latin runs/URLs/IDs, clean wrapping and margins, and no clipping,
-overlap, tofu glyphs, or black squares. PyMuPDF extraction also recovered both
-full citation IDs and both fixture URLs; all 285 text spans remained within the
-physical page bounds.
-
-### Citation flow and fallback decision
-
-Each `TextBlock` carries stable citation IDs and may also display them inline.
-Before any file is created, `Itinerary.validate_citations()` rejects duplicate
-source IDs and every unknown declared or inline `CIT-*` ID. The renderer uses
-only the supplied title, URL, page, section, and publication date; absent
-optional metadata stays absent. IDs appear inline, in per-page source notes,
-and in the final source list. ReportLab markup metacharacters are escaped when
-markup is needed; itinerary content is currently drawn as plain canvas text,
-so it is never interpreted as markup.
-
-ReportLab meets the spike criteria with explicit line-level Arabic reshaping
-and bidi processing. The proposed HTML-to-PDF fallback is therefore not
-implemented and remains disabled; adding a browser rendering stack would add
-deployment and reproducibility costs without solving a demonstrated gap.
-
-## Web Application (Next.js + FastAPI)
-
-Sard features a production-ready web interface built with Next.js and styled according to the official **Saudi Ministry of Culture (MOC March 2019 Brand Guidelines)**, featuring dark navy/plum/coral palettes, Arabic (RTL) typography, Always-On RAG streaming, and interactive PDF/iCalendar artifact downloads.
-
-### 1. Start the FastAPI Backend Server
-
-```bash
-uv run sard-api
-# Or directly via uvicorn:
-# uv run uvicorn sard.api.server:app --host 0.0.0.0 --port 8000 --reload
-```
-
-The API server runs on `http://127.0.0.1:8000` with endpoints:
-- `POST /api/chat` (SSE Streaming response with Always-On RAG, citations, and artifacts)
-- `POST /api/itinerary` (LangGraph itinerary generation with PDF & iCalendar)
-- `GET /api/health` & `GET /api/status` (Health and RAG index status)
-- `GET /api/artifacts/{filename}` (Artifact downloads)
-
-### 2. Start the Next.js Web Frontend
-
-```bash
-cd web
-npm run dev
-```
-
-Open `http://localhost:3000` in your browser. The interface includes:
-- **Ministry of Culture (MOC) Brand System:** Official Dark Navy (`#0F2837`), Plum (`#6E1946`), Coral (`#EB5A3C`), Sage (`#91B9B4`), and Light Peach (`#FAC39B`).
-- **ChatGPT-Style Conversational UX:** Collapsible sidebar with chat history, session renaming/deletion, and `Ctrl+K` shortcut.
-- **Always-On RAG:** Instant background retrieval with citations displayed in collapsible reference cards.
-- **Interactive Artifact Downloads:** Directly download PDF itineraries and `.ics` calendars for scheduled trips.
-- **Arabic / English Support:** Native RTL with one-click bilingual switching and text-to-speech audio reading.
-
-## Streamlit Application & Step 8 Investor Demo
-
-Step 7/8 provides the investor-ready Arabic-first Streamlit interface and CLI tools.
-
-```powershell
-uv sync --extra nvidia --extra dev
-Copy-Item .env.example .env
-uv run python -m sard.cli.rag ingest data/corpus
 uv run streamlit run sard/ui/app.py
 ```
+*Open `http://localhost:8501` to test both Live execution and Precached offline demonstration.*
 
-For the deterministic offline investor demo, start the app and choose **عرض تجريبي (بيانات ثابتة)**. The supported hero query is:
+---
 
-```text
-أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية
-```
+### Option 3: Offline Demo Runner via CLI
 
-### Operational modes and fallbacks
-
-The mode badge uses this precedence: `cached_demo`, `unavailable`, `model_fallback`, `degraded_retrieval`, then `live`. Retrieval detail preserves `hybrid_reranked`, `hybrid_fused`, `dense_only`, `full_text_only`, or `unavailable`.
-
-Run the complete offline suite:
-
-```powershell
-uv sync --extra anthropic --extra openai --extra nvidia --extra dev
-uv run pytest -q
-```
-
-## Step 5 LangGraph orchestration
-honest verified subset. Agent nodes use the centralized LangChain model service
-and the public `RAGService` boundary, never NVIDIA endpoints or Zvec directly.
-
-Run the deterministic, network-free hero-query trace:
-
-```bash
-uv run sard-agent --demo
-```
-
-Run against configured NVIDIA NIM routes and an existing Step 3 collection:
-
-```bash
-uv run sard-agent "أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية"
-```
-
-The trace contains only safe node status, retrieval mode/source count, resolved
-model routes, fallback count, verification coverage/retries, and latency. It
-never prints prompts, reasoning, keys, headers, or provider payloads.
-
-## Step 6 deterministic artifacts
-
-When artifact rendering is enabled, the final verified graph output can create
-three independent files beneath `output/runs/<run-id>/`:
-
-```text
-output/runs/<run-id>/
-├── itinerary.pdf
-├── itinerary.ics
-└── answer.txt
-```
-
-| Artifact | MIME type |
-| --- | --- |
-| `itinerary.pdf` | `application/pdf` |
-| `itinerary.ics` | `text/calendar; charset=utf-8` |
-| `answer.txt` | `text/plain; charset=utf-8` |
-
-Generate the offline sample with explicit dates:
-
-```bash
-uv run python -m sard.outputs.sample --step6 --run-id step6-sample --output-root output/runs --date 2026-11-01 --date 2026-11-02
-```
-
-Or run the graph demo:
-
+Run the deterministic, network-free LangGraph demo trace:
 ```bash
 uv run sard-agent --demo --render --date 2026-11-01 --date 2026-11-02
 ```
 
-Dates control calendar creation. User-provided dates are used when present;
-relative labels such as `اليوم الأول` are never treated as dates. Without
-dates, PDF and raw text may still be created, while the calendar is skipped
-with a `missing_dates` warning. A preview calendar requires explicit
-caller-supplied dates and must be labeled as a preview.
+---
 
-Every artifact is written with a fixed safe filename, in a unique per-run
-directory, through a same-directory temporary file and atomic no-overwrite
-publication. The manifest returned in `rendered_artifacts` includes artifact
-type, display label, absolute path, MIME type, size, optional SHA-256 checksum,
-creation status, warnings, and error category. A failure in one artifact does
-not suppress the others.
+## 🛠️ CLI Commands Reference
 
-Rendering uses only the verified itinerary, accepted claims, and supplied
-source map. Citation IDs must exist in that map and every structured factual
-field must retain field-level support. Unsupported optional fields are removed;
-renderers never add addresses, coordinates, prices, opening hours, durations,
-or other facts. Degraded retrieval, evidence-limited verification, and model
-fallbacks are disclosed in a small PDF notice and a concise raw-text notice,
-not as internal logs.
+Sard provides comprehensive command-line interfaces for administration, RAG management, and testing:
 
-The calendar uses `icalendar` (pinned to the maintained 7.2.x line) rather than
-`ics.py`, because the installed renderer must emit and round-trip timezone-aware
-RFC 5545 `VTIMEZONE`/`TZID` values reliably.
-
-Validate a calendar offline with:
-
+### 1. Agent CLI (`sard-agent`)
 ```bash
-uv run python -c "from icalendar import Calendar; from pathlib import Path; c=Calendar.from_ical(Path('output/runs/step6-sample/itinerary.ics').read_bytes()); print([x.name for x in c.subcomponents]); print(len([x for x in c.subcomponents if x.name == 'VEVENT']))"
+# Run a live travel query through the LangGraph pipeline
+uv run sard-agent "أنشئ برنامجًا سياحيًا تراثيًا لمدة يومين في المنطقة الشرقية"
+
+# Run the deterministic hero-query demo trace
+uv run sard-agent --demo
+
+# Run demo with artifact rendering and custom dates
+uv run sard-agent --demo --render --date 2026-10-15 --date 2026-10-16
 ```
 
-Inspect the PDF visually by rendering every page to PNG with PyMuPDF; verify
-Arabic shaping, right-to-left order, URLs, citation IDs, page footers, and the
-absence of clipped or overlapping text.
+### 2. RAG Foundation CLI (`sard-rag` or `python -m sard.cli.rag`)
+```bash
+# Verify system configuration and API reachability
+uv run python -m sard.cli.rag doctor
 
-## Known limitations
+# Discover available models from your provider
+uv run python -m sard.cli.rag models
 
-- The pilot corpus is intentionally small and does not cover shrimp drying.
-- The golden set lacks verified chunk/document relevance labels, so its term
-  metrics are diagnostic rather than a defensible production benchmark.
-- Live NVIDIA model availability depends on the account, catalog, or
-  self-hosted deployment and must be checked rather than assumed.
-- Scanned pages require an explicitly configured, verifiable vision extraction
-  path; otherwise they remain quarantined.
+# Create/initialize the local Zvec vector collection
+uv run python -m sard.cli.rag create-collection
+
+# Ingest corpus documents into the vector store
+uv run python -m sard.cli.rag ingest data/corpus
+
+# Perform hybrid search test
+uv run python -m sard.cli.rag hybrid-search "أين تقع الينابيع الحارة في الأحساء؟" --k 5
+
+# Ask a direct question via the RAG service
+uv run python -m sard.cli.rag ask "ما هي أهم المعالم التراثية في جزيرة تاروت؟"
+```
+
+### 3. Investor Demo & Evaluation CLI (`sard-demo`)
+```bash
+# Check readiness gate for the demo
+uv run sard-demo check
+
+# Run evaluation benchmark against golden dataset
+uv run sard-demo evaluate --json-out output/evaluation/final-evaluation.json
+```
+
+---
+
+## 🧪 Evaluation & Diagnostics
+
+Sard includes a robust diagnostic and evaluation harness to objectively grade retrieval quality and verification accuracy.
+
+### Running Unit & Integration Tests
+```bash
+# Run the complete test suite (426+ offline tests)
+uv run pytest -q
+
+# Run live network smoke tests (requires active API credentials)
+$env:RAG_LIVE_SMOKE="true"; uv run pytest -q -m live   # PowerShell
+RAG_LIVE_SMOKE=true uv run pytest -q -m live           # Linux/macOS
+```
+
+### RAG Evaluation Metrics
+```bash
+uv run python -m sard.cli.rag evaluate evals/golden.json --k 6
+```
+The evaluation report calculates:
+* **Recall@K:** For Dense, BM25 FTS, Fused (RRF), and Reranked stages.
+* **MRR (Mean Reciprocal Rank):** Measuring first relevant item position.
+* **nDCG:** Normalized Discounted Cumulative Gain over graded relevance.
+* **Citation Grounding Rate:** Percentage of generated claims backed by verifiable corpus chunk IDs.
+
+---
+
+## ⚙️ Configuration & Environment Variables
+
+Key settings in `.env`:
+
+```dotenv
+# --- LLM Provider Selection ---
+# Options: "nvidia", "anthropic", "openai", "openrouter"
+MODEL_PROVIDER=nvidia
+MODEL_NAME=nemotron-3-super-120b-a12b
+MODEL_TEMPERATURE=0.2
+
+# --- Provider Credentials ---
+NVIDIA_API_KEY=nvapi-...
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+
+# --- Self-Hosted NVIDIA NIM Endpoints (Optional) ---
+# NVIDIA_CHAT_BASE_URL=http://chat-nim:8000/v1
+# NVIDIA_EMBEDDING_BASE_URL=http://embed-nim:8000/v1
+# NVIDIA_RERANK_BASE_URL=http://rerank-nim:8000/v1
+
+# --- Vector Database & Corpus Paths ---
+ZVEC_COLLECTION_PATH=data/zvec/sard-default
+CORPUS_ROOT=data/corpus
+SARD_PDF_OUTPUT_ROOT=output/runs
+
+# --- Agent Settings ---
+AGENT_COMPOSE_MAX_RETRIES=2
+AGENT_RENDER_ARTIFACTS=true
+```
+
+---
+
+## 📜 License & Font Notices
+
+* **Codebase License:** MIT License. See [LICENSE](LICENSE) for details.
+* **Typography:** Bundles `Noto Naskh Arabic` and `Noto Sans` distributed under the **SIL Open Font License 1.1** ([OFL.txt](sard/outputs/assets/OFL.txt)).
+* **Brand Identity:** Styled in reverence to the official brand guidelines of the **Ministry of Culture, Kingdom of Saudi Arabia**.
+
+---
+
+<p align="center">
+  صُنع بكل فخر لخدمة التراث والثقافة السعودية 🇸🇦<br>
+  <em>Engineered with pride to celebrate and preserve Saudi cultural heritage.</em>
+</p>

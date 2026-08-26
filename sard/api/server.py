@@ -286,83 +286,78 @@ async def chat_endpoint(req: ChatRequest):
         }
         await asyncio.sleep(0.05)
 
-        # 2. Always-On RAG Execution
-        rag_succeeded = False
-        rag_answer_obj: Optional[RAGAnswer] = None
+        # 2. Check for simple conversational greetings/openers to respond instantly
+        greetings = ["مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "شكرا", "من أنت", "عرفني بنفسك", "من انت", "أهلاً", "hello", "hi"]
+        q_clean = re.sub(r"[^\w\s]", "", user_query.strip()).lower()
+        is_greeting = any(q_clean == g or q_clean.startswith(g + " ") for g in greetings)
 
-        try:
-            # Attempt to query RAG
+        if not is_greeting:
             yield {
                 "event": "status",
                 "data": json.dumps({
                     "stage": "retrieving",
-                    "message": "جارٍ استرجاع الوثائق التراثية والمصادر التاريخية ذات الصلة..."
+                    "message": "جارٍ البحث في المعارف الثقافية المعتمدة والويب الموثق..."
                 }, ensure_ascii=False)
             }
-            
-            def _execute_rag():
-                service = RAGService.open_readonly()
-                try:
-                    return service.answer(user_query)
-                finally:
-                    service.close()
 
-            loop = asyncio.get_event_loop()
-            rag_answer_obj = await loop.run_in_executor(None, _execute_rag)
-            
-            if rag_answer_obj and rag_answer_obj.answer_text:
-                rag_succeeded = True
-                full_response_text = rag_answer_obj.answer_text
-                verified = len(rag_answer_obj.citations) > 0
+            try:
+                chat_service = ChatService()
+                loop = asyncio.get_event_loop()
+                history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
+                
+                chat_res = await loop.run_in_executor(
+                    None,
+                    lambda: chat_service.ask(user_query, messages=history_dicts, use_hybrid_retrieval=True)
+                )
 
-                # Format and send citations
-                candidate_map = {c.citation_id: c.content for c in (rag_answer_obj.selected_context or [])}
-                for cit in rag_answer_obj.citations:
-                    snippet = candidate_map.get(cit.citation_id, "")
-                    serialized = _serialize_citation(cit, snippet)
-                    citations_sent.append(serialized)
+                if chat_res.ok and chat_res.text:
+                    full_response_text = chat_res.text
+                    verified = True
 
-                if citations_sent:
-                    yield {
-                        "event": "citations",
-                        "data": json.dumps({
-                            "citations": citations_sent,
-                            "count": len(citations_sent)
-                        }, ensure_ascii=False)
-                    }
+                    # Extract and send citations
+                    for cit in chat_res.citations:
+                        citations_sent.append({
+                            "citation_id": cit.get("id", ""),
+                            "title": cit.get("title", ""),
+                            "source_name": cit.get("id", ""),
+                            "source_url": cit.get("url", ""),
+                            "chunk_id": "",
+                            "snippet": cit.get("title", ""),
+                        })
 
-        except RAGServiceUnavailableError as exc:
-            logger.info("RAG collection not available, falling back to conversational chat: %s", exc)
+                    if citations_sent:
+                        yield {
+                            "event": "citations",
+                            "data": json.dumps({
+                                "citations": citations_sent,
+                                "count": len(citations_sent)
+                            }, ensure_ascii=False)
+                        }
+
+            except Exception as exc:
+                logger.warning("Hybrid cultural retrieval exception: %s. Falling back to direct chat.", exc)
+
+        # 3. Fallback if no response yet
+        if not full_response_text:
             yield {
                 "event": "status",
                 "data": json.dumps({
-                    "stage": "fallback",
-                    "message": "جارٍ التوليد عبر المستشار الثقافي المباشر..."
+                    "stage": "generating",
+                    "message": "جارٍ صياغة إجابة من المستشار الثقافي..."
                 }, ensure_ascii=False)
             }
-        except Exception as exc:
-            logger.warning("RAG retrieval exception: %s. Falling back to chat.", exc)
-            yield {
-                "event": "status",
-                "data": json.dumps({
-                    "stage": "fallback",
-                    "message": "جارٍ إعداد الإجابة عبر نموذج الذكاء الاصطناعي المباشر..."
-                }, ensure_ascii=False)
-            }
-
-        # 3. If RAG didn't generate an answer, invoke ChatService or fallback generator
-        if not rag_succeeded or not full_response_text:
             chat_service = ChatService()
             loop = asyncio.get_event_loop()
-            chat_res = await loop.run_in_executor(None, lambda: chat_service.ask(user_query))
+            history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
+            chat_res = await loop.run_in_executor(None, lambda: chat_service.ask(user_query, messages=history_dicts, use_hybrid_retrieval=False))
             
             if chat_res.ok and chat_res.text:
                 full_response_text = chat_res.text
                 verified = False
             else:
-                # Provide a rich offline response for demo resilience if no API key is provided
                 full_response_text = _generate_cultural_fallback_answer(user_query)
                 verified = False
+
 
         # 4. Stream tokens smoothly
         chunk_size = 4  # Characters or words per token chunk for natural typing feel

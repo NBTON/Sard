@@ -22,13 +22,10 @@ export interface Message {
   timestamp: number;
   citations?: Citation[];
   artifacts?: Artifact[];
-  statusText?: string;
+  isThinking?: boolean;
+  statusStage?: string;
   isStreaming?: boolean;
-  timings?: {
-    total_ms?: number;
-    retrieve_ms?: number;
-    generation_ms?: number;
-  };
+  error?: string;
 }
 
 export interface ChatSession {
@@ -44,17 +41,18 @@ export interface SystemStatus {
   verified: boolean;
   sources_count?: number;
   updated_at?: string;
-  sources: {
-    verified: boolean;
-  };
-  moc_branding: string;
+  sources: { verified: boolean };
+  moc_branding?: string;
 }
 
-export interface CulturalSuggestion {
+export type Lang = "ar" | "en";
+export type View = "landing" | "chat";
+
+export interface Sector {
   id: string;
-  title: string;
-  description: string;
-  query: string;
-  category: "heritage" | "culinary" | "arts" | "nature" | "itinerary";
-  iconName: string;
+  ar: string;
+  en: string;
+  color: string;
+  promptAr: string;
+  promptEn: string;
 }

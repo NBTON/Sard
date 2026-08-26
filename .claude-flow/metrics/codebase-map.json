@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-08-22T23:48:41.473Z",
+  "projectRoot": "C:\\Users\\nawaf\\OneDrive - KFUPM\\Sard_Agent",
+  "structure": {
+    "hasPackageJson": false,
+    "hasTsConfig": false,
+    "hasClaudeConfig": true,
+    "hasClaudeFlow": true
+  },
+  "scannedAt": 1787442521474
+}

@@ -77,6 +77,7 @@ def _env_bool(name: str, default: bool) -> bool:
     raise NVIDIAConfigError(f"{name} must be one of true/false, 1/0, yes/no, or on/off.")
 
 
+
 def _env_tuple(name: str) -> tuple[str, ...]:
     raw = _env(name)
     return tuple(v.strip() for v in raw.split(",") if v.strip()) if raw else ()
@@ -110,6 +111,8 @@ class RAGSettings:
     enable_query_rewrite: bool
     enable_fts: bool
     enable_rerank: bool
+    parallel_api_key: str = ""
+    parallel_search_base_url: str = "https://api.parallel.ai/v1beta"
 
     def validate(self) -> "RAGSettings":
         """Validate settings that would otherwise fail much later in a request.
@@ -223,6 +226,8 @@ def get_rag_settings() -> RAGSettings:
         enable_query_rewrite=_env_bool("RAG_ENABLE_QUERY_REWRITE", True),
         enable_fts=_env_bool("RAG_ENABLE_FTS", True),
         enable_rerank=_env_bool("RAG_ENABLE_RERANK", True),
+        parallel_api_key=_env("PARALLEL_API_KEY"),
+        parallel_search_base_url=_env("PARALLEL_SEARCH_BASE_URL", "https://api.parallel.ai/v1beta"),
     )
     return settings.validate()
 
@@ -259,6 +264,7 @@ def build_chat_model(model_id: str, settings: Optional[RAGSettings] = None):
     if settings.chat_base_url:
         kwargs["base_url"] = settings.chat_base_url
     return ChatNVIDIA(**kwargs)
+
 
 
 def build_embeddings_model(model_id: str, settings: Optional[RAGSettings] = None):

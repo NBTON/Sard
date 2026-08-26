@@ -47,6 +47,10 @@ build/
 node_modules/
 .next/
 out/
+web/.next/
+web/out/
+web/node_modules/
+*.tsbuildinfo
 
 # IDE & Editor files
 .vscode/
@@ -56,9 +60,16 @@ out/
 Thumbs.db
 
 
-# Ruflo local secrets and runtime data
+# Ruflo / Claude-Flow local runtime and DBs
 .env.local
 .env.*.local
 .claude-flow/data/
 .claude-flow/logs/
 .claude-flow/sessions/
+.claude-flow/daemon.pid
+.claude-flow/daemon-state.json
+.claude/memory.db
+.swarm/memory.db
+.swarm/backups/
+*.db
+
