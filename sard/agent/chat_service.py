@@ -1,13 +1,13 @@
 """Provider-neutral chat service — the boundary between the UI and models.
 
-Implements the cultural assistant with hybrid retrieval (rag_search + parallel_search/extract).
+Implements the cultural assistant with Isnād provenance planning and hybrid retrieval.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -19,6 +19,7 @@ from sard.agent.cultural_router import (
     RetrievalDecision,
 )
 from sard.config.models import ModelConfigError, get_chat_model, get_model_settings
+from sard.schemas.isnad import IsnadChain, PlannerResult
 
 logger = logging.getLogger(__name__)
 
@@ -29,18 +30,19 @@ _SYSTEM_PROMPT = CULTURAL_SYSTEM_PROMPT
 class ChatResult:
     """Provider-agnostic result returned to the UI layer.
 
-    Only ``ok``, ``text``, ``error_message``, and optional ``decision`` are exposed.
+    Only ``ok``, ``text``, ``error_message``, optional ``decision``, and citations are exposed.
     """
 
     ok: bool
     text: str = ""
     error_message: str = ""
-    decision: Optional[RetrievalDecision] = None
+    decision: Optional[Any] = None
     citations: list[dict[str, str]] = field(default_factory=list)
+    planner_result: Optional[PlannerResult] = None
 
 
 class ChatService:
-    """Provider-neutral chat service with hybrid cultural search & RAG grounding.
+    """Provider-neutral chat service with isnād provenance planning & RAG grounding.
 
     A LangChain chat model can be injected directly (used by tests to avoid
     any network access or API key). When omitted, the service lazily builds
@@ -53,14 +55,61 @@ class ChatService:
         self,
         chat_model: Optional[BaseChatModel] = None,
         router: Optional[CulturalRouter] = None,
+        planner: Optional[Any] = None,
     ):
         self._injected_model = chat_model
         self.router = router or CulturalRouter()
+        if planner is not None:
+            self.planner = planner
+        else:
+            from sard.planner.pipeline import IsnadPlanner
+            self.planner = IsnadPlanner()
 
     def _get_model(self) -> BaseChatModel:
         if self._injected_model is not None:
             return self._injected_model
         return get_chat_model()
+
+    def _invoke_llm_str(self, sys_p: str, user_p: str) -> str:
+        """Invoke configured LLM with prompt strings."""
+        if self._injected_model is not None:
+            model = self._injected_model
+            resp = model.invoke([SystemMessage(content=sys_p), HumanMessage(content=user_p)])
+            content = getattr(resp, "content", "")
+            return str(content) if not isinstance(content, str) else content
+        try:
+            model = self._get_model()
+            resp = model.invoke([SystemMessage(content=sys_p), HumanMessage(content=user_p)])
+            content = getattr(resp, "content", "")
+            return str(content) if not isinstance(content, str) else content
+        except Exception as exc:
+            logger.debug("Chat model invocation failed (%s); using deterministic synthesis.", exc)
+            return ""
+
+    def ask_isnad(
+        self,
+        user_query: str,
+        session_id: Optional[str] = None,
+        mock_multimodal_files: Optional[dict] = None,
+        status_callback: Optional[Callable[[str, str], None]] = None,
+        lang: str = "ar",
+    ) -> PlannerResult:
+        """Run the isnād provenance planner to verify claims before generating."""
+        return self.planner.plan_and_execute(
+            query=user_query,
+            session_id=session_id,
+            mock_multimodal_files=mock_multimodal_files,
+            llm_invoke_fn=self._invoke_llm_str if (self._injected_model is not None or self._can_load_model()) else None,
+            status_callback=status_callback,
+            lang=lang,
+        )
+
+    def _can_load_model(self) -> bool:
+        try:
+            get_model_settings()
+            return True
+        except Exception:
+            return False
 
     def ask_cultural(
         self,
@@ -68,36 +117,22 @@ class ChatService:
         mock_multimodal_files: Optional[dict] = None,
     ) -> CulturalQueryResult:
         """Run the hybrid cultural router and synthesize an answer grounded in RAG/Web/Multimodal sources."""
-        def _invoke_llm(sys_p: str, user_p: str) -> str:
-            if self._injected_model is not None:
-                model = self._injected_model
-                resp = model.invoke([SystemMessage(content=sys_p), HumanMessage(content=user_p)])
-                content = getattr(resp, "content", "")
-                return str(content) if not isinstance(content, str) else content
-            try:
-                model = self._get_model()
-                resp = model.invoke([SystemMessage(content=sys_p), HumanMessage(content=user_p)])
-                content = getattr(resp, "content", "")
-                return str(content) if not isinstance(content, str) else content
-            except Exception as exc:
-                logger.debug("Chat model invocation failed (%s); using deterministic synthesis.", exc)
-                return ""
-
         return self.router.answer_query(
             user_query,
-            llm_invoke_fn=_invoke_llm if self._injected_model is not None else None,
+            llm_invoke_fn=self._invoke_llm_str if (self._injected_model is not None or self._can_load_model()) else None,
             mock_multimodal_files=mock_multimodal_files,
         )
-
 
     def ask(
         self,
         user_query: str,
         messages: Optional[list[dict]] = None,
         use_hybrid_retrieval: bool = False,
+        session_id: Optional[str] = None,
+        mock_multimodal_files: Optional[dict] = None,
+        status_callback: Optional[Callable[[str, str], None]] = None,
     ) -> ChatResult:
-
-        """Send a user query (or full conversation messages) to the configured chat model and return the reply.
+        """Send a user query (or full conversation messages) to the configured assistant.
 
         Never raises — configuration errors and unexpected failures are
         captured and returned as a sanitized :class:`ChatResult`.
@@ -108,54 +143,51 @@ class ChatService:
                 error_message="الرجاء إدخال سؤال قبل الإرسال.",
             )
 
+        # Hybrid retrieval path via Isnād Planner
+        if use_hybrid_retrieval:
+            try:
+                plan_res = self.ask_isnad(
+                    user_query=user_query,
+                    session_id=session_id,
+                    mock_multimodal_files=mock_multimodal_files,
+                    status_callback=status_callback,
+                )
+                citations = []
+                for ev in plan_res.visible_sources:
+                    citations.append({
+                        "id": ev.source_id,
+                        "title": f"{ev.origin} ({ev.region})",
+                        "url": ev.url_or_doc_id or "",
+                        "origin": ev.origin,
+                        "source_type": ev.source_type,
+                    })
+
+                text_resp = plan_res.answer_ar or plan_res.answer_en or ""
+                return ChatResult(
+                    ok=True,
+                    text=text_resp,
+                    decision=plan_res.chain.decision,
+                    citations=citations,
+                    planner_result=plan_res,
+                )
+            except Exception as exc:
+                logger.warning("Isnād planner execution encountered exception: %s. Falling back to cultural router.", exc)
+                cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files)
+                return ChatResult(
+                    ok=True,
+                    text=cultural_res.answer_text,
+                    decision=cultural_res.decision,
+                    citations=cultural_res.citations,
+                )
+
         try:
             model = self._get_model()
         except ModelConfigError as exc:
             logger.warning("Chat model configuration error: %s", exc)
             return ChatResult(ok=False, error_message=str(exc))
 
-        # When an explicit model is injected (tests/custom), use direct LangChain invoke
-        if self._injected_model is not None:
-            try:
-                lc_messages: list[BaseMessage] = [SystemMessage(content=_SYSTEM_PROMPT)]
-                if messages:
-                    for m in messages[:-1]:
-                        role = m.get("role")
-                        content = m.get("content", "").strip()
-                        if not content:
-                            continue
-                        if role == "user":
-                            lc_messages.append(HumanMessage(content=content))
-                        elif role == "assistant":
-                            lc_messages.append(AIMessage(content=content))
-                lc_messages.append(HumanMessage(content=user_query))
-                response = model.invoke(lc_messages)
-                text = getattr(response, "content", "")
-                if not isinstance(text, str):
-                    text = str(text)
-                return ChatResult(ok=True, text=text)
-            except Exception:
-                logger.exception("Unexpected error while invoking injected chat model")
-                return ChatResult(
-                    ok=False,
-                    error_message=(
-                        "حدث خطأ غير متوقع أثناء الاتصال بنموذج الدردشة. "
-                        "الرجاء المحاولة مرة أخرى لاحقًا."
-                    ),
-                )
-
-        # Hybrid retrieval path for standard chat calls
-        if use_hybrid_retrieval:
-            cultural_res = self.ask_cultural(user_query)
-            return ChatResult(
-                ok=True,
-                text=cultural_res.answer_text,
-                decision=cultural_res.decision,
-                citations=cultural_res.citations,
-            )
-
+        # Direct conversation path
         try:
-            # Direct conversation path
             lc_messages: list[BaseMessage] = [SystemMessage(content=_SYSTEM_PROMPT)]
             if messages:
                 for m in messages[:-1]:
@@ -176,9 +208,8 @@ class ChatService:
 
             return ChatResult(ok=True, text=text)
 
-
-        except Exception:
-            logger.exception("Unexpected error while invoking the chat model")
+        except Exception as exc:
+            logger.exception("Unexpected error while invoking the chat model: %s", exc)
             return ChatResult(
                 ok=False,
                 error_message=(
@@ -189,11 +220,7 @@ class ChatService:
 
 
 def current_status_label() -> str:
-    """Human-readable "<provider> / <model>" label for the UI status area.
-
-    Never raises; returns a friendly placeholder if configuration is
-    missing or invalid so the UI can render a status area unconditionally.
-    """
+    """Human-readable "<provider> / <model>" label for the UI status area."""
     try:
         settings = get_model_settings()
         return f"{settings.provider} / {settings.model_name}"

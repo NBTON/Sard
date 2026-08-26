@@ -292,34 +292,70 @@ async def chat_endpoint(req: ChatRequest):
         is_greeting = any(q_clean == g or q_clean.startswith(g + " ") for g in greetings)
 
         if not is_greeting:
-            yield {
-                "event": "status",
-                "data": json.dumps({
-                    "stage": "retrieving",
-                    "message": "جارٍ البحث في المعارف الثقافية المعتمدة والويب الموثق..."
-                }, ensure_ascii=False)
-            }
+            status_queue: asyncio.Queue = asyncio.Queue()
+
+            def _sync_status_callback(stage: str, message: str):
+                try:
+                    loop.call_soon_threadsafe(status_queue.put_nowait, (stage, message))
+                except Exception:
+                    pass
 
             try:
                 chat_service = ChatService()
                 loop = asyncio.get_event_loop()
                 history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
-                
-                chat_res = await loop.run_in_executor(
-                    None,
-                    lambda: chat_service.ask(user_query, messages=history_dicts, use_hybrid_retrieval=True)
+
+                # Launch chat_service.ask in background thread with status updates
+                task = asyncio.create_task(
+                    loop.run_in_executor(
+                        None,
+                        lambda: chat_service.ask(
+                            user_query,
+                            messages=history_dicts,
+                            use_hybrid_retrieval=True,
+                            session_id=req.session_id,
+                            status_callback=_sync_status_callback,
+                        ),
+                    )
                 )
+
+                # Stream status events as they are emitted by the isnad planner
+                while not task.done():
+                    try:
+                        stage_info = await asyncio.wait_for(status_queue.get(), timeout=0.1)
+                        yield {
+                            "event": "status",
+                            "data": json.dumps({
+                                "stage": stage_info[0],
+                                "message": stage_info[1],
+                            }, ensure_ascii=False),
+                        }
+                    except asyncio.TimeoutError:
+                        pass
+
+                # Drain remaining status events
+                while not status_queue.empty():
+                    stage_info = status_queue.get_nowait()
+                    yield {
+                        "event": "status",
+                        "data": json.dumps({
+                            "stage": stage_info[0],
+                            "message": stage_info[1],
+                        }, ensure_ascii=False),
+                    }
+
+                chat_res = await task
 
                 if chat_res.ok and chat_res.text:
                     full_response_text = chat_res.text
-                    verified = True
+                    verified = bool(chat_res.decision in ("generate", "hedge") or len(chat_res.citations) > 0)
 
                     # Extract and send citations
                     for cit in chat_res.citations:
                         citations_sent.append({
                             "citation_id": cit.get("id", ""),
                             "title": cit.get("title", ""),
-                            "source_name": cit.get("id", ""),
+                            "source_name": cit.get("origin") or cit.get("id", ""),
                             "source_url": cit.get("url", ""),
                             "chunk_id": "",
                             "snippet": cit.get("title", ""),
@@ -335,7 +371,7 @@ async def chat_endpoint(req: ChatRequest):
                         }
 
             except Exception as exc:
-                logger.warning("Hybrid cultural retrieval exception: %s. Falling back to direct chat.", exc)
+                logger.warning("Isnād planner execution exception: %s. Falling back to direct chat.", exc)
 
         # 3. Fallback if no response yet
         if not full_response_text:
