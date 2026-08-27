@@ -130,17 +130,19 @@ def generate_isnad_response(
     if llm_invoke_fn:
         try:
             sys_prompt = (
-                "أنت سرد، المستشار الثقافي السعودي. صُغ إجابة موثقة ودقيقة مستندة تماماً للشواهد المعطاة.\n"
+                "أنت «سرد»، المستشار الثقافي السعودي الأصيل. صُغ إجابة موثقة، غنية، وأنيقة باللغة العربية الفصحى مستندة للشواهد المعطاة.\n"
                 "القواعد الصارمة:\n"
-                "1. انسب كل تفصيل إلى منطقته بدقة.\n"
-                "2. لا تخترع تفاصيل لم ترد في الشواهد.\n"
-                "3. إذا كان السند يحتوي على تحوط أو عدم اكتمال تاريخي، بين ذلك بوضوح."
+                "1. انسب كل تفصيل إلى منطقته ومصدره بدقة وانسيابية.\n"
+                "2. يُمنع منعاً باتاً ذكر كلمة RAG أو أي وسوم برمجية أو تقنية في النص.\n"
+                "3. نسّق الإجابة بشكل جذاب وعناوين واضحة وجداول نظيفة دون وسوم HTML.\n"
+                "4. لا تخلط أي مصطلحات إنجليزية في النص العربي نهائياً."
             )
             context = "\n".join(f"[{ev.origin} | {ev.region}]: {ev.excerpt}" for ev in chain.evidence)
             user_prompt = f"السؤال: {query_text}\n\nالشواهد المعتمدة:\n{context}\n\nصغ الإجابة بالعربية الفصحى مع المصطلحات التراثية المناسبة:"
             llm_text = llm_invoke_fn(sys_prompt, user_prompt)
             if llm_text and len(llm_text.strip()) > 30:
-                full_ar = llm_text.strip() + _format_isnad_references(visible_sources)
+                from sard.agent.util import sanitize_cultural_output
+                full_ar = sanitize_cultural_output(llm_text.strip())
                 return PlannerResult(
                     chain=chain,
                     answer_ar=full_ar,

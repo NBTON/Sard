@@ -25,6 +25,7 @@ from sard.agent.tools.multimodal_tools import (
     MultimodalExtractedItem,
     extract_multimodal_context,
 )
+from sard.agent.util import sanitize_cultural_output
 
 logger = logging.getLogger("sard.agent.cultural_router")
 
@@ -57,26 +58,20 @@ _CORPUS_KEYWORDS = (
 )
 
 CULTURAL_SYSTEM_PROMPT = (
-    "You are Sard (سرد), an authentic Saudi and Arabian Gulf cultural guide and travel assistant.\n"
-    "Ground every answer strictly in retrieved sources and extracted multimodal evidence.\n"
-    "1) Call rag_search for cultural, historical, and travel knowledge.\n"
-    "2) If retrieval is weak, stale, or the question is time-sensitive, call parallel_search with a precise objective.\n"
-    "3) If the user query references multimodal files (e.g. @photo.jpg, @document.pdf, @recording.mp3, @artifact.ply):\n"
-    "   - Automatically recognize and inspect the referenced files.\n"
-    "   - Ground all cultural, linguistic, and historical analysis strictly in what is extracted from the file (OCR text, audio transcription with timestamps/speakers, visual details, 3D structure).\n"
-    "   - NEVER guess or assume contents from the filename alone.\n"
-    "4) Synthesize a concise, practical answer with citations ([RAG: ...], [Web: ...], and [Media: filename]).\n"
-    "5) If still unsure, state the uncertainty honestly.\n\n"
-    "Answer Quality & Cultural Grounding Rules:\n"
-    "- Name the community, region, and context. Do not flatten 'Arab', 'Asian', or 'African' into one custom.\n"
-    "- Distinguish religious requirements vs cultural customs vs modern urban practices.\n"
-    "- Flag disagreement across sources. Prefer local voices over Western explainers.\n"
-    "- If the user is asking how to behave (guest etiquette, gifts, greetings, Ramadan, weddings), give do / don't with the reason, not trivia.\n"
-    "- Cite every factual claim: use [RAG: filename] for local knowledge base documents, [Web: url] for web sources, and [Media: filename] for user-provided multimodal files. If sources conflict, show both.\n"
-    "- Refuse stereotypes, 'funny foreigner' framing, and unsourced claims about gender, religion, or politics.\n"
-    "- Match the user's language (Arabic when queried in Arabic, English when queried in English).\n"
-    "- Never answer a cultural claim from model memory alone when RAG and search both fail. Say what is missing and ask a clarifying question (which country, community, religion, era)."
+    "أنت «سرد» (Sard)، المستشار والدليل الثقافي السعودي الأصيل.\n"
+    "مهمتك تقديم إجابات موثقة، غنية، وتراثية دقيقة مستندة تماماً إلى الشواهد والمعارف المسترجعة.\n\n"
+    "معايير الصياغة والتنسيق:\n"
+    "1. اللغة والأسلوب: تحدث باللغة العربية الفصحى الأنيقة والمعاصرة والثرية بالمصطلحات التراثية المناسبة لكل منطقة. لا تخلط أي كلمات أو مصطلحات أجنبية أو إنجليزية في النص العربي.\n"
+    "2. منع المصطلحات التقنية والبرمجية: يُمنع منعاً باتاً ذكر مصطلحات مثل 'RAG' أو '[RAG: ...]' أو '【RAG: ...】' أو 'CIT' أو أي وسوم تقنية في نص الإجابة.\n"
+    "3. الإسناد الطبيعي: انسب المعلومات والمعارف إلى الجهات والمراجع الرسمية بانسيابية داخل سياق الحديث (مثال: 'وفق توثيق هيئة التراث'، 'بحسب سجلات وزارة الثقافة'، 'استناداً إلى الدليل الرسمي').\n"
+    "4. التنسيق البصري المميز:\n"
+    "   - نظّم الإجابة بعناوين فرعية جذابة (###)، وفقرات متناسقة، وقوائم نقطية أو رقمية مريحة للقراءة.\n"
+    "   - عند استخدام الجداول لتنظيم المسارات أو المقارنات، استخدم جداول ماركداون قياسية نظيفة دون استخدام وسوم HTML مثل <br>.\n"
+    "   - قدم دائماً إجابة وافية ومفصلة وثرية ثقافياً تعكس أصالة التراث السعودي والخليجي، ولا تكتفِ أبداً بكلمات مقتضبة أو إسناد فارغ.\n"
+    "5. احترام التمايز الإقليمي: حافظ على خصوصية كل منطقة (نجد، الحجاز، عسير، المنطقة الشرقية، حائل، نجران، جازان) وتجنب دمج التقاليد أو خلط الأطباق والعادات الإقليمية في قالب واحد.\n"
+    "6. الأمانة العلمية: لا تخترع تفاصيل لم ترد في الشواهد. وإذا كانت المعلومة تحتمل التحوط أو تعدد الروايات، بيّن ذلك باحترام."
 )
+
 
 
 @dataclass
@@ -110,6 +105,7 @@ class CulturalQueryResult:
     extracted_sources: list[dict[str, Any]] = field(default_factory=list)
     multimodal_sources: list[MultimodalExtractedItem] = field(default_factory=list)
     citations: list[dict[str, str]] = field(default_factory=list)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: float = 0.0
 
 
@@ -182,18 +178,23 @@ class CulturalRouter:
             search_queries = self._generate_search_queries(user_query)
 
             for sq in search_queries[:max_search_calls]:
-                res = self.parallel_search(
-                    objective=search_objective,
-                    queries=[sq],
-                    limit=3,
-                )
-                for item in res:
-                    if item.get("error"):
-                        decision.web_unavailable_warning = True
-                        continue
-                    if item.get("url") and not any(w.get("url") == item.get("url") for w in web_results):
-                        web_results.append(item)
-                if len(web_results) >= 3:
+                try:
+                    res = self.parallel_search(
+                        objective=search_objective,
+                        queries=[sq],
+                        limit=3,
+                    )
+                    for item in res:
+                        if item.get("error"):
+                            decision.web_unavailable_warning = True
+                            continue
+                        if item.get("url") and not any(w.get("url") == item.get("url") for w in web_results):
+                            web_results.append(item)
+                    if len(web_results) >= 3:
+                        break
+                except Exception as exc:
+                    logger.warning("Parallel search failed gracefully: %s", exc)
+                    decision.web_unavailable_warning = True
                     break
 
             decision.web_search_count = len(web_results)
@@ -203,12 +204,16 @@ class CulturalRouter:
                 urls_to_extract = [w["url"] for w in web_results[:max_extract_calls] if w.get("url")]
                 if urls_to_extract:
                     decision.web_extract_triggered = True
-                    ext_data = self.parallel_extract(
-                        urls=urls_to_extract,
-                        objective=search_objective,
-                    )
-                    extracted_results = [e for e in ext_data if not e.get("error")]
-                    decision.web_extract_count = len(extracted_results)
+                    try:
+                        ext_data = self.parallel_extract(
+                            urls=urls_to_extract,
+                            objective=search_objective,
+                        )
+                        extracted_results = [e for e in ext_data if not e.get("error")]
+                        decision.web_extract_count = len(extracted_results)
+                    except Exception as exc:
+                        logger.warning("Parallel extract failed gracefully: %s", exc)
+                        decision.web_unavailable_warning = True
 
         return rag_results, web_results, extracted_results, decision
 
@@ -324,23 +329,25 @@ class CulturalRouter:
         # Synthesize answer using model or structured fallback generator
         if llm_invoke_fn is not None:
             user_prompt = (
-                f"User Question: {user_query}\n\n"
-                f"Retrieved Evidence:\n{full_context}\n\n"
-                "Provide an accurate, respectful, and culturally grounded answer. "
-                "Include [RAG: ...], [Web: ...], and [Media: ...] citations directly following factual assertions. "
-                "Ground your answers strictly in what was extracted from any media files or documents."
+                f"سؤال المستخدم: {user_query}\n\n"
+                f"الشواهد والوثائق التراثية المعتمدة المسترجعة:\n{full_context}\n\n"
+                "المطلوب: صياغة إجابة ثقافية متكاملة، دقيقة، وأنيقة باللغة العربية الفصحى مع التنسيق الجميل (عناوين، نقاط، جداول إن لزم). "
+                "لا تذكر كلمة RAG أو أي وسوم برمجية في النص. انسب الحقائق لأسماء الجهات والوثائق بانسيابية."
             )
             try:
-                answer_text = llm_invoke_fn(CULTURAL_SYSTEM_PROMPT, user_prompt)
+                raw_answer = llm_invoke_fn(CULTURAL_SYSTEM_PROMPT, user_prompt)
+                answer_text = sanitize_cultural_output(raw_answer) if raw_answer else ""
             except Exception as exc:
                 logger.error("LLM synthesis failed: %s; using deterministic synthesis.", exc)
+                answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res, multimodal_items)
+            if not answer_text.strip():
                 answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res, multimodal_items)
         else:
             answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res, multimodal_items)
 
         latency_ms = (time.monotonic() - t0) * 1000
         return CulturalQueryResult(
-            answer_text=answer_text,
+            answer_text=sanitize_cultural_output(answer_text),
             decision=decision,
             rag_sources=rag_res,
             web_sources=web_res,
@@ -393,14 +400,13 @@ class CulturalRouter:
         # Check multimodal items first if present
         if multimodal_items:
             mm = multimodal_items[0]
-            cit = f"[Media: {mm.filename}]"
             
             if mm.file_type == "image":
                 desc = mm.description or "قطعة أثرية تراثية"
                 return (
-                    f"بناءً على الفحص البصري للملف المرفق {cit}:\n\n"
-                    f"{desc} {cit}\n\n"
-                    "تُظهر الخصائص البصرية والزخارف ارتباطاً بالتراث الثقافي الأصيل في الجزيرة العربية."
+                    f"بناءً على الفحص البصري للملف المرفق ({mm.filename}):\n\n"
+                    f"{desc}\n\n"
+                    "تُظهر الخصائص البصرية والزخارف ارتباطاً وثيقاً بالتراث الثقافي الأصيل في الجزيرة العربية."
                 )
             elif mm.file_type == "audio":
                 transcript = mm.extracted_text
@@ -410,31 +416,30 @@ class CulturalRouter:
                         for s in mm.transcription["segments"]
                     )
                     return (
-                        f"التفريغ الصوتي للملف {cit} مع الطوابع الزمنية والمتحدثين:\n\n"
-                        f"{seg_text} {cit}"
+                        f"التفريغ الصوتي للملف ({mm.filename}) مع الطوابع الزمنية والمتحدثين:\n\n"
+                        f"{seg_text}"
                     )
-                return f"التفريغ الصوتي للملف {cit}:\n\n{transcript} {cit}"
+                return f"التفريغ الصوتي للملف ({mm.filename}):\n\n{transcript}"
             elif mm.file_type in ("document", "pdf"):
                 text = mm.extracted_text or "محتوى الوثيقة التاريخية"
                 return (
-                    f"النص المستخرج من الوثيقة {cit}:\n\n"
-                    f"{text} {cit}\n\n"
+                    f"النص المستخرج من الوثيقة ({mm.filename}):\n\n"
+                    f"{text}\n\n"
                     "تتضمن الوثيقة توثيقاً تاريخياً لتراث المنطقة وتقاليدها."
                 )
             elif mm.file_type in ("3d", "nifti"):
                 desc = mm.description
-                return f"نتائج التحليل الهندسي والمجسم ثلاثي الأبعاد {cit}:\n\n{desc} {cit}"
+                return f"نتائج التحليل الهندسي والمجسم ثلاثي الأبعاد ({mm.filename}):\n\n{desc}"
 
         # Check if purely RAG-grounded
         if rag_res and not web_res:
             top = rag_res[0]
             meta = top.get("metadata", {})
-            source_name = meta.get("source_url", "").split("/")[-1] or top.get("title", "corpus")
-            cit = f"[RAG: {source_name}]"
+            source_title = top.get("title") or top.get("source") or "سجلات التراث الوطني"
             return (
                 f"استناداً إلى وثائق التراث المعتمدة في {meta.get('region', 'المملكة العربية السعودية')}:\n\n"
-                f"{top.get('chunk')[:800]} {cit}\n\n"
-                f"المصدر المعتمد: {top.get('source')} ({meta.get('culture', 'التراث السعودي')})."
+                f"{top.get('chunk')[:800]}\n\n"
+                f"**المصدر المعتمد:** {source_title} ({meta.get('culture', 'التراث السعودي')})."
             )
 
         # If Web-grounded
@@ -443,19 +448,19 @@ class CulturalRouter:
             url = top_web.get("url", "")
             title = top_web.get("title", "")
             excerpts = " ".join(top_web.get("excerpts", []))[:500]
-            cit = f"[Web: {url}]"
 
             if is_arabic:
                 return (
-                    f"بناءً على المصادر الموثقة الميدانية:\n\n"
-                    f"{excerpts} {cit}\n\n"
-                    f"المصدر: {title} {cit}"
+                    f"بناءً على المصادر الميدانية الموثقة:\n\n"
+                    f"{excerpts}\n\n"
+                    f"**المصدر الرسمي:** {title}"
                 )
             else:
                 return (
                     f"Based on verified live sources:\n\n"
-                    f"{excerpts} {cit}\n\n"
-                    f"Source: {title} {cit}"
+                    f"{excerpts}\n\n"
+                    f"**Verified Source:** {title}"
                 )
+
 
         return "تعذّر تكوين إجابة محددة لعدم كفاية الأدلة المسترجعة."

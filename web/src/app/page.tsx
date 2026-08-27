@@ -6,8 +6,9 @@ import { ChatSidebar } from "@/components/Sidebar";
 import { ChatMessages } from "@/components/ChatMessages";
 import { Composer } from "@/components/Composer";
 import { DirectionProvider, StageTurnContainer, useDirection } from "@/lib/direction";
-import { Message, View } from "@/types";
+import { Artifact, Message, View } from "@/types";
 import { streamChat } from "@/lib/api";
+import { ArtifactModal } from "@/components/ArtifactModal";
 
 function ChatAppContent() {
   const { lang, toggleDirection } = useDirection();
@@ -15,6 +16,7 @@ function ChatAppContent() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [sessionId, setSessionId] = useState<string>(
     () => `sard_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
   );
@@ -245,7 +247,11 @@ function ChatAppContent() {
                 zIndex: 1,
               }}
             >
-              <ChatMessages messages={messages} lang={lang} />
+              <ChatMessages
+                messages={messages}
+                lang={lang}
+                onSelectArtifact={(art) => setSelectedArtifact(art)}
+              />
             </div>
             <div
               style={{
@@ -266,6 +272,13 @@ function ChatAppContent() {
           </div>
         </div>
       )}
+
+      {/* Artifact Interactive Modal Preview Suite */}
+      <ArtifactModal
+        artifact={selectedArtifact}
+        onClose={() => setSelectedArtifact(null)}
+        lang={lang}
+      />
 
       <style>{`
         @media (max-width: 860px) {

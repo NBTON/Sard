@@ -82,3 +82,32 @@ def download_pinned_font(destination: Path | None = None) -> Path:
     finally:
         temporary.unlink(missing_ok=True)
     return target
+
+
+def ensure_fonts_registered(arabic_name: str = "NotoNaskhArabic-Regular", latin_name: str = "NotoSans-Regular") -> tuple[str, str]:
+    """Ensures Noto Naskh Arabic and Noto Sans fonts are registered in ReportLab with safe fallbacks."""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    actual_arabic = "Helvetica"
+    actual_latin = "Helvetica"
+
+    registered = pdfmetrics.getRegisteredFontNames()
+
+    try:
+        if arabic_name not in registered:
+            font_path = require_arabic_font()
+            pdfmetrics.registerFont(TTFont(arabic_name, str(font_path)))
+        actual_arabic = arabic_name
+    except Exception:
+        actual_arabic = "Helvetica"
+
+    try:
+        if latin_name not in registered:
+            latin_path = require_latin_font()
+            pdfmetrics.registerFont(TTFont(latin_name, str(latin_path)))
+        actual_latin = latin_name
+    except Exception:
+        actual_latin = "Helvetica"
+
+    return actual_arabic, actual_latin

@@ -184,3 +184,39 @@ def deterministic_extraction(text: str) -> dict:
 
 def pick_allowed(items: dict, allowed: tuple[str, ...]) -> dict:
     return {key: value for key, value in items.items() if key in allowed}
+
+
+def sanitize_cultural_output(text: str) -> str:
+    """Sanitize and polish AI response text before sending to UI.
+
+    1. Removes bracketed internal developer tokens like:
+       - [RAG: ...] or 【RAG: ...】
+       - [CIT-...] or 【CIT-...】
+       - [Web: ...] or 【Web: ...】
+       - [Media: ...] or 【Media: ...】
+    2. Converts raw HTML breaks like <br>, <br/>, <br /> into newlines.
+    3. Cleans up formatting artifacts, double spaces, and excess blank lines.
+    """
+    if not text:
+        return ""
+
+    # 1. Normalize line break tags to markdown newlines
+    cleaned = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.IGNORECASE)
+
+    # 2. Strip internal citation markers: [RAG: ...], 【RAG: ...】, [Web: ...], 【Web: ...】, [Media: ...], 【Media: ...】, [CIT-...]
+    cleaned = re.sub(
+        r"[\[【]\s*(?:RAG|Web|Media|CIT|cit)[\s:-][^\]】]*?[\]】]",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\[\s*CIT-[A-Za-z0-9_-]+\s*\]", "", cleaned, flags=re.IGNORECASE)
+
+    # 3. Clean up whitespace within lines
+    lines = [re.sub(r"[ \t]{2,}", " ", line).rstrip() for line in cleaned.split("\n")]
+
+    # 4. Rejoin with newlines and clean up excess blank lines
+    result = "\n".join(lines)
+    result = re.sub(r"\n{3,}", "\n\n", result).strip()
+
+    return result

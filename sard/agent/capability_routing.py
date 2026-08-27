@@ -32,6 +32,15 @@ class Capability(str, Enum):
     GENERATIVE_UI = "generative_ui"
     MAP_GENERATION = "map_generation"
     DIAGRAM_GENERATION = "diagram_generation"
+    PRESENTATION_DECK = "presentation_deck"
+    RECIPE_CARD = "recipe_card"
+    CALENDAR_SYNC = "calendar_sync"
+    ETIQUETTE_SIMULATOR = "etiquette_simulator"
+    ORAL_HISTORY = "oral_history"
+    DIALECT_PROVERB = "dialect_proverb"
+    ARTISAN_CRAFT = "artisan_craft"
+    GREETING_CARD = "greeting_card"
+    VERIFIED_RESEARCH = "verified_research"
 
 
 @dataclass(frozen=True)
@@ -47,6 +56,16 @@ class ModelCandidate:
 
 
 # Lightweight deterministic classifier - no LLM, testable
+_PRESENTATION_HINT = re.compile(r"(عرض تقديمي|شرائح|بوربوينت|pptx|presentation|slides|سلايدات|برزنتيشن|إيجاز ثقافي)", re.I)
+_RECIPE_HINT = re.compile(r"(وصفة|طبخة|طريقة عمل|طريقة تحضير|مقادير|جريش|سليق|كبسة|حنيني|مرقوق|مطازيز|recipe|dish|cooking)", re.I)
+_CALENDAR_HINT = re.compile(r"(تقويم|روزنامة|مزامنة|أضف للتقويم|سهيل|المربعانية|الوسم|مواسم فلكية|calendar|ics|google calendar|مهرجان|موسم الرياض|العلا)", re.I)
+_ETIQUETTE_HINT = re.compile(r"(إتيكيت|اتيكيت|آداب|بروتوكول|ضيافة|صب القهوة|مسك الدلة|هز الفنجان|مجلس|مفاوضات|etiquette|protocol)", re.I)
+_ORAL_HISTORY_HINT = re.compile(r"(تاريخ شفوي|حكواتي|سيرة عائلة|ذكريات قديمة|توثيق الموروث|شجرة العائلة|memoir|oral history|biography)", re.I)
+_DIALECT_HINT = re.compile(r"(لهجة|مثل|أمثال|سالفة المثل|أبشر بسعدك|دحين|مرحبا ألوف|يا بعد حيي|عامية|مصطلحات|proverb|dialect|slang)", re.I)
+_ARTISAN_HINT = re.compile(r"(حرفة|حرف تقليدية|سدو|بشت|مشلح|ورد طائفي|قط عسيري|فخار|حرفيين|craft|artisan|sadu|bisht)", re.I)
+_GREETING_HINT = re.compile(r"(بطاقة تهنئة|تهنئة|كارت|معايدة|يوم التأسيس|اليوم الوطني|عيد الفطر|عيد الأضحى|رمضان مبارك|greeting card|card)", re.I)
+_RESEARCH_HINT = re.compile(r"(توثيق معتمد|بحث أكاديمي|مراجع رسمية|دارة الملك عبد العزيز|هيئة التراث|توثيق تاريخي|research|citation|bibliography)", re.I)
+
 _FRESH_KEYWORDS = re.compile(
     r"(اليوم|غدا|غدًا|الآن|موعد|فعالية|مهرجان|افتتاح|إغلاق|سعر|تذكرة|جدول|مواعيد|opening|hours|price|event|today|tomorrow)",
     re.I,
@@ -93,6 +112,26 @@ def classify_capability(question: str) -> Capability:
     if _3D_HINT.search(q) and ("أبعاد" in q or "مجسم" in q or "mesh" in q):
         return Capability.THREE_D_INSPECTION
 
+    # Specialized agentic tools heuristics
+    if _PRESENTATION_HINT.search(q):
+        return Capability.PRESENTATION_DECK
+    if _GREETING_HINT.search(q) and any(k in q for k in ["بطاقة", "كارت", "تهنئة", "معايدة"]):
+        return Capability.GREETING_CARD
+    if _RECIPE_HINT.search(q) and any(k in q for k in ["وصفة", "طريقة", "مقادير", "طبخة", "recipe"]):
+        return Capability.RECIPE_CARD
+    if _CALENDAR_HINT.search(q) and any(k in q for k in ["تقويم", "مزامنة", "روزنامة", "calendar", "سهيل", "المربعانية"]):
+        return Capability.CALENDAR_SYNC
+    if _ETIQUETTE_HINT.search(q):
+        return Capability.ETIQUETTE_SIMULATOR
+    if _ORAL_HISTORY_HINT.search(q) and any(k in q for k in ["شفوي", "حكواتي", "سيرة", "ذكريات"]):
+        return Capability.ORAL_HISTORY
+    if _DIALECT_HINT.search(q) and any(k in q for k in ["لهجة", "مثل", "أمثال", "سالفة", "معنى", "مصطلح"]):
+        return Capability.DIALECT_PROVERB
+    if _ARTISAN_HINT.search(q) and any(k in q for k in ["حرفة", "سدو", "بشت", "ورد", "قط", "أصالة"]):
+        return Capability.ARTISAN_CRAFT
+    if _RESEARCH_HINT.search(q):
+        return Capability.VERIFIED_RESEARCH
+
     if _TRANSLATION_HINT.search(q):
         return Capability.TRANSLATION
     if _ITINERARY_KEYWORDS.search(q):
@@ -130,6 +169,15 @@ _CAPABILITY_REQUIREMENTS: Dict[Capability, Dict[str, bool]] = {
     Capability.GENERATIVE_UI: {"supports_structured": True},
     Capability.MAP_GENERATION: {"supports_structured": True},
     Capability.DIAGRAM_GENERATION: {"supports_structured": True},
+    Capability.PRESENTATION_DECK: {"supports_tools": True},
+    Capability.RECIPE_CARD: {"supports_tools": True},
+    Capability.CALENDAR_SYNC: {"supports_tools": True},
+    Capability.ETIQUETTE_SIMULATOR: {"supports_tools": True},
+    Capability.ORAL_HISTORY: {"supports_tools": True},
+    Capability.DIALECT_PROVERB: {"supports_tools": True},
+    Capability.ARTISAN_CRAFT: {"supports_tools": True},
+    Capability.GREETING_CARD: {"supports_tools": True},
+    Capability.VERIFIED_RESEARCH: {"supports_tools": True},
 }
 
 

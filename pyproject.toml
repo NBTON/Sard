@@ -26,6 +26,8 @@ dependencies = [
     "python-bidi>=0.6.0",
     # RFC 5545 calendar generation and parsing for the Step 6 renderer.
     "icalendar>=7.2.2,<8",
+    # Office presentation (PPTX) deck generation.
+    "python-pptx>=1.0.2",
 ]
 
 [project.optional-dependencies]

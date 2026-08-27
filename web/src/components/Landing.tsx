@@ -150,8 +150,167 @@ export function Landing({
           </div>
         </div>
 
+        {/* 8 Agentic Cultural Studio Tools */}
+        <div style={{ marginTop: 36 }}>
+          <div
+            style={{
+              fontSize: 13.5,
+              fontWeight: 700,
+              color: "#BE4A24",
+              letterSpacing: 0.4,
+              marginBottom: 14,
+              textAlign: "start",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <span>✦</span>
+            <span>{isAr ? "استوديو سرد التفاعلي والأدوات الثقافية المتقدمة" : "Sard Cultural Agentic Studio & Tools"}</span>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+              gap: 12,
+            }}
+            className="agentic-tools-grid"
+          >
+            {[
+              {
+                icon: "📊",
+                titleAr: "عروض تقديمية PPTX",
+                titleEn: "Cultural PPTX Decks",
+                descAr: "توليد شرائح إيجاز ثقافي 16:9 بنسق جاهز",
+                descEn: "Generate 16:9 cultural briefing slides",
+                promptAr: "صمم عرض بوربوينت ثقافي متكامل عن يوم التأسيس السعودي مع مقارنات ومراحل زمنية",
+                promptEn: "Generate a comprehensive cultural PowerPoint slide deck about Saudi Foundation Day",
+                color: "#BE4A24",
+              },
+              {
+                icon: "🍲",
+                titleAr: "بطاقات الطهي والحرف (PDF)",
+                titleEn: "Printable Recipe & Craft Cards",
+                descAr: "بطاقات طباعة بالمقادير التراثية وسالفة الطبخة",
+                descEn: "Printable cards with traditional lore and steps",
+                promptAr: "صمم بطاقة وصفة الجريش النجدي التراثية مع المقادير بالوحدات التقليدية وسالفة الطبخة وخطوات التحضير",
+                promptEn: "Create a printable traditional Najdi Jareesh recipe card with cultural lore and steps",
+                color: "#6E1F1F",
+              },
+              {
+                icon: "📅",
+                titleAr: "مزامنة التقويم والمواسم",
+                titleEn: "Calendar & Astronomical Sync",
+                descAr: "مواسم سهيل والمربعانية وربط تقويم Google",
+                descEn: "Suhail & astronomical seasons synced to Google",
+                promptAr: "أضف مواسم التقويم التراثية وموسم سهيل وفعاليات العلا إلى تقويم Google وملف ics",
+                promptEn: "Sync Saudi heritage astronomical seasons and AlUla festivals with Google Calendar (.ics)",
+                color: "#4A513C",
+              },
+              {
+                icon: "🧭",
+                titleAr: "محاكي الإتيكيت والبروتوكول",
+                titleEn: "Etiquette & Protocol Simulator",
+                descAr: "مخططات تدفقية لآداب المجلس والضيافة",
+                descEn: "Flowcharts for Majlis and hospitality etiquette",
+                promptAr: "شغل محاكي إتيكيت المجلس وآداب صب القهوة السعودية وهز الفنجان مع مخطط تدفقي",
+                promptEn: "Simulate Saudi Majlis etiquette protocol and coffee serving traditions with interactive flowchart",
+                color: "#C4A46A",
+              },
+              {
+                icon: "💌",
+                titleAr: "ستوديو بطاقات التهنئة",
+                titleEn: "Cultural Greeting Studio",
+                descAr: "تصميم بطاقات معايدة بأبيات فصحى ونبطية",
+                descEn: "Greeting cards with classical and Nabati poetry",
+                promptAr: "صمم بطاقة تهنئة ومعايدة لليوم الوطني السعودي مع أبيات شعرية فصحى ونبطية وتصميم تراثي",
+                promptEn: "Create a Saudi National Day greeting card with custom poetry and decorative calligraphy theme",
+                color: "#BE4A24",
+              },
+              {
+                icon: "📜",
+                titleAr: "فك شفرة وسالفة الأمثال",
+                titleEn: "Dialect & Proverb Decoder",
+                descAr: "قصة نشأة المثل وسياق استخدامه باللهجات",
+                descEn: "Origin stories and dialect context of proverbs",
+                promptAr: "فسر مثل أبشر بسعدك واذكر سالفته وقصته التاريخية وسياق استخدامه في اللهجة النجدية",
+                promptEn: "Decode the Saudi proverb 'Absher Bi Sa'adak' with its historical origin story and dialect usage",
+                color: "#6E1F1F",
+              },
+              {
+                icon: "🏺",
+                titleAr: "دليل أصالة الحرف التراثية",
+                titleEn: "Artisan Craft Authenticator",
+                descAr: "معايير السدو والبشت الحساوي والورد الطائفي",
+                descEn: "Authentication standards for Sadu and Bisht",
+                promptAr: "استخرج دليل أصالة السدو ومعايير التمييز بين النسيج اليدوي والمصنع مع إرشادات الحفظ",
+                promptEn: "Provide authentication criteria for genuine handmade Sadu weaving vs machine-made copies",
+                color: "#4A513C",
+              },
+              {
+                icon: "📖",
+                titleAr: "توثيق الموروث والسيرة",
+                titleEn: "Oral History Memoir Co-Pilot",
+                descAr: "تحويل الذكريات الشفوية إلى كتيب سيرة فصيح",
+                descEn: "Turn oral memories into chaptered memoir booklets",
+                promptAr: "وثق تاريخ وسيرة عائلية في كتيب سيرة فصيح عن رحلات الغوص على اللؤلؤ في المنطقة الشرقية",
+                promptEn: "Compile an oral history memoir booklet from family notes about pearl diving in Eastern Province",
+                color: "#C4A46A",
+              },
+            ].map((tool, idx) => (
+              <button
+                key={idx}
+                onClick={() => onSectorPrompt(isAr ? tool.promptAr : tool.promptEn)}
+                style={{
+                  textAlign: "start",
+                  background: "#FAF7F1",
+                  border: "1.5px solid #D4CBBD",
+                  borderRadius: 16,
+                  padding: "16px 14px",
+                  cursor: "pointer",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                  transition: "all 0.18s ease",
+                  boxShadow: "0 2px 8px rgba(20,18,16,0.04)",
+                }}
+                onMouseEnter={(e) => {
+                  const el = e.currentTarget as HTMLButtonElement;
+                  el.style.transform = "translateY(-3px)";
+                  el.style.borderColor = tool.color;
+                  el.style.boxShadow = `0 8px 20px -4px rgba(20,18,16,0.12)`;
+                }}
+                onMouseLeave={(e) => {
+                  const el = e.currentTarget as HTMLButtonElement;
+                  el.style.transform = "translateY(0)";
+                  el.style.borderColor = "#D4CBBD";
+                  el.style.boxShadow = "0 2px 8px rgba(20,18,16,0.04)";
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 20 }}>{tool.icon}</span>
+                  <span
+                    style={{
+                      fontFamily: "'Noto Naskh Arabic', serif",
+                      fontSize: 14.5,
+                      fontWeight: 700,
+                      color: "#141210",
+                    }}
+                  >
+                    {isAr ? tool.titleAr : tool.titleEn}
+                  </span>
+                </div>
+                <span style={{ fontSize: 11.5, color: "#6A6258", lineHeight: 1.45 }}>
+                  {isAr ? tool.descAr : tool.descEn}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Sectors: 11 tiles */}
-        <div style={{ marginTop: 44 }}>
+        <div style={{ marginTop: 40 }}>
           <div
             style={{
               fontSize: 13.5,

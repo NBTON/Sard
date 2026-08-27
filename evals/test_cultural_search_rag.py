@@ -56,8 +56,10 @@ def test_eval_1_fact_in_rag_corpus_must_not_web_search():
     res = router.answer_query(query)
     assert len(res.rag_sources) > 0
     assert len(res.web_sources) == 0
-    assert "[RAG:" in res.answer_text
-    assert "[Web:" not in res.answer_text
+    assert len(res.citations) > 0
+    assert res.citations[0]["type"] == "rag"
+    assert res.answer_text != ""
+
 
 
 # =========================================================================
@@ -94,8 +96,10 @@ def test_eval_2_current_cultural_event_this_year_must_web_search():
 
     # Test synthesized cited output
     res = router.answer_query(query)
-    assert "[Web:" in res.answer_text
-    assert "https://www.moc.gov.sa" in res.answer_text
+    assert len(res.citations) > 0
+    assert any(c.get("type") == "web" for c in res.citations)
+    assert any(c.get("url") == "https://www.moc.gov.sa/events/2026-heritage-festival" for c in res.citations)
+    assert res.answer_text != ""
 
 
 # =========================================================================
@@ -133,8 +137,10 @@ def test_eval_3_low_coverage_culture_question_rag_miss_triggers_parallel():
 
     # Synthesize answer
     res = router.answer_query(query)
-    assert "[Web:" in res.answer_text
-    assert "https://reab.pro" in res.answer_text
+    assert len(res.citations) > 0
+    assert any(c.get("type") == "web" for c in res.citations)
+    assert res.citations[0]["url"] == "https://reab.pro/en/info/business-traditions-and-mentality/business-etiquette-in-qatar"
+    assert res.answer_text != ""
 
 
 # =========================================================================
@@ -247,7 +253,9 @@ def test_graceful_fallback_when_web_fails():
     res = router.answer_query(query)
 
     assert res.decision.web_unavailable_warning is True
-    assert "[RAG: doc1.md]" in res.answer_text
+    assert len(res.citations) > 0
+    assert res.citations[0]["type"] == "rag"
+    assert res.answer_text != ""
 
 
 def test_chat_service_hybrid_retrieval_integration():
@@ -256,5 +264,6 @@ def test_chat_service_hybrid_retrieval_integration():
     result = service.ask("كيف تتم ممارسة تجفيف الروبيان في جزيرة تاروت بالمنطقة الشرقية؟", use_hybrid_retrieval=True)
     assert result.ok is True
     assert result.text != ""
-    assert "[RAG:" in result.text
+    assert len(result.citations) > 0
+
 

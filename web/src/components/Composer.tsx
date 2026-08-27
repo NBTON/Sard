@@ -44,6 +44,64 @@ export function Composer({
         background: "transparent",
       }}
     >
+      {/* Quick Agentic Tools Launcher Bar */}
+      <div
+        style={{
+          maxWidth: 860,
+          margin: "0 auto 8px",
+          display: "flex",
+          gap: 6,
+          overflowX: "auto",
+          paddingBottom: 4,
+          scrollbarWidth: "none",
+        }}
+      >
+        {[
+          { icon: "📊", labelAr: "عرض PPTX", labelEn: "PPTX Deck", prompt: "صمم عرض بوربوينت ثقافي متكامل عن " },
+          { icon: "🍲", labelAr: "بطاقة وصفة PDF", labelEn: "Recipe Card", prompt: "صمم بطاقة وصفة تراثية مطبوعة لـ " },
+          { icon: "📅", labelAr: "مزامنة التقويم", labelEn: "Sync Calendar", prompt: "أضف مواسم التقويم التراثية وموسم سهيل إلى تقويم Google" },
+          { icon: "🧭", labelAr: "محاكي الإتيكيت", labelEn: "Etiquette Simulator", prompt: "شغل محاكي إتيكيت المجلس وآداب صب القهوة مع مخطط تدفقي" },
+          { icon: "💌", labelAr: "بطاقة تهنئة", labelEn: "Greeting Card", prompt: "صمم بطاقة تهنئة ومعايدة لليوم الوطني بأبيات فصحى ونبطية" },
+          { icon: "📜", labelAr: "سالفة مثل", labelEn: "Proverb Lore", prompt: "فسر مثل واذكر سالفته وسياق استخدامه: " },
+          { icon: "🏺", labelAr: "أصالة حرفة", labelEn: "Craft Authenticator", prompt: "استخرج دليل أصالة الحرفة ومعايير تمييز القطع الأصلية لـ " },
+          { icon: "📖", labelAr: "كتيب سيرة", labelEn: "Memoir Co-Pilot", prompt: "وثق تاريخ وسيرة عائلية في كتيب سيرة فصيح عن " },
+        ].map((chip, idx) => (
+          <button
+            key={idx}
+            onClick={() => {
+              onChange(chip.prompt);
+              ref.current?.focus();
+            }}
+            style={{
+              background: "#FAF7F1",
+              border: "1px solid #D4CBBD",
+              borderRadius: 999,
+              padding: "4px 10px",
+              fontSize: 12,
+              fontWeight: 600,
+              color: "#3A342E",
+              whiteSpace: "nowrap",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              transition: "all 0.15s ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = "#BE4A24";
+              e.currentTarget.style.color = "#BE4A24";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = "#D4CBBD";
+              e.currentTarget.style.color = "#3A342E";
+            }}
+          >
+            <span>{chip.icon}</span>
+            <span>{isAr ? chip.labelAr : chip.labelEn}</span>
+          </button>
+        ))}
+      </div>
+
       <div
         data-dir-animate="composer-bar"
         data-dir-id="composer-input-bar"

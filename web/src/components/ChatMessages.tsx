@@ -2,20 +2,18 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Citation, Lang, Message } from "@/types";
+import { Artifact, Citation, Lang, Message } from "@/types";
 import { SardMiniMark, ThinkingWeave } from "./SardMark";
 import { t } from "@/lib/copy";
 
-function extractFacts(content: string): string[] | null {
-  const lines = content
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.startsWith("-") || l.startsWith("•") || /^\d+\./.test(l));
-
-  if (lines.length >= 2 && lines.length <= 8) {
-    return lines.slice(0, 4).map((l) => l.replace(/^[-•\d.\s]+/, "").trim()).filter(Boolean);
-  }
-  return null;
+function cleanContent(text: string): string {
+  if (!text) return "";
+  // 1. Normalize HTML break tags to markdown newlines
+  let cleaned = text.replace(/<\s*br\s*\/?>/gi, "\n");
+  // 2. Strip any bracketed developer markers if leaked
+  cleaned = cleaned.replace(/[\[【]\s*(?:RAG|Web|Media|CIT|cit)[\s:-][^\]】]*?[\]】]/gi, "");
+  cleaned = cleaned.replace(/\[\s*CIT-[A-Za-z0-9_-]+\s*\]/gi, "");
+  return cleaned.trim();
 }
 
 function UserBubble({ m, lang }: { m: Message; lang: Lang }) {
@@ -58,9 +56,16 @@ function UserBubble({ m, lang }: { m: Message; lang: Lang }) {
   );
 }
 
-function AgentCard({ m, lang }: { m: Message; lang: Lang }) {
+function AgentCard({
+  m,
+  lang,
+  onSelectArtifact,
+}: {
+  m: Message;
+  lang: Lang;
+  onSelectArtifact?: (artifact: Artifact) => void;
+}) {
   const isAr = lang === "ar";
-  const factChips = !m.isThinking && !m.error ? extractFacts(m.content) : null;
   // Deduplicate citations by unique source / citation_id
   const citations = React.useMemo(() => {
     if (!m.citations || m.citations.length === 0) return [];
@@ -74,6 +79,7 @@ function AgentCard({ m, lang }: { m: Message; lang: Lang }) {
   }, [m.citations]);
 
   const isVerified = Boolean(citations.length > 0);
+  const formattedContent = React.useMemo(() => cleanContent(m.content), [m.content]);
 
   return (
     <div
@@ -283,39 +289,101 @@ function AgentCard({ m, lang }: { m: Message; lang: Lang }) {
                   {children}
                 </code>
               ),
-            }}
-          >
-            {m.content}
-          </ReactMarkdown>
-
-          {/* Optional Fact Chips (2-col grid, paper wells) */}
-          {factChips && (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: 10,
-                marginTop: 16,
-              }}
-            >
-              {factChips.map((f, i) => (
+              table: ({ children }) => (
                 <div
-                  key={i}
                   style={{
-                    background: "#F3EEE4",
-                    border: "1px solid #E8E0D2",
-                    borderRadius: 12,
-                    padding: "10px 14px",
-                    fontSize: 13,
-                    lineHeight: 1.6,
-                    color: "#3A342E",
+                    overflowX: "auto",
+                    margin: "18px 0",
+                    width: "100%",
+                    borderRadius: 14,
+                    border: "1px solid #D4CBBD",
+                    background: "#FAF7F1",
+                    boxShadow: "0 2px 10px -2px rgba(20,18,16,0.05)",
                   }}
                 >
-                  {f}
+                  <table
+                    style={{
+                      width: "100%",
+                      borderCollapse: "separate",
+                      borderSpacing: 0,
+                      fontSize: 14,
+                      lineHeight: 1.75,
+                      textAlign: "start",
+                    }}
+                  >
+                    {children}
+                  </table>
                 </div>
-              ))}
-            </div>
-          )}
+              ),
+              thead: ({ children }) => (
+                <thead
+                  style={{
+                    background: "#EFE8DB",
+                    borderBottom: "2px solid #D4CBBD",
+                  }}
+                >
+                  {children}
+                </thead>
+              ),
+              tbody: ({ children }) => (
+                <tbody style={{ background: "#FAF7F1" }}>
+                  {children}
+                </tbody>
+              ),
+              tr: ({ children }) => (
+                <tr
+                  style={{
+                    borderBottom: "1px solid #E8E0D2",
+                    transition: "background 0.15s ease",
+                  }}
+                >
+                  {children}
+                </tr>
+              ),
+              th: ({ children }) => (
+                <th
+                  style={{
+                    padding: "12px 16px",
+                    fontWeight: 700,
+                    color: "#141210",
+                    textAlign: "start",
+                    borderBottom: "1.5px solid #D4CBBD",
+                    borderInlineEnd: "1px solid #D4CBBD",
+                    whiteSpace: "nowrap",
+                    fontFamily: "'IBM Plex Sans Arabic', 'IBM Plex Sans', sans-serif",
+                  }}
+                >
+                  {children}
+                </th>
+              ),
+              td: ({ children }) => (
+                <td
+                  style={{
+                    padding: "12px 16px",
+                    color: "#3A342E",
+                    verticalAlign: "top",
+                    borderBottom: "1px solid #E8E0D2",
+                    borderInlineEnd: "1px solid #E8E0D2",
+                    lineHeight: 1.75,
+                    fontSize: 14,
+                  }}
+                >
+                  {children}
+                </td>
+              ),
+              hr: () => (
+                <hr
+                  style={{
+                    border: "none",
+                    borderTop: "1px solid #D4CBBD",
+                    margin: "20px 0",
+                  }}
+                />
+              ),
+            }}
+          >
+            {formattedContent}
+          </ReactMarkdown>
 
           {/* Source Pills (olive text, paper chip, 1px line) */}
           {citations.length > 0 && (
@@ -369,41 +437,82 @@ function AgentCard({ m, lang }: { m: Message; lang: Lang }) {
 
           {/* Attachments / Artifacts */}
           {m.artifacts && m.artifacts.length > 0 && (
-            <div style={{ marginTop: 14 }}>
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid #E8E0D2" }}>
               <div
                 style={{
                   fontSize: 11.5,
                   fontWeight: 700,
-                  color: "#8A8178",
+                  color: "#BE4A24",
                   marginBottom: 8,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
                 }}
               >
-                {t("attachments", lang)}
+                <span>✦</span>
+                <span>{isAr ? "مخرجات سرد التفاعلية والمستندات المعتمدة" : "Sard Cultural Outputs & Artifacts"} ({m.artifacts.length})</span>
               </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {m.artifacts.map((a, i) => (
-                  <a
-                    key={i}
-                    href={a.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 6,
-                      background: "#F3EEE4",
-                      border: "1px solid #D4CBBD",
-                      borderRadius: 999,
-                      padding: "6px 12px",
-                      fontSize: 12,
-                      color: "#141210",
-                      textDecoration: "none",
-                    }}
-                  >
-                    <span>📄</span>
-                    <span>{a.title || a.filename}</span>
-                  </a>
-                ))}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                {m.artifacts.map((a, i) => {
+                  const isPptx = a.type === "pptx" || a.type === "presentation_pptx";
+                  const isRecipe = a.type === "recipe_craft_card";
+                  const isCal = a.type === "ics" || a.type === "calendar_ics";
+                  const isCard = a.type === "card" || a.type === "greeting_card";
+                  const isEt = a.type === "etiquette_flow";
+                  const isDl = a.type === "dialect_lore";
+                  const isArt = a.type === "artisan_craft";
+                  const isMem = a.type === "family_memoir_booklet";
+                  const isRes = a.type === "verified_research";
+
+                  const icon = isPptx ? "📊" : isRecipe ? "🍲" : isCal ? "📅" : isCard ? "💌" : isEt ? "🧭" : isDl ? "📜" : isArt ? "🏺" : isMem ? "📖" : isRes ? "🏛️" : "📄";
+
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => onSelectArtifact?.(a)}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 8,
+                        background: "#F3EEE4",
+                        border: "1.5px solid #C4A46A",
+                        borderRadius: 12,
+                        padding: "8px 14px",
+                        fontSize: 13,
+                        fontWeight: 600,
+                        color: "#141210",
+                        cursor: "pointer",
+                        boxShadow: "0 2px 8px rgba(20,18,16,0.06)",
+                        transition: "all 0.15s ease",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = "#E8E0D2";
+                        e.currentTarget.style.borderColor = "#BE4A24";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "#F3EEE4";
+                        e.currentTarget.style.borderColor = "#C4A46A";
+                      }}
+                    >
+                      <span style={{ fontSize: 16 }}>{icon}</span>
+                      <span style={{ fontFamily: "'Noto Naskh Arabic', serif", fontWeight: 700 }}>
+                        {a.title || a.filename}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 10.5,
+                          background: "#BE4A24",
+                          color: "#FFFFFF",
+                          padding: "2px 6px",
+                          borderRadius: 4,
+                          marginInlineStart: 4,
+                        }}
+                      >
+                        {isAr ? "معاينة" : "Preview"}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -421,9 +530,11 @@ function AgentCard({ m, lang }: { m: Message; lang: Lang }) {
 export function ChatMessages({
   messages,
   lang,
+  onSelectArtifact,
 }: {
   messages: Message[];
   lang: Lang;
+  onSelectArtifact?: (artifact: Artifact) => void;
 }) {
   if (messages.length === 0) {
     return (
@@ -456,7 +567,7 @@ export function ChatMessages({
         m.role === "user" ? (
           <UserBubble key={m.id} m={m} lang={lang} />
         ) : (
-          <AgentCard key={m.id} m={m} lang={lang} />
+          <AgentCard key={m.id} m={m} lang={lang} onSelectArtifact={onSelectArtifact} />
         )
       )}
     </div>

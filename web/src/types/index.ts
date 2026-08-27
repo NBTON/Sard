@@ -9,10 +9,11 @@ export interface Citation {
 }
 
 export interface Artifact {
-  type: "pdf" | "ics" | "markdown" | string;
+  type: "pdf" | "pptx" | "ics" | "card" | "etiquette_flow" | "dialect_lore" | "artisan_craft" | "verified_research" | "family_memoir_booklet" | "presentation_pptx" | "recipe_craft_card" | "markdown" | string;
   title: string;
   url: string;
   filename: string;
+  data?: any;
 }
 
 export interface Message {

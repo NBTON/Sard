@@ -33,6 +33,7 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 from sard.agent.chat_service import ChatService, current_status_label
 from sard.agent.graph import GraphDependencies, default_dependencies, run_pipeline
+from sard.agent.util import sanitize_cultural_output
 from sard.config.models import get_model_settings, ModelConfigError
 from sard.config.rag import get_rag_settings, RAGSettings
 from sard.rag.schemas import Citation, RAGAnswer
@@ -184,7 +185,7 @@ async def get_corpus_info():
 
 @app.get("/api/artifacts/{filename}")
 async def get_artifact_file(filename: str):
-    """Securely download a generated artifact file (PDF, ICS)."""
+    """Securely download a generated artifact file (PDF, PPTX, ICS, SVG, JSON)."""
     safe_name = Path(filename).name
     target_path = OUTPUT_DIR / safe_name
     if not target_path.exists():
@@ -195,7 +196,19 @@ async def get_artifact_file(filename: str):
         else:
             raise HTTPException(status_code=404, detail="الملف غير موجود")
 
-    media_type = "application/pdf" if safe_name.endswith(".pdf") else "text/calendar" if safe_name.endswith(".ics") else "text/plain"
+    if safe_name.endswith(".pdf"):
+        media_type = "application/pdf"
+    elif safe_name.endswith(".pptx"):
+        media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    elif safe_name.endswith(".ics"):
+        media_type = "text/calendar"
+    elif safe_name.endswith(".svg"):
+        media_type = "image/svg+xml"
+    elif safe_name.endswith(".json"):
+        media_type = "application/json"
+    else:
+        media_type = "application/octet-stream"
+
     return FileResponse(path=target_path, filename=safe_name, media_type=media_type)
 
 
@@ -370,6 +383,15 @@ async def chat_endpoint(req: ChatRequest):
                             }, ensure_ascii=False)
                         }
 
+                    # Stream generated artifacts (Presentation, Recipe, Calendar, Greeting Card, etc.)
+                    if getattr(chat_res, "artifacts", None):
+                        for art in chat_res.artifacts:
+                            artifacts_sent.append(art)
+                        yield {
+                            "event": "artifacts",
+                            "data": json.dumps({"artifacts": artifacts_sent}, ensure_ascii=False)
+                        }
+
             except Exception as exc:
                 logger.warning("Isnād planner execution exception: %s. Falling back to direct chat.", exc)
 
@@ -394,8 +416,11 @@ async def chat_endpoint(req: ChatRequest):
                 full_response_text = _generate_cultural_fallback_answer(user_query)
                 verified = False
 
+        # 4. Sanitize and stream tokens smoothly
+        full_response_text = sanitize_cultural_output(full_response_text)
+        if not full_response_text.strip():
+            full_response_text = _generate_cultural_fallback_answer(user_query)
 
-        # 4. Stream tokens smoothly
         chunk_size = 4  # Characters or words per token chunk for natural typing feel
         words = full_response_text.split(" ")
         for i in range(0, len(words), chunk_size):
@@ -504,6 +529,160 @@ def _generate_cultural_fallback_answer(query: str) -> str:
             "- أهم الفعاليات والمواسم الثقافية التي تنظمها قطاعات وهيئات **وزارة الثقافة**.\n\n"
             "كيف تفضل أن نبدأ رحلتنا الاستكشافية اليوم؟"
         )
+
+
+# --- Agentic Cultural Feature Models & Endpoints ---
+
+class PresentationRequest(BaseModel):
+    topic: str = Field(..., description="Cultural briefing topic")
+    region: Optional[str] = Field("المملكة العربية السعودية", description="Target region")
+    overview_text: Optional[str] = Field("", description="Overview context")
+    comparison_cards: Optional[List[Dict[str, Any]]] = Field(None, description="Comparison cards")
+    timeline_items: Optional[List[Dict[str, Any]]] = Field(None, description="Timeline milestones")
+    key_takeaways: Optional[List[str]] = Field(None, description="Key takeaways")
+
+
+class RecipeCardRequest(BaseModel):
+    item_name: str = Field(..., description="Dish or craft name")
+    card_type: Optional[str] = Field("culinary", description="culinary or craft")
+    region: Optional[str] = Field("المملكة العربية السعودية", description="Region")
+    cultural_story: Optional[str] = Field("", description="Cultural backstory")
+
+
+class GreetingCardRequest(BaseModel):
+    occasion: Optional[str] = Field("foundation_day", description="Occasion identifier")
+    recipient_name: Optional[str] = Field("", description="Recipient name")
+    sender_name: Optional[str] = Field("", description="Sender name")
+    custom_message: Optional[str] = Field("", description="Custom message text")
+    theme: Optional[str] = Field("dark_gold", description="Color theme")
+
+
+class EtiquetteRequest(BaseModel):
+    scenario_type: Optional[str] = Field("majlis", description="majlis or business_negotiation")
+    situation: Optional[str] = Field("", description="Context details")
+
+
+class DialectRequest(BaseModel):
+    phrase_or_proverb: str = Field(..., description="Proverb or dialect word")
+    dialect_region: Optional[str] = Field("najdi", description="najdi, hijazi, sharqawi, janoubi")
+
+
+class ArtisanRequest(BaseModel):
+    craft_name: Optional[str] = Field("sadu", description="Craft name (sadu, hasawi_bisht, taif_rose, aseeri_qatt)")
+
+
+class MemoirRequest(BaseModel):
+    family_name: str = Field(..., description="Narrator / family name")
+    raw_notes: List[Dict[str, str]] = Field(default_factory=list, description="List of notes / answers")
+    origin_region: Optional[str] = Field("المملكة العربية السعودية", description="Origin region")
+    origin_town: Optional[str] = Field("", description="Origin town/village")
+
+
+class ResearchRequest(BaseModel):
+    topic: str = Field(..., description="Heritage topic for verified research")
+    primary_authority: Optional[str] = Field("دارة الملك عبد العزيز / هيئة التراث", description="Authority")
+
+
+@app.get("/api/calendar/events")
+@app.post("/api/calendar/events")
+async def get_heritage_calendar_events(
+    query: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    region: Optional[str] = Query(None),
+    month: Optional[int] = Query(None),
+):
+    """Retrieve verified heritage events, astronomical seasons, and calendar sync URLs."""
+    from sard.agent.tools.cultural_agentic_tools import tool_sync_heritage_calendar
+    res = tool_sync_heritage_calendar(query=query or "", category=category, region=region, month=month)
+    return res
+
+
+@app.post("/api/tools/presentation")
+async def generate_presentation_endpoint(req: PresentationRequest):
+    """Generate a PowerPoint (.pptx) cultural presentation deck."""
+    from sard.agent.tools.cultural_agentic_tools import tool_generate_presentation
+    return tool_generate_presentation(
+        topic=req.topic,
+        region=req.region or "المملكة العربية السعودية",
+        overview_text=req.overview_text or "",
+        comparison_cards=req.comparison_cards,
+        timeline_items=req.timeline_items,
+        key_takeaways=req.key_takeaways,
+    )
+
+
+@app.post("/api/tools/recipe-card")
+async def generate_recipe_card_endpoint(req: RecipeCardRequest):
+    """Generate printable PDF recipe or craft card."""
+    from sard.agent.tools.cultural_agentic_tools import tool_generate_recipe_or_craft_card
+    return tool_generate_recipe_or_craft_card(
+        item_name=req.item_name,
+        card_type=req.card_type or "culinary",
+        region=req.region or "المملكة العربية السعودية",
+        cultural_story=req.cultural_story or "",
+    )
+
+
+@app.post("/api/tools/greeting-card")
+async def generate_greeting_card_endpoint(req: GreetingCardRequest):
+    """Generate visual greeting card (SVG & PDF)."""
+    from sard.agent.tools.cultural_agentic_tools import tool_create_greeting_card
+    return tool_create_greeting_card(
+        occasion=req.occasion or "foundation_day",
+        recipient_name=req.recipient_name or "",
+        sender_name=req.sender_name or "",
+        custom_message=req.custom_message or "",
+        theme=req.theme or "dark_gold",
+    )
+
+
+@app.post("/api/tools/etiquette")
+async def simulate_etiquette_endpoint(req: EtiquetteRequest):
+    """Run interactive cultural etiquette protocol simulator & flowchart."""
+    from sard.agent.tools.cultural_agentic_tools import tool_simulate_etiquette_protocol
+    return tool_simulate_etiquette_protocol(
+        scenario_type=req.scenario_type or "majlis",
+        situation=req.situation or "",
+    )
+
+
+@app.post("/api/tools/dialect")
+async def decode_dialect_endpoint(req: DialectRequest):
+    """Decode regional dialect and proverb lore."""
+    from sard.agent.tools.cultural_agentic_tools import tool_decode_dialect_or_proverb
+    return tool_decode_dialect_or_proverb(
+        phrase_or_proverb=req.phrase_or_proverb,
+        dialect_region=req.dialect_region or "najdi",
+    )
+
+
+@app.post("/api/tools/artisan")
+async def advise_artisan_endpoint(req: ArtisanRequest):
+    """Advise on traditional artisan craft authentication and care."""
+    from sard.agent.tools.cultural_agentic_tools import tool_advise_artisan_craft
+    return tool_advise_artisan_craft(craft_name=req.craft_name or "sadu")
+
+
+@app.post("/api/tools/memoir")
+async def compile_memoir_endpoint(req: MemoirRequest):
+    """Compile oral history memoir into PDF booklet."""
+    from sard.agent.tools.cultural_agentic_tools import tool_compile_oral_history_memoir
+    return tool_compile_oral_history_memoir(
+        family_name=req.family_name,
+        raw_notes=req.raw_notes,
+        origin_region=req.origin_region or "المملكة العربية السعودية",
+        origin_town=req.origin_town or "",
+    )
+
+
+@app.post("/api/tools/research")
+async def conduct_research_endpoint(req: ResearchRequest):
+    """Conduct verified academic heritage research with official citations."""
+    from sard.agent.tools.cultural_agentic_tools import tool_conduct_verified_research
+    return tool_conduct_verified_research(
+        topic=req.topic,
+        primary_authority=req.primary_authority or "دارة الملك عبد العزيز / هيئة التراث",
+    )
 
 
 def main():
