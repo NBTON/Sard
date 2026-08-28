@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from sard.outputs.calendar_sync import (
@@ -59,10 +58,11 @@ from sard.outputs.recipe_card import (
     create_jareesh_recipe_card,
     create_sadu_craft_card,
 )
+from sard.runtime_paths import output_root
 
 logger = logging.getLogger("sard.tools.agentic")
 
-OUTPUT_DIR = Path("output")
+OUTPUT_DIR = output_root()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 

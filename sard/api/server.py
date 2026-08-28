@@ -38,6 +38,7 @@ from sard.config.models import get_model_settings, ModelConfigError
 from sard.config.rag import get_rag_settings, RAGSettings
 from sard.rag.schemas import Citation, RAGAnswer
 from sard.rag.service import RAGService, RAGServiceUnavailableError
+from sard.runtime_paths import output_root
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("sard.api")
@@ -57,7 +58,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OUTPUT_DIR = _PROJECT_ROOT / "output"
+OUTPUT_DIR = output_root(default=_PROJECT_ROOT / "output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
