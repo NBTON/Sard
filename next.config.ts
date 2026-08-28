@@ -4,6 +4,9 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   transpilePackages: ["react-markdown", "remark-gfm"],
   async rewrites() {
+    if (process.env.NODE_ENV !== "development") {
+      return [];
+    }
     return [
       {
         source: "/api/:path*",

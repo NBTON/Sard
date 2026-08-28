@@ -442,9 +442,7 @@ The Streamlit application in `sard/ui/app.py` provides:
 
 4. **Install Frontend Dependencies:**
    ```bash
-   cd web
    npm install
-   cd ..
    ```
 
 ---
@@ -461,7 +459,6 @@ The Streamlit application in `sard/ui/app.py` provides:
 
 2. **Start the Next.js Frontend:**
    ```bash
-   cd web
    npm run dev
    ```
    *Open `http://localhost:3000` in your web browser.*
