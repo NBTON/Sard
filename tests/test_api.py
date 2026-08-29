@@ -11,6 +11,18 @@ def client():
     return TestClient(app)
 
 
+def test_root_endpoint(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "endpoints" in data
+
+    response_api = client.get("/api")
+    assert response_api.status_code == 200
+    assert response_api.json()["status"] == "ok"
+
+
 def test_health_endpoint(client):
     response = client.get("/api/health")
     assert response.status_code == 200
@@ -18,6 +30,11 @@ def test_health_endpoint(client):
     assert data["status"] == "ok"
     assert data["service"] == "sard-agent"
     assert "rag" in data
+
+    # Test alias without /api prefix
+    response_alias = client.get("/health")
+    assert response_alias.status_code == 200
+    assert response_alias.json()["status"] == "ok"
 
 
 def test_status_endpoint(client):
@@ -28,6 +45,10 @@ def test_status_endpoint(client):
     assert "model" in data
     assert "rag" in data
     assert "moc_branding" in data
+
+    # Test alias without /api prefix
+    response_alias = client.get("/status")
+    assert response_alias.status_code == 200
 
 
 def test_corpus_endpoint(client):

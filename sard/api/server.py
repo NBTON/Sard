@@ -123,7 +123,39 @@ def _check_rag_readiness() -> dict:
 
 # --- Endpoints ---
 
+@app.get("/")
+@app.get("/api")
+@app.get("/api/")
+async def root_endpoint():
+    """Root metadata and API service check."""
+    rag_info = _check_rag_readiness()
+    return {
+        "status": "ok",
+        "service": "سرد | Sard Cultural Assistant API",
+        "version": "2.0.0",
+        "branding": "Saudi Ministry of Culture (MOC) 2026",
+        "endpoints": {
+            "health": "/api/health",
+            "status": "/api/status",
+            "corpus": "/api/corpus",
+            "chat": "/api/chat",
+            "itinerary": "/api/itinerary",
+            "calendar": "/api/calendar/events",
+            "presentation": "/api/tools/presentation",
+            "recipe_card": "/api/tools/recipe-card",
+            "greeting_card": "/api/tools/greeting-card",
+            "etiquette": "/api/tools/etiquette",
+            "dialect": "/api/tools/dialect",
+            "artisan": "/api/tools/artisan",
+            "memoir": "/api/tools/memoir",
+            "research": "/api/tools/research",
+        },
+        "verified": rag_info.get("available", False),
+    }
+
+
 @app.get("/api/health")
+@app.get("/health")
 async def health_check():
     """Health check endpoint - public contract only."""
     rag_info = _check_rag_readiness()
@@ -138,6 +170,7 @@ async def health_check():
 
 
 @app.get("/api/status")
+@app.get("/status")
 async def system_status():
     """Returns public system status without exposing internal model/provider IDs."""
     rag_info = _check_rag_readiness()
@@ -165,6 +198,7 @@ async def system_status():
 
 
 @app.get("/api/corpus")
+@app.get("/corpus")
 async def get_corpus_info():
     """Returns available cultural corpus guides and topics."""
     corpus_dir = _PROJECT_ROOT / "data" / "corpus"
@@ -185,6 +219,7 @@ async def get_corpus_info():
 
 
 @app.get("/api/artifacts/{filename}")
+@app.get("/artifacts/{filename}")
 async def get_artifact_file(filename: str):
     """Securely download a generated artifact file (PDF, PPTX, ICS, SVG, JSON)."""
     safe_name = Path(filename).name
@@ -214,6 +249,7 @@ async def get_artifact_file(filename: str):
 
 
 @app.post("/api/itinerary")
+@app.post("/itinerary")
 async def generate_full_itinerary(req: ItineraryRequest):
     """Executes the full LangGraph agent pipeline and generates PDF / ICS artifacts."""
     if not req.query.strip():
@@ -269,6 +305,7 @@ async def generate_full_itinerary(req: ItineraryRequest):
 
 
 @app.post("/api/chat")
+@app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
     """ Streaming Chat endpoint with public progress telemetry.
     
@@ -586,6 +623,8 @@ class ResearchRequest(BaseModel):
 
 @app.get("/api/calendar/events")
 @app.post("/api/calendar/events")
+@app.get("/calendar/events")
+@app.post("/calendar/events")
 async def get_heritage_calendar_events(
     query: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
@@ -599,6 +638,7 @@ async def get_heritage_calendar_events(
 
 
 @app.post("/api/tools/presentation")
+@app.post("/tools/presentation")
 async def generate_presentation_endpoint(req: PresentationRequest):
     """Generate a PowerPoint (.pptx) cultural presentation deck."""
     from sard.agent.tools.cultural_agentic_tools import tool_generate_presentation
@@ -613,6 +653,7 @@ async def generate_presentation_endpoint(req: PresentationRequest):
 
 
 @app.post("/api/tools/recipe-card")
+@app.post("/tools/recipe-card")
 async def generate_recipe_card_endpoint(req: RecipeCardRequest):
     """Generate printable PDF recipe or craft card."""
     from sard.agent.tools.cultural_agentic_tools import tool_generate_recipe_or_craft_card
@@ -625,6 +666,7 @@ async def generate_recipe_card_endpoint(req: RecipeCardRequest):
 
 
 @app.post("/api/tools/greeting-card")
+@app.post("/tools/greeting-card")
 async def generate_greeting_card_endpoint(req: GreetingCardRequest):
     """Generate visual greeting card (SVG & PDF)."""
     from sard.agent.tools.cultural_agentic_tools import tool_create_greeting_card
@@ -638,6 +680,7 @@ async def generate_greeting_card_endpoint(req: GreetingCardRequest):
 
 
 @app.post("/api/tools/etiquette")
+@app.post("/tools/etiquette")
 async def simulate_etiquette_endpoint(req: EtiquetteRequest):
     """Run interactive cultural etiquette protocol simulator & flowchart."""
     from sard.agent.tools.cultural_agentic_tools import tool_simulate_etiquette_protocol
@@ -648,6 +691,7 @@ async def simulate_etiquette_endpoint(req: EtiquetteRequest):
 
 
 @app.post("/api/tools/dialect")
+@app.post("/tools/dialect")
 async def decode_dialect_endpoint(req: DialectRequest):
     """Decode regional dialect and proverb lore."""
     from sard.agent.tools.cultural_agentic_tools import tool_decode_dialect_or_proverb
@@ -658,6 +702,7 @@ async def decode_dialect_endpoint(req: DialectRequest):
 
 
 @app.post("/api/tools/artisan")
+@app.post("/tools/artisan")
 async def advise_artisan_endpoint(req: ArtisanRequest):
     """Advise on traditional artisan craft authentication and care."""
     from sard.agent.tools.cultural_agentic_tools import tool_advise_artisan_craft
@@ -665,6 +710,7 @@ async def advise_artisan_endpoint(req: ArtisanRequest):
 
 
 @app.post("/api/tools/memoir")
+@app.post("/tools/memoir")
 async def compile_memoir_endpoint(req: MemoirRequest):
     """Compile oral history memoir into PDF booklet."""
     from sard.agent.tools.cultural_agentic_tools import tool_compile_oral_history_memoir
@@ -677,6 +723,7 @@ async def compile_memoir_endpoint(req: MemoirRequest):
 
 
 @app.post("/api/tools/research")
+@app.post("/tools/research")
 async def conduct_research_endpoint(req: ResearchRequest):
     """Conduct verified academic heritage research with official citations."""
     from sard.agent.tools.cultural_agentic_tools import tool_conduct_verified_research
