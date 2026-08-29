@@ -565,7 +565,7 @@ Key settings in `.env`:
 # --- LLM Provider Selection ---
 # Options: "nvidia", "anthropic", "openai", "openrouter"
 MODEL_PROVIDER=nvidia
-MODEL_NAME=nemotron-3-super-120b-a12b
+MODEL_NAME=nemotron-3-ultra-550b-a55b
 MODEL_TEMPERATURE=0.2
 
 # --- Provider Credentials ---

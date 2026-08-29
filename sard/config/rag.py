@@ -170,10 +170,10 @@ def get_rag_settings() -> RAGSettings:
         rerank_base_url=_env("NVIDIA_RERANK_BASE_URL") or None,
         chat_route=ModelRoute(
             use_case="generation",
-            primary=_env("NVIDIA_CHAT_MODEL_PRIMARY", "nemotron-3-super-120b-a12b"),
+            primary=_env("NVIDIA_CHAT_MODEL_PRIMARY", "nemotron-3-ultra-550b-a55b"),
             fallbacks=(
-                _env("NVIDIA_CHAT_MODEL_FALLBACK_1", "qwen3-next-80b-a3b-instruct"),
-                _env("NVIDIA_CHAT_MODEL_FALLBACK_2", "llama-3.3-70b-instruct"),
+                _env("NVIDIA_CHAT_MODEL_FALLBACK_1", "nemotron-3-super-120b-a12b"),
+                _env("NVIDIA_CHAT_MODEL_FALLBACK_2", "qwen3-next-80b-a3b-instruct"),
             ),
         ),
         query_route=ModelRoute(
@@ -197,10 +197,10 @@ def get_rag_settings() -> RAGSettings:
         ),
         vision_route=ModelRoute(
             use_case="vision",
-            primary=_env("NVIDIA_VISION_MODEL_PRIMARY", "llama-3.1-nemotron-nano-vl-8b-v1"),
+            primary=_env("NVIDIA_VISION_MODEL_PRIMARY", "muse-glimmer-30b"),
             fallbacks=(
-                _env("NVIDIA_VISION_MODEL_FALLBACK_1", "nemotron-nano-12b-v2-vl"),
-                _env("NVIDIA_VISION_MODEL_FALLBACK_2", "muse-glimmer-30b"),
+                _env("NVIDIA_VISION_MODEL_FALLBACK_1", "llama-3.1-nemotron-nano-vl-8b-v1"),
+                _env("NVIDIA_VISION_MODEL_FALLBACK_2", "nemotron-nano-12b-v2-vl"),
             ),
         ),
         translation_route=ModelRoute(

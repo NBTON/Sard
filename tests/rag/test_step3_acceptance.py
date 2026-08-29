@@ -23,9 +23,9 @@ def test_default_nvidia_routes_match_step3_contract(monkeypatch):
     settings = get_rag_settings()
 
     assert settings.chat_route.ordered == (
+        "nemotron-3-ultra-550b-a55b",
         "nemotron-3-super-120b-a12b",
         "qwen3-next-80b-a3b-instruct",
-        "llama-3.3-70b-instruct",
     )
     assert settings.query_route.ordered == (
         "nemotron-3-nano-30b-a3b",
@@ -35,6 +35,7 @@ def test_default_nvidia_routes_match_step3_contract(monkeypatch):
     assert settings.embedding_route.primary == "nemotron-3-embed-1b"
     assert settings.embedding_fallback_model == "nv-embed-v1"
     assert settings.rerank_route.primary == "rerank-qa-mistral-4b"
+    assert settings.vision_route.primary == "muse-glimmer-30b"
 
 
 def test_invalid_rag_configuration_fails_before_network(monkeypatch):
