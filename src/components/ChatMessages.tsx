@@ -8,9 +8,7 @@ import { t } from "@/lib/copy";
 
 function cleanContent(text: string): string {
   if (!text) return "";
-  // 1. Normalize HTML break tags to markdown newlines
   let cleaned = text.replace(/<\s*br\s*\/?>/gi, "\n");
-  // 2. Strip any bracketed developer markers if leaked
   cleaned = cleaned.replace(/[\[【]\s*(?:RAG|Web|Media|CIT|cit)[\s:-][^\]】]*?[\]】]/gi, "");
   cleaned = cleaned.replace(/\[\s*CIT-[A-Za-z0-9_-]+\s*\]/gi, "");
   return cleaned.trim();
@@ -22,36 +20,95 @@ function UserBubble({ m, lang }: { m: Message; lang: Lang }) {
     <div
       style={{
         display: "flex",
-        justifyContent: "flex-end",
+        flexDirection: "column",
+        alignItems: "flex-end",
         marginBottom: 18,
         width: "100%",
       }}
     >
-      <div
-        data-dir-animate="user-bubble"
-        data-dir-id={m.id}
-        style={{
-          maxWidth: "75%",
-          background: "#141210",
-          color: "#F3EEE4",
-          borderRadius: 18,
-          borderEndEndRadius: 4,
-          borderEndStartRadius: 18,
-          borderStartStartRadius: 18,
-          borderStartEndRadius: 18,
-          padding: "13px 20px",
-          fontSize: 15,
-          lineHeight: 1.75,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          boxShadow: "0 2px 10px -2px rgba(20,18,16,0.14)",
-          animation: "fade-in 0.2s ease",
-          textAlign: "start",
-        }}
-        dir={isAr ? "rtl" : "ltr"}
-      >
-        {m.content}
-      </div>
+      {/* Uploaded attachments if any */}
+      {m.attachments && m.attachments.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 6,
+            marginBottom: 6,
+            maxWidth: "75%",
+            justifyContent: "flex-end",
+          }}
+        >
+          {m.attachments.map((att) => {
+            const isImage = att.mime_type?.startsWith("image/") || (att.preview_url !== undefined);
+            return (
+              <div
+                key={att.id || att.attachment_id}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  background: "#FAF7F1",
+                  border: "1px solid #D4CBBD",
+                  borderRadius: 10,
+                  padding: "4px 8px",
+                  fontSize: 11.5,
+                  color: "#141210",
+                  boxShadow: "0 1px 4px rgba(20,18,16,0.06)",
+                }}
+              >
+                {isImage && att.preview_url ? (
+                  <img
+                    src={att.preview_url}
+                    alt={att.filename}
+                    style={{ width: 18, height: 18, objectFit: "cover", borderRadius: 4 }}
+                  />
+                ) : (
+                  <span>📎</span>
+                )}
+                <span
+                  style={{
+                    maxWidth: 140,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontWeight: 600,
+                  }}
+                >
+                  {att.filename}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {m.content && (
+        <div
+          data-dir-animate="user-bubble"
+          data-dir-id={m.id}
+          style={{
+            maxWidth: "75%",
+            background: "#141210",
+            color: "#F3EEE4",
+            borderRadius: 18,
+            borderEndEndRadius: 4,
+            borderEndStartRadius: 18,
+            borderStartStartRadius: 18,
+            borderStartEndRadius: 18,
+            padding: "13px 20px",
+            fontSize: 15,
+            lineHeight: 1.75,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            boxShadow: "0 2px 10px -2px rgba(20,18,16,0.14)",
+            animation: "fade-in 0.2s ease",
+            textAlign: "start",
+          }}
+          dir={isAr ? "rtl" : "ltr"}
+        >
+          {m.content}
+        </div>
+      )}
     </div>
   );
 }
@@ -95,7 +152,7 @@ function AgentCard({
         animation: "fade-in 0.25s ease",
       }}
     >
-      {/* Meta Row: tiny clay mark + سرد */}
+      {/* Meta Row */}
       <div
         style={{
           display: "flex",
@@ -173,7 +230,7 @@ function AgentCard({
         </span>
       </div>
 
-      {/* Thinking State: 13 stripes waving + live status */}
+      {/* Thinking State */}
       {m.isThinking ? (
         <div style={{ transition: "opacity 0.28s ease" }}>
           <ThinkingWeave lang={lang} statusText={m.statusStage} />
@@ -385,7 +442,7 @@ function AgentCard({
             {formattedContent}
           </ReactMarkdown>
 
-          {/* Source Pills (olive text, paper chip, 1px line) */}
+          {/* Source Pills */}
           {citations.length > 0 && (
             <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid #E8E0D2" }}>
               <div
@@ -450,26 +507,110 @@ function AgentCard({
                 }}
               >
                 <span>✦</span>
-                <span>{isAr ? "مخرجات سرد التفاعلية والمستندات المعتمدة" : "Sard Cultural Outputs & Artifacts"} ({m.artifacts.length})</span>
+                <span>
+                  {isAr
+                    ? "مخرجات سرد المعتمدة والمستندات الجاهزة للتحميل"
+                    : "Sard Verified Outputs & Downloadable Artifacts"}{" "}
+                  ({m.artifacts.length})
+                </span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
                 {m.artifacts.map((a, i) => {
-                  const isPptx = a.type === "pptx" || a.type === "presentation_pptx";
-                  const isRecipe = a.type === "recipe_craft_card";
-                  const isCal = a.type === "ics" || a.type === "calendar_ics";
-                  const isCard = a.type === "card" || a.type === "greeting_card";
-                  const isEt = a.type === "etiquette_flow";
-                  const isDl = a.type === "dialect_lore";
-                  const isArt = a.type === "artisan_craft";
-                  const isMem = a.type === "family_memoir_booklet";
-                  const isRes = a.type === "verified_research";
+                  const fmt = (a.format || a.type || "").toLowerCase();
+                  const kind = (a.kind || "").toLowerCase();
+                  const isPptx = fmt === "pptx" || kind === "presentation";
+                  const isDocx = fmt === "docx";
+                  const isCal = fmt === "ics" || kind === "calendar";
+                  const isCard = kind === "card" || a.type === "card";
+                  const isRecipe = kind === "recipe" || a.type === "recipe_craft_card";
+                  const isMemoir = kind === "memoir" || a.type === "family_memoir_booklet";
+                  const isDiagram = kind === "diagram" || fmt === "svg";
+                  const isRes = kind === "verified_research" || a.type === "verified_research";
 
-                  const icon = isPptx ? "📊" : isRecipe ? "🍲" : isCal ? "📅" : isCard ? "💌" : isEt ? "🧭" : isDl ? "📜" : isArt ? "🏺" : isMem ? "📖" : isRes ? "🏛️" : "📄";
+                  const icon = isPptx
+                    ? "📊"
+                    : isDocx
+                    ? "📝"
+                    : isRecipe
+                    ? "🍲"
+                    : isCal
+                    ? "📅"
+                    : isCard
+                    ? "💌"
+                    : isMemoir
+                    ? "📖"
+                    : isDiagram
+                    ? "🧭"
+                    : isRes
+                    ? "🏛️"
+                    : "📄";
+                  const formatLabel = fmt.toUpperCase() || "DOC";
+
+                  const isFailed = a.status === "failed";
+                  const isPending = a.status === "pending";
+
+                  if (isFailed) {
+                    return (
+                      <div
+                        key={a.id || i}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 8,
+                          background: "rgba(190, 74, 36, 0.08)",
+                          border: "1.5px solid #BE4A24",
+                          borderRadius: 12,
+                          padding: "8px 14px",
+                          fontSize: 13,
+                          color: "#BE4A24",
+                          boxShadow: "0 2px 8px rgba(190,74,36,0.06)",
+                        }}
+                      >
+                        <span>⚠️</span>
+                        <span style={{ fontWeight: 600 }}>{a.title || a.filename}</span>
+                        <span
+                          style={{
+                            fontSize: 11,
+                            background: "#BE4A24",
+                            color: "#FFF",
+                            padding: "2px 6px",
+                            borderRadius: 4,
+                          }}
+                        >
+                          {a.error || (isAr ? "تعذر التوليد" : "Failed")}
+                        </span>
+                      </div>
+                    );
+                  }
+
+                  if (isPending) {
+                    return (
+                      <div
+                        key={a.id || i}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 8,
+                          background: "#F3EEE4",
+                          border: "1.5px dashed #C4A46A",
+                          borderRadius: 12,
+                          padding: "8px 14px",
+                          fontSize: 13,
+                          color: "#8A8178",
+                        }}
+                      >
+                        <span>⏳</span>
+                        <span>{a.title || a.filename}</span>
+                        <span style={{ fontSize: 11, color: "#C4A46A" }}>
+                          {isAr ? "جارٍ التوليد..." : "Generating..."}
+                        </span>
+                      </div>
+                    );
+                  }
 
                   return (
-                    <button
-                      key={i}
-                      onClick={() => onSelectArtifact?.(a)}
+                    <div
+                      key={a.id || i}
                       style={{
                         display: "inline-flex",
                         alignItems: "center",
@@ -477,21 +618,12 @@ function AgentCard({
                         background: "#F3EEE4",
                         border: "1.5px solid #C4A46A",
                         borderRadius: 12,
-                        padding: "8px 14px",
+                        padding: "6px 12px",
                         fontSize: 13,
                         fontWeight: 600,
                         color: "#141210",
-                        cursor: "pointer",
                         boxShadow: "0 2px 8px rgba(20,18,16,0.06)",
                         transition: "all 0.15s ease",
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.background = "#E8E0D2";
-                        e.currentTarget.style.borderColor = "#BE4A24";
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.background = "#F3EEE4";
-                        e.currentTarget.style.borderColor = "#C4A46A";
                       }}
                     >
                       <span style={{ fontSize: 16 }}>{icon}</span>
@@ -500,17 +632,73 @@ function AgentCard({
                       </span>
                       <span
                         style={{
-                          fontSize: 10.5,
+                          fontSize: 10,
+                          background: "#141210",
+                          color: "#FAF7F1",
+                          padding: "2px 5px",
+                          borderRadius: 4,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {formatLabel}
+                      </span>
+
+                      {/* Preview Action */}
+                      <button
+                        onClick={() => onSelectArtifact?.(a)}
+                        style={{
                           background: "#BE4A24",
                           color: "#FFFFFF",
-                          padding: "2px 6px",
-                          borderRadius: 4,
-                          marginInlineStart: 4,
+                          border: "none",
+                          borderRadius: 6,
+                          padding: "4px 8px",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: "pointer",
+                          transition: "background 0.15s ease",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = "#8F3518";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = "#BE4A24";
                         }}
                       >
                         {isAr ? "معاينة" : "Preview"}
-                      </span>
-                    </button>
+                      </button>
+
+                      {/* Direct Download Action if URL is valid */}
+                      {a.download_url && a.download_url !== "#" && (
+                        <a
+                          href={a.download_url}
+                          download={a.filename}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{
+                            background: "#4A513C",
+                            color: "#FFFFFF",
+                            borderRadius: 6,
+                            padding: "4px 8px",
+                            fontSize: 11,
+                            fontWeight: 700,
+                            textDecoration: "none",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 3,
+                            transition: "background 0.15s ease",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = "#353B2B";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = "#4A513C";
+                          }}
+                        >
+                          <span>⬇</span>
+                          <span>{isAr ? "تحميل" : "Download"}</span>
+                        </a>
+                      )}
+                    </div>
                   );
                 })}
               </div>

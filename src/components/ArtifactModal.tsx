@@ -13,20 +13,24 @@ export function ArtifactModal({ artifact, onClose, lang }: ArtifactModalProps) {
   if (!artifact) return null;
 
   const isAr = lang === "ar";
-  const artData = artifact.data?.card_data || artifact.data || {};
+  const artData = artifact.preview?.card_data || artifact.preview || artifact.data?.card_data || artifact.data || {};
   const [currentSlideIdx, setCurrentSlideIdx] = useState(0);
   const [cardTheme, setCardTheme] = useState<string>("dark_gold");
 
-  // Determine modal view mode based on artifact type
-  const isPresentation = artifact.type === "pptx" || artifact.type === "presentation_pptx";
-  const isRecipeOrCraft = artifact.type === "recipe_craft_card" || (artifact.type === "pdf" && (artData.ingredients_or_materials || artData.prep_time_minutes));
-  const isCalendar = artifact.type === "ics" || artifact.type === "calendar_ics";
-  const isGreetingCard = artifact.type === "card" || artifact.type === "greeting_card";
-  const isEtiquette = artifact.type === "etiquette_flow";
-  const isDialect = artifact.type === "dialect_lore";
-  const isArtisan = artifact.type === "artisan_craft";
-  const isMemoir = artifact.type === "family_memoir_booklet" || (artifact.type === "pdf" && artData.chapters);
-  const isResearch = artifact.type === "verified_research";
+  const downloadUrl = artifact.download_url || artifact.url;
+  const fmt = (artifact.format || artifact.type || "").toLowerCase();
+  const kind = (artifact.kind || "").toLowerCase();
+
+  // Determine modal view mode based on artifact type/kind
+  const isPresentation = fmt === "pptx" || kind === "presentation";
+  const isRecipeOrCraft = kind === "recipe" || fmt === "recipe_craft_card" || (fmt === "pdf" && (artData.ingredients_or_materials || artData.prep_time_minutes));
+  const isCalendar = fmt === "ics" || kind === "calendar";
+  const isGreetingCard = kind === "card" || fmt === "card" || fmt === "greeting_card";
+  const isEtiquette = kind === "diagram" || fmt === "etiquette_flow" || fmt === "svg";
+  const isDialect = fmt === "dialect_lore";
+  const isArtisan = fmt === "artisan_craft";
+  const isMemoir = kind === "memoir" || fmt === "family_memoir_booklet" || (fmt === "pdf" && artData.chapters);
+  const isResearch = kind === "verified_research" || fmt === "verified_research";
 
   const slides = artData.slides || [];
   const activeSlide = slides[currentSlideIdx] || null;
@@ -114,10 +118,10 @@ export function ArtifactModal({ artifact, onClose, lang }: ArtifactModalProps) {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {artifact.url && artifact.url !== "#" && (
+            {downloadUrl && downloadUrl !== "#" && (
               <a
-                href={artifact.url}
-                download
+                href={downloadUrl}
+                download={artifact.filename}
                 target="_blank"
                 rel="noreferrer"
                 style={{

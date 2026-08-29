@@ -208,7 +208,7 @@ def tool_sync_heritage_calendar(
         events = list(HERITAGE_EVENTS_DATABASE[:4])
 
     safe_filename = f"sard-calendar-{uuid.uuid4().hex[:6]}.ics"
-    path, filename = sync.save_ics_file(safe_filename, OUTPUT_DIR)
+    path, filename = sync.save_ics_file(safe_filename, OUTPUT_DIR, events=events)
 
     events_list = [ev.to_dict() for ev in events]
 

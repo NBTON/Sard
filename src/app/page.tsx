@@ -6,7 +6,7 @@ import { ChatSidebar } from "@/components/Sidebar";
 import { ChatMessages } from "@/components/ChatMessages";
 import { Composer } from "@/components/Composer";
 import { DirectionProvider, StageTurnContainer, useDirection } from "@/lib/direction";
-import { Artifact, Message, View } from "@/types";
+import { Artifact, Attachment, Message, View } from "@/types";
 import { streamChat } from "@/lib/api";
 import { ArtifactModal } from "@/components/ArtifactModal";
 
@@ -15,6 +15,7 @@ function ChatAppContent() {
   const [view, setView] = useState<View>("landing");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [composerAttachments, setComposerAttachments] = useState<Attachment[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [sessionId, setSessionId] = useState<string>(
@@ -38,6 +39,7 @@ function ChatAppContent() {
     }
     setIsStreaming(false);
     setInput("");
+    setComposerAttachments([]);
   }
 
   function openChat() {
@@ -51,14 +53,16 @@ function ChatAppContent() {
     await doSend(trimmed);
   }
 
-  async function doSend(text: string) {
+  async function doSend(text: string, currentAttachments?: Attachment[]) {
     const trimmed = text.trim();
-    if (!trimmed || isStreaming) return;
+    const atts = currentAttachments || composerAttachments;
+    if ((!trimmed && atts.length === 0) || isStreaming) return;
 
     const userMsg: Message = {
       id: `u_${Date.now()}`,
       role: "user",
       content: trimmed,
+      attachments: atts.length > 0 ? [...atts] : undefined,
       timestamp: Date.now(),
     };
     const thinkId = `a_${Date.now()}`;
@@ -73,6 +77,7 @@ function ChatAppContent() {
 
     setMessages((prev) => [...prev, userMsg, thinkingMsg]);
     setInput("");
+    setComposerAttachments([]);
     setIsStreaming(true);
 
     setTimeout(() => {
@@ -87,6 +92,12 @@ function ChatAppContent() {
     const history = [...messages, userMsg].map((m) => ({
       role: m.role,
       content: m.content,
+      attachments: m.attachments?.map((a) => ({
+        attachment_id: a.attachment_id,
+        filename: a.filename,
+        mime_type: a.mime_type,
+        size_bytes: a.size_bytes,
+      })),
     }));
     const controller = new AbortController();
     abortRef.current = controller;
@@ -96,6 +107,7 @@ function ChatAppContent() {
     await streamChat({
       messages: history,
       query: trimmed,
+      attachments: atts,
       sessionId,
       signal: controller.signal,
       onStatus: (statusText) => {
@@ -165,8 +177,8 @@ function ChatAppContent() {
     });
   }
 
-  function handleComposerSend() {
-    doSend(input);
+  function handleComposerSend(text: string, currentAttachments?: Attachment[]) {
+    doSend(text, currentAttachments);
   }
 
   function handleStop() {
@@ -267,6 +279,8 @@ function ChatAppContent() {
                 onSend={handleComposerSend}
                 onStop={handleStop}
                 isStreaming={isStreaming}
+                attachments={composerAttachments}
+                onAttachmentsChange={setComposerAttachments}
               />
             </div>
           </div>

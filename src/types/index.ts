@@ -8,12 +8,40 @@ export interface Citation {
   topic?: string;
 }
 
+export type ArtifactKind = "document" | "presentation" | "calendar" | "image" | "diagram" | "interactive";
+export type ArtifactFormat = "pdf" | "docx" | "pptx" | "ics" | "svg" | "png" | "json" | string;
+export type ArtifactStatus = "pending" | "created" | "failed" | "skipped";
+
 export interface Artifact {
-  type: "pdf" | "pptx" | "ics" | "card" | "etiquette_flow" | "dialect_lore" | "artisan_craft" | "verified_research" | "family_memoir_booklet" | "presentation_pptx" | "recipe_craft_card" | "markdown" | string;
+  id: string;
+  kind: ArtifactKind;
+  format: ArtifactFormat;
   title: string;
-  url: string;
   filename: string;
+  mime_type: string;
+  size_bytes: number;
+  status: ArtifactStatus;
+  download_url: string | null;
+  preview?: any;
+  warnings?: string[];
+  error?: string | null;
+  checksum?: string | null;
+  // Compatibility fields
+  type?: string;
+  url?: string;
   data?: any;
+}
+
+export interface Attachment {
+  id: string;
+  attachment_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  url?: string;
+  preview_url?: string;
+  uploading?: boolean;
+  error?: string;
 }
 
 export interface Message {
@@ -23,6 +51,7 @@ export interface Message {
   timestamp: number;
   citations?: Citation[];
   artifacts?: Artifact[];
+  attachments?: Attachment[];
   isThinking?: boolean;
   statusStage?: string;
   isStreaming?: boolean;

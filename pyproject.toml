@@ -28,6 +28,8 @@ dependencies = [
     "icalendar>=7.2.2,<8",
     # Office presentation (PPTX) deck generation.
     "python-pptx>=1.0.2",
+    # Multipart form-data handling for file uploads.
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

@@ -1,17 +1,23 @@
 """Provider-neutral chat service — the boundary between the UI and models.
 
-Implements the cultural assistant with Isnād provenance planning and hybrid retrieval.
+Implements the cultural assistant with Isnād provenance planning, hybrid retrieval,
+and centralized artifact orchestration.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
+from sard.agent.capability_routing import (
+    Capability,
+    StructuredIntent,
+    classify_intent,
+)
 from sard.agent.cultural_router import (
     CULTURAL_SYSTEM_PROMPT,
     CulturalQueryResult,
@@ -20,6 +26,12 @@ from sard.agent.cultural_router import (
 )
 from sard.agent.util import sanitize_cultural_output
 from sard.config.models import ModelConfigError, get_chat_model, get_model_settings
+from sard.outputs.orchestrator import (
+    ArtifactOrchestrator,
+    ArtifactRequest,
+    ArtifactResult,
+    get_artifact_orchestrator,
+)
 from sard.schemas.isnad import IsnadChain, PlannerResult
 
 logger = logging.getLogger(__name__)
@@ -58,13 +70,16 @@ class ChatService:
         chat_model: Optional[BaseChatModel] = None,
         router: Optional[CulturalRouter] = None,
         planner: Optional[Any] = None,
+        orchestrator: Optional[ArtifactOrchestrator] = None,
     ):
         self._injected_model = chat_model
         self.router = router or CulturalRouter()
+        self.orchestrator = orchestrator or get_artifact_orchestrator()
         if planner is not None:
             self.planner = planner
         else:
             from sard.planner.pipeline import IsnadPlanner
+
             self.planner = IsnadPlanner()
 
     def _get_model(self) -> BaseChatModel:
@@ -108,7 +123,12 @@ class ChatService:
 
     def _can_load_model(self) -> bool:
         try:
-            get_model_settings()
+            import os
+            settings = get_model_settings()
+            if settings.provider == "nvidia":
+                return bool(os.environ.get("NVIDIA_API_KEY", "").strip())
+            elif settings.provider == "openrouter":
+                return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
             return True
         except Exception:
             return False
@@ -129,6 +149,7 @@ class ChatService:
         self,
         user_query: str,
         messages: Optional[list[dict]] = None,
+        attachments: Optional[Sequence[Any]] = None,
         use_hybrid_retrieval: bool = False,
         session_id: Optional[str] = None,
         mock_multimodal_files: Optional[dict] = None,
@@ -145,131 +166,18 @@ class ChatService:
                 error_message="الرجاء إدخال سؤال قبل الإرسال.",
             )
 
+        # 1. Intent & Modality Classification
+        intent = classify_intent(user_query, messages=messages, attachments=attachments)
+        artifacts: list[dict[str, Any]] = []
+
         # Hybrid retrieval path via Isnād Planner & Agentic Cultural Tools
         if use_hybrid_retrieval:
-            from sard.agent.capability_routing import Capability, classify_capability
-            from sard.agent.tools.cultural_agentic_tools import (
-                tool_advise_artisan_craft,
-                tool_compile_oral_history_memoir,
-                tool_conduct_verified_research,
-                tool_create_greeting_card,
-                tool_decode_dialect_or_proverb,
-                tool_generate_presentation,
-                tool_generate_recipe_or_craft_card,
-                tool_simulate_etiquette_protocol,
-                tool_sync_heritage_calendar,
-            )
+            citations: list[dict[str, str]] = []
+            text_resp = ""
+            decision = None
+            plan_res = None
 
-            cap = classify_capability(user_query)
-            artifacts: list[dict[str, Any]] = []
-
-            # Check for specialized tool triggers
-            try:
-                if cap == Capability.PRESENTATION_DECK:
-                    if status_callback:
-                        status_callback("generating_presentation", "جارٍ إعداد وتوليد شرائح العرض التقديمي الثقافي (PowerPoint)...")
-                    pres_res = tool_generate_presentation(topic=user_query[:50], overview_text=user_query)
-                    artifacts.append({
-                        "type": "pptx",
-                        "title": pres_res["title"],
-                        "filename": pres_res["filename"],
-                        "url": pres_res["download_url"],
-                        "data": pres_res,
-                    })
-                elif cap == Capability.RECIPE_CARD:
-                    if status_callback:
-                        status_callback("generating_recipe", "جارٍ إعداد وتوليد بطاقة الطهي والحرفة التراثية المطبوعة (PDF)...")
-                    rec_res = tool_generate_recipe_or_craft_card(item_name=user_query)
-                    artifacts.append({
-                        "type": "pdf",
-                        "title": rec_res["title"],
-                        "filename": rec_res["filename"],
-                        "url": rec_res["download_url"],
-                        "data": rec_res,
-                    })
-                elif cap == Capability.CALENDAR_SYNC:
-                    if status_callback:
-                        status_callback("syncing_calendar", "جارٍ استخراج وتوليد مواسم التقويم والمناسبات التراثية (.ics)...")
-                    cal_res = tool_sync_heritage_calendar(query=user_query)
-                    artifacts.append({
-                        "type": "ics",
-                        "title": "التقويم والمواسم التراثية السعودية",
-                        "filename": cal_res["filename"],
-                        "url": cal_res["download_url"],
-                        "data": cal_res,
-                    })
-                elif cap == Capability.GREETING_CARD:
-                    if status_callback:
-                        status_callback("designing_card", "جارٍ تصميم بطاقة التهنئة التراثية ونظم الأبيات الشعرية...")
-                    card_res = tool_create_greeting_card(custom_message=user_query)
-                    artifacts.append({
-                        "type": "card",
-                        "title": card_res["title"],
-                        "filename": card_res["filename"],
-                        "url": card_res["download_url"],
-                        "data": card_res,
-                    })
-                elif cap == Capability.ETIQUETTE_SIMULATOR:
-                    if status_callback:
-                        status_callback("simulating_etiquette", "جارٍ تشغيل محاكي الإتيكيت ورسم المخطط التدفقي...")
-                    et_res = tool_simulate_etiquette_protocol(situation=user_query)
-                    artifacts.append({
-                        "type": "etiquette_flow",
-                        "title": et_res["title"],
-                        "filename": "etiquette-protocol.svg",
-                        "url": "#",
-                        "data": et_res,
-                    })
-                elif cap == Capability.DIALECT_PROVERB:
-                    if status_callback:
-                        status_callback("decoding_dialect", "جارٍ فك شفرة اللهجة واستخراج سالفة المثل وسياق استخدامه...")
-                    dl_res = tool_decode_dialect_or_proverb(phrase_or_proverb=user_query)
-                    artifacts.append({
-                        "type": "dialect_lore",
-                        "title": f"فك شفرة: {dl_res['proverb_title']}",
-                        "filename": "dialect-lore.json",
-                        "url": "#",
-                        "data": dl_res,
-                    })
-                elif cap == Capability.ARTISAN_CRAFT:
-                    if status_callback:
-                        status_callback("consulting_craft", "جارٍ استخراج دليل أصالة الحرفة ومعايير كشف التقليد...")
-                    craft_res = tool_advise_artisan_craft(craft_name=user_query)
-                    artifacts.append({
-                        "type": "artisan_craft",
-                        "title": f"دليل أصالة: {craft_res['craft_name']}",
-                        "filename": "craft-guide.json",
-                        "url": "#",
-                        "data": craft_res,
-                    })
-                elif cap == Capability.ORAL_HISTORY:
-                    if status_callback:
-                        status_callback("compiling_memoir", "جارٍ صياغة وتوثيق كتيب السيرة والتاريخ الشفوي (PDF)...")
-                    mem_res = tool_compile_oral_history_memoir(
-                        family_name=user_query[:30],
-                        raw_notes=[{"topic": "جذور العائلة والنشأة الأولى", "content": user_query, "era": "الزمن الجميل"}],
-                    )
-                    artifacts.append({
-                        "type": "pdf",
-                        "title": mem_res["title"],
-                        "filename": mem_res["filename"],
-                        "url": mem_res["download_url"],
-                        "data": mem_res,
-                    })
-                elif cap == Capability.VERIFIED_RESEARCH:
-                    if status_callback:
-                        status_callback("researching_citations", "جارٍ توثيق المراجع المعتمدة ومراجعة دارة الملك عبد العزيز وهيئة التراث...")
-                    res_res = tool_conduct_verified_research(topic=user_query)
-                    artifacts.append({
-                        "type": "verified_research",
-                        "title": f"توثيق معتمد: {user_query[:40]}",
-                        "filename": "verified-research.json",
-                        "url": "#",
-                        "data": res_res,
-                    })
-            except Exception as tool_exc:
-                logger.warning("Agentic tool auto-invocation notice: %s", tool_exc)
-
+            # 2. Run Retrieval & Provenance Planning
             try:
                 plan_res = self.ask_isnad(
                     user_query=user_query,
@@ -277,7 +185,6 @@ class ChatService:
                     mock_multimodal_files=mock_multimodal_files,
                     status_callback=status_callback,
                 )
-                citations = []
                 for ev in plan_res.visible_sources:
                     citations.append({
                         "id": ev.source_id,
@@ -288,33 +195,70 @@ class ChatService:
                     })
 
                 text_resp = sanitize_cultural_output(plan_res.answer_ar or plan_res.answer_en or "")
-                return ChatResult(
-                    ok=True,
-                    text=text_resp,
-                    decision=plan_res.chain.decision,
-                    citations=citations,
-                    planner_result=plan_res,
-                    artifacts=artifacts,
-                )
+                decision = plan_res.chain.decision
             except Exception as exc:
                 logger.warning("Isnād planner execution encountered exception: %s. Falling back to cultural router.", exc)
                 cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files)
-                all_arts = artifacts + getattr(cultural_res, "artifacts", [])
-                return ChatResult(
-                    ok=True,
-                    text=sanitize_cultural_output(cultural_res.answer_text),
-                    decision=cultural_res.decision,
-                    citations=cultural_res.citations,
-                    artifacts=all_arts,
-                )
+                text_resp = sanitize_cultural_output(cultural_res.answer_text)
+                decision = cultural_res.decision
+                citations = cultural_res.citations
 
+            # 3. Artifact Orchestration
+            # Check if an artifact is explicitly requested or triggered by capability
+            if intent.explicit_artifact_request or intent.domain_capability in (
+                Capability.PRESENTATION_DECK,
+                Capability.RECIPE_CARD,
+                Capability.CALENDAR_SYNC,
+                Capability.GREETING_CARD,
+                Capability.ETIQUETTE_SIMULATOR,
+                Capability.ORAL_HISTORY,
+            ):
+                if status_callback:
+                    status_callback("generating_artifacts", f"جارٍ إعداد وتوليد المخرجات المطلوبة ({', '.join(intent.requested_formats)})...")
+
+                try:
+                    generated_artifacts = self.orchestrator.orchestrate_from_intent(
+                        intent=intent,
+                        raw_text=text_resp,
+                        sources=tuple(citations),
+                    )
+                    for art_res in generated_artifacts:
+                        artifacts.append(art_res.to_dict())
+                except Exception as art_exc:
+                    logger.exception("Artifact generation failed: %s", art_exc)
+                    # Add failed artifact result to public contract
+                    for fmt in intent.requested_formats:
+                        if fmt != "text":
+                            failed_res = ArtifactResult(
+                                id=f"art-{session_id or 'failed'}",
+                                kind="document",
+                                format=fmt,
+                                title=f"مخرج ثقافي: {intent.extracted_topic}",
+                                filename=f"sard-{fmt}",
+                                mime_type="application/octet-stream",
+                                size_bytes=0,
+                                status="failed",
+                                download_url=None,
+                                error=f"تعذر توليد ملف {fmt.upper()} حالياً. الرجاء إعادة المحاولة لاحقاً.",
+                            )
+                            artifacts.append(failed_res.to_dict())
+
+            return ChatResult(
+                ok=True,
+                text=text_resp,
+                decision=decision,
+                citations=citations,
+                planner_result=plan_res,
+                artifacts=artifacts,
+            )
+
+        # Direct conversation path
         try:
             model = self._get_model()
         except ModelConfigError as exc:
             logger.warning("Chat model configuration error: %s", exc)
             return ChatResult(ok=False, error_message=str(exc))
 
-        # Direct conversation path
         try:
             lc_messages: list[BaseMessage] = [SystemMessage(content=_SYSTEM_PROMPT)]
             if messages:
