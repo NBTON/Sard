@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import csv
+import io
+import json
 import re
+import struct
+import zipfile
+from xml.etree import ElementTree
 from typing import Iterable, Optional
 
 from sard.outputs.schemas import (
@@ -22,6 +28,197 @@ from sard.outputs.schemas import (
 ACCEPTED_CLAIM_STATUSES = {"supported", "partially_supported", "user_provided", "explicitly_uncertain"}
 REMOVED_CLAIM_STATUSES = {"unsupported", "contradicted", "non_factual"}
 DEGRADED_RETRIEVAL_MODES = {"dense_only", "full_text_only", "unavailable"}
+
+
+# These values are deliberately kept here, next to the byte validators, so a
+# renderer and a storage adapter cannot silently disagree about a response's
+# media type.
+ARTIFACT_MIME_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "ics": "text/calendar; charset=utf-8",
+    "svg": "image/svg+xml",
+    "png": "image/png",
+    "json": "application/json",
+    "csv": "text/csv; charset=utf-8",
+    "txt": "text/plain; charset=utf-8",
+}
+
+
+class ArtifactValidationError(ValueError):
+    """A generated artifact failed format validation.
+
+    ``category`` is stable telemetry intended for callers; the exception text
+    is intentionally generic and must not contain renderer or credential data.
+    """
+
+    def __init__(self, category: str, message: str = "Generated artifact is invalid."):
+        super().__init__(message)
+        self.category = category
+
+
+@dataclass(frozen=True)
+class ArtifactValidationResult:
+    format: str
+    size_bytes: int
+    details: tuple[str, ...] = ()
+
+
+def _invalid(category: str, message: str = "Generated artifact is invalid.") -> None:
+    raise ArtifactValidationError(category, message)
+
+
+def _utf8(data: bytes) -> str:
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        _invalid("invalid_encoding")
+        raise AssertionError from exc
+
+
+def _validate_zip(data: bytes, required_parts: set[str], category: str) -> None:
+    if not data.startswith(b"PK"):
+        _invalid(category, "Generated OOXML package is not a ZIP archive.")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as package:
+            names = set(package.namelist())
+            if not required_parts.issubset(names):
+                _invalid(category, "Generated OOXML package is missing required parts.")
+            bad = package.testzip()
+            if bad is not None:
+                _invalid(category, "Generated OOXML package contains a corrupt part.")
+            for part in required_parts:
+                try:
+                    ElementTree.fromstring(package.read(part))
+                except (KeyError, ElementTree.ParseError):
+                    _invalid(category, "Generated OOXML package contains invalid XML.")
+    except (zipfile.BadZipFile, OSError):
+        _invalid(category, "Generated OOXML package is not parseable.")
+
+
+def _validate_pdf(data: bytes) -> tuple[str, ...]:
+    if not data.startswith(b"%PDF"):
+        _invalid("invalid_signature", "Generated PDF has an invalid signature.")
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(data), strict=True)
+        if len(reader.pages) < 1:
+            _invalid("invalid_structure", "Generated PDF has no pages.")
+    except ArtifactValidationError:
+        raise
+    except Exception:
+        _invalid("unparseable", "Generated PDF cannot be parsed.")
+    return (f"pages={len(reader.pages)}",)
+
+
+def _validate_ics(data: bytes) -> tuple[str, ...]:
+    text = _utf8(data)
+    if "BEGIN:VCALENDAR" not in text or "END:VCALENDAR" not in text:
+        _invalid("invalid_structure", "Generated calendar is missing RFC 5545 boundaries.")
+    try:
+        from icalendar import Calendar
+
+        calendar = Calendar.from_ical(data)
+        if calendar.name != "VCALENDAR":
+            _invalid("invalid_structure", "Generated calendar is not a VCALENDAR.")
+    except ArtifactValidationError:
+        raise
+    except Exception:
+        _invalid("unparseable", "Generated calendar cannot be parsed.")
+    return ()
+
+
+def _validate_svg(data: bytes) -> tuple[str, ...]:
+    text = _utf8(data)
+    # ElementTree does not fetch external entities, but rejecting the
+    # constructs up front also makes the boundary safe for other XML readers.
+    if re.search(r"<!DOCTYPE|<!ENTITY|<\s*script\b|javascript\s*:", text, re.I):
+        _invalid("unsafe_xml", "Generated SVG contains unsafe XML content.")
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError:
+        _invalid("unparseable", "Generated SVG cannot be parsed.")
+    if root.tag.rsplit("}", 1)[-1].lower() != "svg":
+        _invalid("invalid_structure", "Generated SVG does not have an SVG root.")
+    for element in root.iter():
+        for name, value in element.attrib.items():
+            if name.lower().startswith("on") or value.strip().lower().startswith("javascript:"):
+                _invalid("unsafe_xml", "Generated SVG contains unsafe attributes.")
+    return ()
+
+
+def _validate_png(data: bytes) -> tuple[str, ...]:
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(signature):
+        _invalid("invalid_signature", "Generated PNG has an invalid signature.")
+    if len(data) < 33:
+        _invalid("invalid_structure", "Generated PNG has no complete IHDR chunk.")
+    length = struct.unpack(">I", data[8:12])[0]
+    if data[12:16] != b"IHDR" or length != 13 or len(data) < 8 + 12 + length:
+        _invalid("invalid_structure", "Generated PNG has an invalid IHDR chunk.")
+    width, height = struct.unpack(">II", data[16:24])
+    if width == 0 or height == 0:
+        _invalid("invalid_dimensions", "Generated PNG dimensions must be positive.")
+    expected_crc = struct.unpack(">I", data[29:33])[0]
+    import zlib
+
+    if zlib.crc32(data[12:29]) & 0xFFFFFFFF != expected_crc:
+        _invalid("corrupt_bytes", "Generated PNG has a corrupt IHDR chunk.")
+    return (f"dimensions={width}x{height}",)
+
+
+def _validate_json(data: bytes) -> tuple[str, ...]:
+    text = _utf8(data)
+    try:
+        json.loads(text, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+    except Exception:
+        _invalid("unparseable", "Generated JSON cannot be parsed.")
+    return ()
+
+
+def _validate_csv(data: bytes) -> tuple[str, ...]:
+    text = _utf8(data)
+    try:
+        rows = list(csv.reader(io.StringIO(text, newline="")))
+    except (csv.Error, ValueError):
+        _invalid("unparseable", "Generated CSV cannot be parsed.")
+    if not rows or not any(row for row in rows):
+        _invalid("empty_output", "Generated CSV is empty.")
+    width = len(rows[0])
+    if width == 0 or any(len(row) != width for row in rows):
+        _invalid("invalid_schema", "Generated CSV rows do not share a schema.")
+    return (f"columns={width}", f"rows={len(rows)}")
+
+
+def validate_artifact_bytes(format: str, data: bytes) -> ArtifactValidationResult:
+    """Validate generated bytes before they cross the storage/public boundary."""
+
+    fmt = str(format or "").lower().lstrip(".")
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        _invalid("empty_output", "Generated artifact is empty.")
+    raw = bytes(data)
+    validators = {
+        "pdf": _validate_pdf,
+        "docx": lambda value: (_validate_zip(value, {"[Content_Types].xml", "_rels/.rels", "word/document.xml", "word/_rels/document.xml.rels"}, "invalid_docx"), ())[1],
+        "pptx": lambda value: (_validate_zip(value, {"[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml", "ppt/_rels/presentation.xml.rels", "ppt/slides/slide1.xml"}, "invalid_pptx"), ())[1],
+        "ics": _validate_ics,
+        "svg": _validate_svg,
+        "png": _validate_png,
+        "json": _validate_json,
+        "csv": _validate_csv,
+        "txt": lambda value: (_utf8(value), ())[1],
+    }
+    validator = validators.get(fmt)
+    if validator is None:
+        _invalid("unsupported_format", "Artifact format is not supported.")
+    details = validator(raw)
+    return ArtifactValidationResult(fmt, len(raw), tuple(details or ()))
+
+
+# Short alias for callers that prefer a verb-like API.
+validate_generated_bytes = validate_artifact_bytes
 
 
 class CitationValidationError(ValueError):

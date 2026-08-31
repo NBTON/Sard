@@ -28,6 +28,13 @@ from sard.outputs.schemas import (
     TextBlock,
     VerificationStatus,
 )
+from sard.outputs.validation import (
+    ARTIFACT_MIME_TYPES,
+    ArtifactValidationError,
+    ArtifactValidationResult,
+    validate_artifact_bytes,
+    validate_generated_bytes,
+)
 
 __all__ = [
     "CitationSource",
@@ -60,4 +67,9 @@ __all__ = [
     "get_artifact_orchestrator",
     "get_artifact_store",
     "set_artifact_store",
+    "ARTIFACT_MIME_TYPES",
+    "ArtifactValidationError",
+    "ArtifactValidationResult",
+    "validate_artifact_bytes",
+    "validate_generated_bytes",
 ]
