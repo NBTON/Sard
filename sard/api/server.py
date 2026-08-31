@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
 
 # Ensure project root is in sys.path
@@ -173,12 +173,23 @@ def _extract_all_attachments(req: ChatRequest) -> List[Dict[str, Any]]:
 
 def _check_rag_readiness() -> dict:
     try:
+        from sard.rag.bundled_retriever import get_bundled_retriever
+        bundled_ok = get_bundled_retriever().is_available
+    except Exception:
+        bundled_ok = False
+
+    try:
         settings = get_rag_settings()
         collection_path = Path(settings.zvec_collection_path)
-        exists = collection_path.exists() and any(collection_path.iterdir()) if collection_path.exists() else False
-        return {"available": exists}
+        zvec_exists = collection_path.exists() and any(collection_path.iterdir()) if collection_path.exists() else False
     except Exception:
-        return {"available": False}
+        zvec_exists = False
+
+    is_avail = bool(zvec_exists or bundled_ok)
+    return {
+        "available": is_avail,
+        "engine": "zvec_hybrid" if zvec_exists else ("bundled_hybrid" if bundled_ok else "unavailable"),
+    }
 
 
 # --- Endpoints ---
@@ -898,7 +909,29 @@ def _generate_cultural_fallback_answer(query: str) -> str:
     - Otherwise return explicit Arabic friendly hedge mentioning Sard capabilities, not empty string, no itinerary.
     - Respects requested_formats at SSE layer: artifact failure is emitted as artifacts event, not as text substitution.
     """
-    q_norm = (query or "").lower()
+    q_norm = (query or "").lower().strip()
+    is_greeting = any(
+        q_norm == g or q_norm.startswith(g + " ")
+        for g in ["من أنت", "من انت", "عرفني بنفسك", "عرف بنفسك", "ما هو سرد", "مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "أهلاً", "hello", "hi", "who are you"]
+    )
+    if is_greeting:
+        return (
+            "أهلاً وسهلاً بك! 🇸🇦\n\n"
+            "أنا **سرد**، رفيقك الثقافي الذكي ومستشارك المعتمد لاستكشاف التراث والحضارة في المملكة العربية السعودية، "
+            "بمعارف موثقة مستندة إلى سجلات وهيئات **وزارة الثقافة السعودية** و**دارة الملك عبد العزيز**.\n\n"
+            "### 🏛️ كيف يمكنني مساعدتك اليوم؟\n"
+            "1. **المعارف والتراث الإقليمي**: استكشاف التراث والعمارة والأزياء والتقاليد عبر **مناطق المملكة الـ 13**.\n"
+            "2. **القطاعات الثقافية الـ 11**: التراث، فنون الطهي، الأزياء، الأدب، الموسيقى، العمارة، المتاحف، الفنون البصرية، المسرح، الأفلام، والمكتبات.\n"
+            "3. **المخرجات والأدوات التفاعلية**:\n"
+            "   - تصميم **عروض تقديمية (PowerPoint .pptx)** للإيجاز الثقافي.\n"
+            "   - إعداد **بطاقات الوصفات والحرف التراثية (PDF)**.\n"
+            "   - محاكاة **بروتوكولات الإتيكيت والضيافة والمجالس** ومخططات تدفقية.\n"
+            "   - فك شفرة **الأمثال واللهجات المحلية** وسرد قصصها.\n"
+            "   - توثيق **السير والتاريخ الشفوي العائلي** في كتيبات مصقولة.\n"
+            "   - مزامنة **المواسم الفلكية والمناسبات التراثية (.ics)**.\n\n"
+            "تفضل بطرح سؤالك أو اختر موضوعاً للبدء!"
+        )
+
     # Narrow legitimate shrimp query: must contain explicit shrimp lexeme
     has_shrimp = any(k in q_norm for k in ["روبيان", "ربيان", "تاروت", "shrimp"])
     has_springs = any(k in q_norm for k in ["ينابيع", "عيون حارة", "عين حارة", "مياه كبريتية", "springs"])
@@ -942,12 +975,32 @@ class PresentationRequest(BaseModel):
     timeline_items: Optional[List[Dict[str, Any]]] = Field(None, description="Timeline milestones")
     key_takeaways: Optional[List[str]] = Field(None, description="Key takeaways")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "topic" not in data:
+                data["topic"] = data.get("title") or data.get("query") or data.get("prompt") or "التراث السعودي"
+            if "region" not in data or not data["region"]:
+                data["region"] = "المملكة العربية السعودية"
+        return data
+
 
 class RecipeCardRequest(BaseModel):
     item_name: str = Field(..., description="Dish or craft name")
     card_type: Optional[str] = Field("culinary", description="culinary or craft")
     region: Optional[str] = Field("المملكة العربية السعودية", description="Region")
     cultural_story: Optional[str] = Field("", description="Cultural backstory")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "item_name" not in data:
+                data["item_name"] = data.get("dish_name") or data.get("name") or data.get("craft_name") or "الجريش"
+            if "card_type" not in data or not data["card_type"]:
+                data["card_type"] = "craft" if "سدو" in str(data.get("item_name", "")) else "culinary"
+        return data
 
 
 class GreetingCardRequest(BaseModel):
@@ -957,19 +1010,59 @@ class GreetingCardRequest(BaseModel):
     custom_message: Optional[str] = Field("", description="Custom message text")
     theme: Optional[str] = Field("dark_gold", description="Color theme")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "recipient_name" not in data and "recipient" in data:
+                data["recipient_name"] = data["recipient"]
+            if "sender_name" not in data and "sender" in data:
+                data["sender_name"] = data["sender"]
+            if "custom_message" not in data:
+                data["custom_message"] = data.get("message") or data.get("text") or ""
+        return data
+
 
 class EtiquetteRequest(BaseModel):
     scenario_type: Optional[str] = Field("majlis", description="majlis or business_negotiation")
     situation: Optional[str] = Field("", description="Context details")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "scenario_type" not in data:
+                data["scenario_type"] = data.get("scenario") or data.get("type") or "majlis"
+        return data
 
 
 class DialectRequest(BaseModel):
     phrase_or_proverb: str = Field(..., description="Proverb or dialect word")
     dialect_region: Optional[str] = Field("najdi", description="najdi, hijazi, sharqawi, janoubi")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "phrase_or_proverb" not in data:
+                data["phrase_or_proverb"] = (
+                    data.get("proverb_or_phrase") or data.get("phrase") or data.get("proverb") or data.get("text") or "أبشر بسعدك"
+                )
+            if "dialect_region" not in data or not data["dialect_region"]:
+                data["dialect_region"] = data.get("region") or "najdi"
+        return data
+
 
 class ArtisanRequest(BaseModel):
     craft_name: Optional[str] = Field("sadu", description="Craft name (sadu, hasawi_bisht, taif_rose, aseeri_qatt)")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "craft_name" not in data:
+                data["craft_name"] = data.get("craft") or data.get("item_name") or data.get("name") or "sadu"
+        return data
 
 
 class MemoirRequest(BaseModel):
@@ -978,10 +1071,45 @@ class MemoirRequest(BaseModel):
     origin_region: Optional[str] = Field("المملكة العربية السعودية", description="Origin region")
     origin_town: Optional[str] = Field("", description="Origin town/village")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "family_name" not in data:
+                data["family_name"] = (
+                    data.get("family_or_narrator") or data.get("family") or data.get("narrator_name") or data.get("name") or "سيرة عائلية"
+                )
+            raw = data.get("raw_notes")
+            if isinstance(raw, str):
+                data["raw_notes"] = [{"topic": "ذكريات وسيرة", "content": raw, "era": "الزمن الجميل"}]
+            elif isinstance(raw, list):
+                norm_list = []
+                for idx, item in enumerate(raw, 1):
+                    if isinstance(item, str):
+                        norm_list.append({"topic": f"الفصل {idx}", "content": item, "era": "مرحلة الذكريات"})
+                    elif isinstance(item, dict):
+                        norm_list.append({
+                            "topic": str(item.get("topic") or item.get("title") or f"الفصل {idx}"),
+                            "content": str(item.get("content") or item.get("text") or item.get("note") or ""),
+                            "era": str(item.get("era") or item.get("date") or "الماضي الجميل"),
+                        })
+                data["raw_notes"] = norm_list
+            elif not raw:
+                data["raw_notes"] = [{"topic": "المستهل والذكريات", "content": "توثيق شفهي مبارك", "era": "الزمن الجميل"}]
+        return data
+
 
 class ResearchRequest(BaseModel):
     topic: str = Field(..., description="Heritage topic for verified research")
     primary_authority: Optional[str] = Field("دارة الملك عبد العزيز / هيئة التراث", description="Authority")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "topic" not in data:
+                data["topic"] = data.get("title") or data.get("query") or "التراث الوطني السعودي"
+        return data
 
 
 @app.get("/api/calendar/events")

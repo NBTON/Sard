@@ -15,6 +15,14 @@ from sard.schemas.isnad import Confidence, Decision, IsnadChain
 
 def decide_action(chain: IsnadChain, query_text: str = "") -> Tuple[Decision, str]:
     """Determine the planner decision and justification."""
+    # Greeting / Self-introduction handling
+    if chain.classification == "greeting":
+        return "generate", "تحية وترحيب بالضيف والتعريف بمهام سرد الثقافية المعتمدة."
+
+    q_clean = query_text.strip().lower()
+    if q_clean in ("من أنت", "من انت", "عرفني بنفسك", "مرحبا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "أهلاً", "hello", "hi", "who are you"):
+        return "generate", "تحية وترحيب بالضيف والتعريف بمهام سرد الثقافية المعتمدة."
+
     # If there are open conflicts
     if chain.conflicts:
         # Check if the conflict is cross-regional (e.g. Asir vs Najd)

@@ -31,7 +31,7 @@ _REGION_PATTERNS = [
     ("eastern", re.compile(r"(شرقية|أحساء|احساء|قطيف|تاروت|دمام|خبر|ظهران|سيهات|هفوف|مبرز|eastern province|al-ahsa|tarout|qatif)", re.I)),
     ("north", re.compile(r"(حائل|حائلي|تبوك|جوف|دومة الجندل|عرعر|قريات|تيماء|hail|tabuk|jouf)", re.I)),
     ("south", re.compile(r"(نجران|جازان|فيفاء|فرسان|أخدود|مغواة|najran|jazan|farasan)", re.I)),
-    ("national", re.compile(r"(سعودية|المملكة|يوم التأسيس|اليوم الوطني|saudi|national)", re.I)),
+    ("national", re.compile(r"(سعودي|سعودية|المملكة|يوم التأسيس|اليوم الوطني|سدو|السدو|قهوة|القهوة|saudi|national)", re.I)),
 ]
 
 # User stance detection patterns

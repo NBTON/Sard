@@ -46,6 +46,7 @@ RequestClassification = Literal[
     "etiquette",
     "object_from_image",
     "itinerary",
+    "greeting",
     "other",
 ]
 

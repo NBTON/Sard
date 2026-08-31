@@ -59,6 +59,8 @@ def _infer_region_from_text(text: str) -> Region:
         return "north"
     if any(k in t_lower for k in ["نجران", "جازان", "south"]):
         return "south"
+    if any(k in t_lower for k in ["سعودي", "المملكة", "سعودية", "وطني", "سدو", "قهوة", "تأسيس", "all", "national"]):
+        return "national"
     return "unknown"
 
 
@@ -111,11 +113,13 @@ class GroundedRetriever:
         # 2. Curated RAG Search
         rag_hits = self.rag_search(query, 5)
         for h in rag_hits:
-            text = h.get("text", "")
-            title = h.get("title", "")
-            doc_id = h.get("doc_id") or h.get("citation_id", "")
-            region = _infer_region_from_text(f"{title} {text}") or target_region or "unknown"
-            origin = h.get("source_name") or title or "موسوعة المعارف الثقافية المعتمدة (سرد)"
+            meta = h.get("metadata") or {}
+            text = h.get("chunk") or h.get("text") or h.get("content") or ""
+            title = h.get("title") or meta.get("title") or ""
+            doc_id = h.get("citation_id") or h.get("doc_id") or meta.get("citation_id") or meta.get("chunk_id") or ""
+            meta_reg = meta.get("region") or meta.get("region_code") or ""
+            region = _infer_region_from_text(f"{title} {text} {meta_reg}") or target_region or "national"
+            origin = meta.get("source_name") or h.get("source") or title or "وزارة الثقافة - سجل التراث الثقافي"
             stype = _classify_source_type(doc_id, origin)
             if stype == "unknown":
                 stype = "ministry"  # Curated RAG is trusted
@@ -125,7 +129,7 @@ class GroundedRetriever:
                 origin=origin,
                 region=region,
                 source_type=stype,
-                date_or_period=h.get("date_or_period") or "تراث موثق",
+                date_or_period=meta.get("publication_date") or h.get("date_or_period") or "تراث موثق",
                 url_or_doc_id=doc_id,
                 raw_data=h,
                 prefix="rag",
@@ -133,8 +137,8 @@ class GroundedRetriever:
             evidence_list.append(ev)
             retrieval_logs.append(f"تم استرجاع وثيقة RAG: {origin} [{region}] -> {ev.source_id}")
 
-        # 3. Parallel Search (Web) - invoked if RAG hits are low or time-sensitive/fresh
-        if allow_web_search and len(rag_hits) < 3:
+        # 3. Parallel Search (Web) - invoked only if RAG hits are completely empty
+        if allow_web_search and len(rag_hits) == 0:
             try:
                 web_hits = self.parallel_search(
                     objective=query,

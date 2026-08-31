@@ -257,7 +257,20 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
     except Exception as exc:
         logger.debug("ZvecRepository search_fts skipped (%s)", exc)
 
-    # 2. Local corpus scan for data/corpus and data/cultural
+    # 2. Bundled static index search (zero-cold-start serverless corpus)
+    try:
+        from sard.rag.bundled_retriever import get_bundled_retriever
+        bundled_hits = get_bundled_retriever().search(query_str, k=k)
+        if bundled_hits:
+            existing_chunks = {r["chunk"][:100] for r in results}
+            for bh in bundled_hits:
+                if bh["chunk"][:100] not in existing_chunks:
+                    results.append(bh)
+                    existing_chunks.add(bh["chunk"][:100])
+    except Exception as exc:
+        logger.debug("Bundled retriever search skipped (%s)", exc)
+
+    # 3. Local corpus scan for data/corpus and data/cultural
     corpus_results = _scan_local_cultural_corpus(query_str, k=k)
     if corpus_results:
         # Merge, prioritizing highest score

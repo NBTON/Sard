@@ -96,8 +96,13 @@ class IsnadAssembler:
 
         # Resolved region
         resolved_region = primary_region
-        if resolved_region == "unknown" and regions_found:
-            resolved_region = list(regions_found)[0]
+        if resolved_region == "unknown":
+            if regions_found:
+                resolved_region = list(regions_found)[0]
+            elif any(ev.region == "national" for ev in evidence):
+                resolved_region = "national"
+            elif evidence and evidence[0].region != "unknown":
+                resolved_region = evidence[0].region
 
         return IsnadChain(
             request_id=request_id,

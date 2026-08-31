@@ -56,7 +56,7 @@ class ModelSettings:
 
 
 # Register newly supported providers here.
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("nvidia", "anthropic", "openai", "openrouter")
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("nvidia", "anthropic", "openai", "openrouter", "gemini", "google")
 
 
 def _read_settings() -> ModelSettings:
@@ -69,11 +69,39 @@ def _read_settings() -> ModelSettings:
     model_name = os.environ.get("MODEL_NAME", "").strip()
     temperature_raw = os.environ.get("MODEL_TEMPERATURE", "0.2").strip()
 
+    # Auto-detection of provider from available keys if not explicitly set or set to auto
+    if not provider or provider == "auto":
+        if os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip():
+            provider = "gemini"
+            if not model_name:
+                model_name = "gemini-2.0-flash"
+        elif os.environ.get("OPENAI_API_KEY", "").strip():
+            provider = "openai"
+            if not model_name:
+                model_name = "gpt-4o-mini"
+        elif os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            provider = "anthropic"
+            if not model_name:
+                model_name = "claude-3-5-sonnet-20241022"
+        elif os.environ.get("OPENROUTER_API_KEY", "").strip():
+            provider = "openrouter"
+            if not model_name:
+                model_name = "google/gemini-2.0-flash-001"
+        elif os.environ.get("NVIDIA_API_KEY", "").strip():
+            provider = "nvidia"
+            if not model_name:
+                model_name = "meta/llama-3.1-70b-instruct"
+
     if not provider:
         raise ModelConfigError(
             "لم يتم تحديد مزوّد النموذج. الرجاء ضبط متغيّر البيئة "
-            "MODEL_PROVIDER في ملف .env (مثال: anthropic أو openai)."
+            "MODEL_PROVIDER في ملف .env (مثال: gemini أو openai أو anthropic)."
         )
+
+    if provider in ("google", "gemini"):
+        provider = "gemini"
+        if not model_name:
+            model_name = "gemini-2.0-flash"
 
     if provider not in SUPPORTED_PROVIDERS:
         supported = "، ".join(SUPPORTED_PROVIDERS)
@@ -163,6 +191,7 @@ def _build_nvidia(settings: ModelSettings) -> BaseChatModel:
     kwargs = {
         "model": settings.model_name,
         "temperature": settings.temperature,
+        "max_retries": 1,
     }
     if api_key:
         kwargs["api_key"] = api_key
@@ -197,12 +226,47 @@ def _build_openrouter(settings: ModelSettings) -> BaseChatModel:
     )
 
 
+def _build_gemini(settings: ModelSettings) -> BaseChatModel:
+    """Build chat model via Google Gemini (Gemini 1.5/2.0/2.5 Flash)."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
+    if not api_key:
+        raise ModelConfigError(
+            "مفتاح GEMINI_API_KEY أو GOOGLE_API_KEY غير موجود. الرجاء إضافته إلى ملف .env."
+        )
+    # 1. Try langchain-google-genai if installed
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model=settings.model_name or "gemini-2.0-flash",
+            temperature=settings.temperature,
+            google_api_key=api_key,
+        )
+    except ImportError:
+        pass
+
+    # 2. Try standard OpenAI-compatible endpoint with langchain-openai
+    try:
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=settings.model_name or "gemini-2.0-flash",
+            temperature=settings.temperature,
+            api_key=api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+    except ImportError as exc:
+        raise ModelConfigError(
+            "حزمة langchain-google-genai أو langchain-openai غير مثبّتة."
+        ) from exc
+
+
 # Provider name -> builder function. Add new providers here.
 _PROVIDER_BUILDERS: Dict[str, Callable[[ModelSettings], BaseChatModel]] = {
     "nvidia": _build_nvidia,
     "anthropic": _build_anthropic,
     "openai": _build_openai,
     "openrouter": _build_openrouter,
+    "gemini": _build_gemini,
+    "google": _build_gemini,
 }
 
 

@@ -20,6 +20,7 @@ from sard.schemas.isnad import RequestClassification
 
 # Keywords indicating request category
 _CLASSIFIERS = [
+    ("greeting", re.compile(r"^(من أنت|من انت|عرفني بنفسك|عرف بنفسك|ما هو سرد|من تكون|مرحبا|أهلا|اهلا|السلام عليكم|صباح الخير|مساء الخير|هلا|أهلاً|hello|hi|who are you|introduce yourself)$", re.I)),
     ("object_from_image", re.compile(r"(@[a-zA-Z0-9_\-\.\/\\]+\.(?:jpg|jpeg|png|webp|gif|bmp)|صورة|هذا الباب|هذه القطعة|هذا المجسم|ما هذا|هذا الشيء|photo|image|this door|artifact)", re.I)),
     ("itinerary", re.compile(r"(برنامج|مسار|جدول|رحلة|يومين|خطة سياحية|itinerary|schedule|tour plan|days)", re.I)),
     ("food", re.compile(r"(طعام|أكلة|طبخة|وصفة|روبيان|كبسة|قرصان|جريش|حنيني|سليق|مندي|مفطح|معصوب|عيش حساوي|خبز أحمر|مأكولات|food|dish|recipe|cuisine)", re.I)),

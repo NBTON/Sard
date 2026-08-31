@@ -42,6 +42,44 @@ def generate_isnad_response(
     if not visible_sources and chain.evidence:
         visible_sources = chain.evidence
 
+    # Case 0: Persona Greeting / Introduction
+    q_norm = query_text.strip().lower()
+    is_greeting_query = chain.classification == "greeting" or q_norm in (
+        "من أنت", "من انت", "عرفني بنفسك", "عرف بنفسك", "ما هو سرد", "مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "أهلاً", "hello", "hi", "who are you"
+    )
+    if is_greeting_query:
+        answer_ar = (
+            "أهلاً وسهلاً بك! 🇸🇦\n\n"
+            "أنا **سرد**، رفيقك الثقافي الذكي ومستشارك المعتمد لاستكشاف التراث والحضارة في المملكة العربية السعودية، "
+            "بمعارف موثقة مستندة إلى سجلات وهيئات **وزارة الثقافة السعودية** و**دارة الملك عبد العزيز**.\n\n"
+            "### 🏛️ كيف يمكنني مساعدتك اليوم؟\n"
+            "1. **المعارف والتراث الإقليمي**: استكشاف التراث والعمارة والأزياء والتقاليد عبر **مناطق المملكة الـ 13**.\n"
+            "2. **القطاعات الثقافية الـ 11**: التراث، فنون الطهي، الأزياء، الأدب، الموسيقى، العمارة، المتاحف، الفنون البصرية، المسرح، الأفلام، والمكتبات.\n"
+            "3. **المخرجات والأدوات التفاعلية**:\n"
+            "   - تصميم **عروض تقديمية (PowerPoint .pptx)** للإيجاز الثقافي.\n"
+            "   - إعداد **بطاقات الوصفات والحرف التراثية (PDF)**.\n"
+            "   - محاكاة **بروتوكولات الإتيكيت والضيافة والمجالس** ومخططات تدفقية.\n"
+            "   - فك شفرة **الأمثال واللهجات المحلية** وسرد قصصها.\n"
+            "   - توثيق **السير والتاريخ الشفوي العائلي** في كتيبات مصقولة.\n"
+            "   - مزامنة **المواسم الفلكية والمناسبات التراثية (.ics)**.\n\n"
+            "تفضل بطرح سؤالك أو اختر موضوعاً للبدء!"
+        )
+        answer_en = (
+            "Welcome! I am **Sard**, your Saudi AI Cultural Companion and guide to the rich heritage and traditions "
+            "of the Kingdom of Saudi Arabia, grounded in verified references from the **Saudi Ministry of Culture**.\n\n"
+            "I can assist you with:\n"
+            "- Documented cultural history across all 13 Saudi regions.\n"
+            "- Generating verified presentations (PPTX), recipe cards (PDF), etiquette guides (SVG), and heritage calendars (ICS).\n"
+            "- Exploring traditional culinary arts, architecture, music, fashion, and folklore."
+        )
+        return PlannerResult(
+            chain=chain,
+            answer_ar=answer_ar,
+            answer_en=answer_en,
+            visible_sources=visible_sources,
+            follow_up="ما هو الموضوع أو المنطقة التي تود استكشافها؟",
+        )
+
     # Case 1: Refusal
     if chain.decision == "refuse":
         conflict_explanation = ""
