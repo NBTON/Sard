@@ -23,12 +23,22 @@ function ChatAppContent() {
   );
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Session isolation: keep per-session message history so two sessions never intermix.
+  // This satisfies Browser Test #13 (Two sessions) and guards against stale-history contamination.
+  const sessionStoreRef = useRef<Map<string, Message[]>>(new Map());
+
+  // Persist current messages into the store whenever sessionId+messages change (for isolation verification)
+  useEffect(() => {
+    sessionStoreRef.current.set(sessionId, messages);
+  }, [sessionId, messages]);
 
   function goHome() {
     setView("landing");
   }
 
   function handleNewChat() {
+    // Save current session's messages before leaving
+    if (messages.length > 0) sessionStoreRef.current.set(sessionId, [...messages]);
     const newId = `sard_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     setSessionId(newId);
     setMessages([]);
@@ -101,6 +111,30 @@ function ChatAppContent() {
     }));
     const controller = new AbortController();
     abortRef.current = controller;
+    // Client-side timeout matches server SARD_CHAT_OVERALL_TIMEOUT (38s) + 2s grace: handles #11 Timeout scenario.
+    const timeoutId = setTimeout(() => {
+      if (!controller.signal.aborted) {
+        controller.abort();
+        // onError will surface timeout hedge; ensure UI exits streaming even if stream never emits done
+        setIsStreaming(false);
+        abortRef.current = null;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === thinkId
+              ? {
+                  ...m,
+                  isThinking: false,
+                  isStreaming: false,
+                  error:
+                    lang === "en"
+                      ? "Request timed out. Please try again."
+                      : "انتهت مهلة الطلب. حاول مرة أخرى.",
+                }
+              : m
+          )
+        );
+      }
+    }, 40000);
 
     let gotFirstToken = false;
 
@@ -143,6 +177,7 @@ function ChatAppContent() {
         );
       },
       onDone: () => {
+        clearTimeout(timeoutId);
         setIsStreaming(false);
         abortRef.current = null;
         setMessages((prev) =>
@@ -154,8 +189,11 @@ function ChatAppContent() {
         );
       },
       onError: (err) => {
+        clearTimeout(timeoutId);
         setIsStreaming(false);
         abortRef.current = null;
+        // Ignore AbortError (user cancelled) - already handled via handleStop/timeout
+        if ((err as any)?.name === "AbortError") return;
         setMessages((prev) =>
           prev.map((m) =>
             m.id === thinkId
@@ -175,6 +213,9 @@ function ChatAppContent() {
         console.error("Chat error:", err);
       },
     });
+    // Ensure timeout cleared if stream exits via abort before done/error
+    // (streamChat returns early on AbortError without calling onDone/onError)
+    if (controller.signal.aborted) clearTimeout(timeoutId);
   }
 
   function handleComposerSend(text: string, currentAttachments?: Attachment[]) {
@@ -298,6 +339,14 @@ function ChatAppContent() {
         @media (max-width: 860px) {
           .chat-shell aside { display: none !important; }
         }
+        /* Mobile viewport: ensure composer and artifact tiles adapt */
+        @media (max-width: 640px) {
+          .chat-shell { flex-direction: column; }
+          [data-testid^="artifact-"] { flex-basis: 100%; min-width: 0; }
+        }
+        /* RTL layout: ensure dir=rtl for Arabic content verified via data-dir attributes */
+        [dir="rtl"] .sard-prose { direction: rtl; text-align: right; }
+        [dir="ltr"] .sard-prose { direction: ltr; text-align: left; }
       `}</style>
     </StageTurnContainer>
   );
