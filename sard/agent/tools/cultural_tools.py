@@ -22,9 +22,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from sard.config.rag import get_rag_settings
+from sard.rag.schemas import ScoreType
 from sard.url_policy import is_safe_external_url, safe_external_url
 
 logger = logging.getLogger("sard.tools.cultural")
+
+# Calibrated thresholds — must stay aligned with sard/rag/retrieve.py and RAG_HIGH_CONFIDENCE_THRESHOLD
+_CALIBRATED_THRESHOLD = 0.65
 
 PARALLEL_BETA_HEADER = "search-extract-2025-10-10"
 PARALLEL_API_DEFAULT_BASE = "https://api.parallel.ai/v1beta"
@@ -139,6 +143,23 @@ def _infer_cultural_metadata(title: str, content: str, original_topic: str = "")
     }
 
 
+def _calibrate_fts_raw_score(raw_fts: float) -> float:
+    """Calibrate raw BM25-like FTS score to 0-1 confidence, mirroring retrieve.py.
+
+    Uses identical bucket boundaries as calibrate_candidate_confidence to prevent
+    scale-mixing: raw BM25 0.5-1.0-1.5 maps to 0.35-0.95 range, <0.5 is accidental
+    stopword hit penalized to *0.50. This ensures threshold 0.65 means the same
+    evidence strength whether the score originated from dense, FTS, or lexical match.
+    """
+    if raw_fts >= 1.5:
+        return min(0.95, 0.70 + (raw_fts - 1.5) * 0.1)
+    if raw_fts >= 1.0:
+        return 0.55 + (raw_fts - 1.0) * 0.30
+    if raw_fts >= 0.5:
+        return 0.35 + (raw_fts - 0.5) * 0.40
+    return raw_fts * 0.50
+
+
 def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
     """Retrieve from our curated cultural knowledge base.
 
@@ -162,11 +183,36 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
         )
         if repo is not None:
             try:
+                # Validate compatibility explicitly via diagnose_collection_compatibility
+                try:
+                    from sard.rag.zvec_store import ZvecRepository as _ZR
+                    diag = _ZR.diagnose_collection_compatibility(
+                        settings.zvec_collection_path, settings.embedding_route.primary
+                    )
+                    if not diag.get("compatible"):
+                        logger.debug("Zvec collection compatibility diagnostic: %s", diag)
+                except Exception as de:
+                    logger.debug("Compatibility diagnostic skipped: %s", de)
                 candidates = repo.fts_search(query_str, topk=k)
                 for cand in candidates:
-                    score_val = getattr(cand, "confidence_score", None) or getattr(cand, "fts_score", 0.85) or 0.85
-                    if float(score_val) < 0.65:
+                    # Use calibrated confidence when available; otherwise calibrate raw FTS BM25
+                    raw_ft = getattr(cand, "fts_score", None)
+                    conf = getattr(cand, "confidence_score", None)
+                    if conf is not None:
+                        calibrated = float(conf)
+                        stype = getattr(cand, "score_type", ScoreType.FTS.value)
+                        # If already calibrated, trust it; else calibrate raw
+                        if stype == ScoreType.CALIBRATED_CONFIDENCE.value:
+                            score_val = calibrated
+                        else:
+                            score_val = _calibrate_fts_raw_score(float(raw_ft) if raw_ft is not None else calibrated)
+                    elif raw_ft is not None:
+                        score_val = _calibrate_fts_raw_score(float(raw_ft))
+                    else:
+                        score_val = 0.0
+                    if float(score_val) < _CALIBRATED_THRESHOLD:
                         continue
+                    calibrated_score = round(min(0.95, float(score_val)), 4)
                     meta = _infer_cultural_metadata(cand.title, cand.content, cand.topic)
                     meta.update({
                         "source_name": cand.source_name,
@@ -175,15 +221,16 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
                         "chunk_id": cand.chunk_id,
                         "publication_date": cand.publication_date or "",
                         "page_number": cand.page_number,
-                        "score_type": "fts",
-                        "confidence_score": round(min(0.95, float(score_val)), 4),
+                        "score_type": ScoreType.CALIBRATED_CONFIDENCE.value,
+                        "confidence_score": calibrated_score,
+                        "raw_fts_score": raw_ft,
                     })
                     results.append({
                         "source": cand.source_name or "سرد - قاعدة المعرفة الثقافية",
                         "title": cand.title or "وثيقة تراثية",
                         "chunk": cand.content,
-                        "score": round(min(0.95, float(score_val)), 4),
-                        "score_type": "fts",
+                        "score": calibrated_score,
+                        "score_type": ScoreType.CALIBRATED_CONFIDENCE.value,
                         "metadata": meta,
                     })
             finally:
@@ -201,8 +248,18 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
                 results.append(cr)
                 existing_chunks.add(cr["chunk"][:100])
 
-    # Filter strictly to relevant items
-    results = [r for r in results if r.get("score", 0.0) >= 0.65]
+    # Filter strictly to relevant items — compare only calibrated/lexical confidence (never raw BM25/distance)
+    allowed_types = {ScoreType.CALIBRATED_CONFIDENCE.value, ScoreType.LEXICAL.value, ScoreType.FTS.value}
+    filtered = []
+    for r in results:
+        st = r.get("score_type")
+        sc = r.get("score", 0.0)
+        # If score_type is set, enforce it is a comparable calibrated type; if untyped, still enforce threshold for backward compat
+        if st is not None and st not in allowed_types:
+            continue
+        if sc >= _CALIBRATED_THRESHOLD:
+            filtered.append(r)
+    results = filtered
     results.sort(key=lambda x: x["score"], reverse=True)
     results = results[:k]
 
@@ -245,16 +302,22 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
 
     q_lower = query.lower()
 
-    # Geographical regions mapping to detect cross-region mismatch
+    # Geographical regions — full 13 Saudi administrative regions + key cities
+    # Used for strict cross-region rejection to prevent Eastern pilot corpus leakage.
     region_clusters = {
-        "qassim": ["قصيم", "بريدة", "عنيزة", "رس", "بكرية"],
-        "asir": ["عسير", "أبها", "ابها", "رجال ألمع", "المع", "خميس مشيط", "سودة"],
-        "hijaz": ["حجاز", "جدة", "مكة", "مدينة", "طائف", "ينبع", "علا"],
-        "jouf": ["جوف", "سكاكا", "دومة الجندل", "قريات"],
-        "jazan": ["جازان", "جيزان", "فرسان", "صبيا", "أبو عريش"],
-        "najd": ["نجد", "رياض", "درعية", "خرج", "وشم", "سدير"],
-        "north": ["تبوك", "حائل", "عرعر", "حدود شمالية"],
-        "eastern": ["شرقية", "أحساء", "احساء", "قطيف", "تاروت", "دمام", "خبر", "هفوف", "سيهات", "جبيل", "خفجي"],
+        "riyadh": ["رياض", "الرياض", "درعية", "الدرعية", "خرج", "الخرج", "وشم", "سدير", "مجمعة", "دوادمي", "نجد"],
+        "makkah": ["مكة", "مكة المكرمة", "جدة", "الطائف", "طائف", "القنفذة", "رابغ", "حجاز"],
+        "madinah": ["المدينة", "مدينة منورة", "ينبع", "العلا", "علا", "بدر", "خيبر"],
+        "eastern": ["شرقية", "الشرقية", "أحساء", "احساء", "هفوف", "قطيف", "تاروت", "دمام", "ظهران", "خبر", "سيهات", "جبيل", "خفجي", "نعيرية", "بقيق"],
+        "asir": ["عسير", "أبها", "ابها", "خميس مشيط", "سودة", "رجال ألمع", "المع", "محايل", "تنومة", "ظهران الجنوب"],
+        "jazan": ["جازان", "جيزان", "فرسان", "صبيا", "أبو عريش", "صامطة"],
+        "najran": ["نجران"],
+        "bahah": ["الباحة", "باحه", "بلجرشي", "المندق", "المخواة", "قلوة"],
+        "tabuk": ["تبوك", "ضباء", "الوجه", "أملج", "تيماء", "حقل"],
+        "hail": ["حائل", "بقعاء", "الغزالة", "الشنان"],
+        "qassim": ["قصيم", "القصيم", "بريدة", "عنيزة", "الرس", "البكيرية", "بكرية", "المذنب", "البدائع"],
+        "jouf": ["جوف", "الجوف", "سكاكا", "دومة الجندل", "القريات", "قريات", "طبرجل"],
+        "northern": ["حدود شمالية", "الحدود الشمالية", "عرعر", "رفحاء", "طريف"],
     }
 
     query_regions = set()
@@ -325,25 +388,26 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
             match_ratio = matches / max(len(terms), 1)
             score = min(0.95, match_ratio * 0.70 + (0.25 if match_ratio >= 0.5 else 0.10))
 
-            if score < 0.65:
+            if score < _CALIBRATED_THRESHOLD:
                 continue
 
             inferred = _infer_cultural_metadata(title, text, topic_str)
+            calibrated = round(score, 4)
             inferred.update({
                 "source_name": source_name,
                 "source_url": source_url,
                 "citation_id": f"CIT-CORPUS-{md_file.stem[:8].upper()}",
                 "chunk_id": f"CHUNK-{md_file.stem[:8].upper()}",
                 "publication_date": meta_json.get("publication_date", ""),
-                "score_type": "fts",
-                "confidence_score": round(score, 4),
+                "score_type": ScoreType.LEXICAL.value,
+                "confidence_score": calibrated,
             })
             scored_docs.append({
                 "source": source_name,
                 "title": title,
                 "chunk": text[:1500],
-                "score": round(score, 4),
-                "score_type": "fts",
+                "score": calibrated,
+                "score_type": ScoreType.LEXICAL.value,
                 "metadata": inferred,
             })
 

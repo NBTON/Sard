@@ -119,8 +119,10 @@ class RerankService:
                     )
                 original.rerank_score = float(score)
                 original.confidence_score = round(float(score), 4)
-                original.score_type = "rerank"
+                from sard.rag.schemas import ScoreType as _ST
+                original.score_type = _ST.RERANK.value
                 rerank_thresh = getattr(self._settings, "rerank_relevance_threshold", 0.45)
+                # Rerank scores are on their own 0-1 relevance scale; never compare to dense threshold
                 original.is_relevant = (original.rerank_score >= rerank_thresh)
                 original.rerank_rank = rank
                 output.append(original)

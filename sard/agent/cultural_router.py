@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 from sard.agent.tools.cultural_tools import (
+    _infer_cultural_metadata,
     parallel_extract,
     parallel_search,
     rag_search,
@@ -26,14 +27,17 @@ from sard.agent.tools.multimodal_tools import (
     extract_multimodal_context,
 )
 from sard.agent.util import sanitize_cultural_output
+from sard.rag.schemas import ScoreType
 
 logger = logging.getLogger("sard.agent.cultural_router")
 
 RAG_HIGH_CONFIDENCE_THRESHOLD = 0.65
 
 # Freshness pattern for live events, schedules, or year-specific queries
+# Covers year tags, Arabic freshness markers (today/now/tomorrow/this week/this year),
+# schedule/ticket/festival terms, and English equivalents.
 _FRESHNESS_PATTERN = re.compile(
-    r"(2026|2025|هذا العام|هذه السنة|اليوم|الآن|غداً|غدا|حالياً|مواعيد|ساعات العمل|تذاكر|مهرجان|موسم|فعالية|فعاليات|جديد|this year|now|today|tomorrow|schedule|hours|event|festival|ticket)",
+    r"(2026|2025|هذا العام|هذه السنة|هذا الأسبوع|هذا الاسبوع|الأسبوع|الاسبوع|أسبوع|اسبوع|اليوم|الآن|غداً|غدا|حالياً|مواعيد|ساعات العمل|تذاكر|مهرجان|موسم|فعالية|فعاليات|جديد|this year|this week|now|today|tomorrow|schedule|hours|event|festival|ticket|week)",
     re.I,
 )
 
@@ -227,7 +231,7 @@ class CulturalRouter:
         context_blocks = []
         citations_list = []
 
-        # Multimodal items
+        # Multimodal items — preserve all provenance fields
         for mm in multimodal_items:
             cit_label = f"Media: {mm.filename}"
             citations_list.append({
@@ -235,6 +239,12 @@ class CulturalRouter:
                 "id": cit_label,
                 "title": f"{mm.file_type.upper()}: {mm.filename}",
                 "url": mm.source_path or mm.filename,
+                "snippet": (mm.extracted_text or mm.description or "")[:200],
+                "topic": (mm.metadata or {}).get("topic", "") if isinstance(mm.metadata, dict) else "",
+                "region": (mm.metadata or {}).get("region", "") if isinstance(mm.metadata, dict) else "",
+                "channel": "media",
+                "score": 1.0,
+                "score_type": ScoreType.WEB.value,
             })
             mm_text = []
             if mm.description:
@@ -254,11 +264,19 @@ class CulturalRouter:
             )
 
         # RAG items: include only if web_res is empty and RAG is relevant, or if explicitly in-corpus
+        # Preserve all provenance fields: id, title, url, snippet, topic, region, channel, score, score_type
         rag_to_include = rag_res if not web_res else []
         for r in rag_to_include:
             meta = r.get("metadata", {})
             source_file = meta.get("source_url", "").split("/")[-1] or r.get("title", "وثيقة تراثية")
             cit_label = f"RAG: {source_file}"
+            raw_score = r.get("score", 0.0)
+            raw_stype = r.get("score_type", ScoreType.CALIBRATED_CONFIDENCE.value)
+            # Normalize score_type through ScoreType enum when possible
+            try:
+                stype = ScoreType(raw_stype).value
+            except ValueError:
+                stype = raw_stype
             citations_list.append({
                 "type": "rag",
                 "id": cit_label,
@@ -267,28 +285,33 @@ class CulturalRouter:
                 "chunk_id": meta.get("chunk_id", ""),
                 "topic": meta.get("topic", ""),
                 "region": meta.get("region", ""),
-                "score": r.get("score", 0.0),
-                "score_type": r.get("score_type", "calibrated_confidence"),
+                "channel": "rag",
+                "score": raw_score,
+                "score_type": stype,
                 "snippet": (r.get("chunk") or "")[:200],
             })
             context_blocks.append(
                 f"[{cit_label}] {r.get('title')} ({meta.get('culture', 'سعودي')}, {meta.get('topic', 'تراث')}):\n{r.get('chunk')}"
             )
 
-        # Web items
+        # Web items — preserve full provenance with inferred topic/region/channel
         for w in web_res:
             url = w.get("url", "")
             title = w.get("title", "")
             excerpts = "\n".join(w.get("excerpts", []))
             cit_label = f"Web: {url}"
+            inferred = _infer_cultural_metadata(title, excerpts, "")
             citations_list.append({
                 "type": "web",
                 "id": cit_label,
                 "title": title,
                 "url": url,
-                "score": 1.0,
-                "score_type": "web",
                 "snippet": excerpts[:200],
+                "topic": inferred.get("topic", ""),
+                "region": inferred.get("region", ""),
+                "channel": "web",
+                "score": 1.0,
+                "score_type": ScoreType.WEB.value,
             })
             context_blocks.append(
                 f"[{cit_label}] {title}:\n{excerpts}"

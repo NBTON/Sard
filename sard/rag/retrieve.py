@@ -33,6 +33,7 @@ from sard.rag.schemas import (
     RetrievalResult,
     RetrievedCandidate,
     RewrittenQuery,
+    ScoreType,
 )
 from sard.rag.zvec_store import ZvecRepository
 
@@ -140,7 +141,7 @@ def calibrate_candidate_confidence(
         conf = 0.0
 
     candidate.confidence_score = round(conf, 4)
-    candidate.score_type = "calibrated_confidence"
+    candidate.score_type = ScoreType.CALIBRATED_CONFIDENCE.value
     candidate.is_relevant = (candidate.confidence_score >= min_confidence)
     return candidate.confidence_score
 
