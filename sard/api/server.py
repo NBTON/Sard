@@ -74,8 +74,39 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = OUTPUT_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# In-memory mapping of uploaded attachments
+# In-memory mapping of uploaded attachments (bounded with TTL/GC — Finding 3)
 _ATTACHMENTS: Dict[str, Dict[str, Any]] = {}
+_MAX_ATTACHMENTS = 100
+_ATTACHMENT_TTL_SECONDS = 3600  # 1 hour
+
+
+def _evict_expired_attachments() -> None:
+    """Evict attachments older than TTL or beyond max count (LRU). Deletes files."""
+    now = time.time()
+    # TTL eviction
+    expired = [k for k, v in list(_ATTACHMENTS.items()) if now - v.get("created_at", now) > _ATTACHMENT_TTL_SECONDS]
+    for k in expired:
+        meta = _ATTACHMENTS.pop(k, None)
+        if meta and meta.get("path"):
+            try:
+                p = Path(meta["path"])
+                if p.exists():
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+    # Size cap (LRU by created_at)
+    if len(_ATTACHMENTS) > _MAX_ATTACHMENTS:
+        sorted_items = sorted(_ATTACHMENTS.items(), key=lambda kv: kv[1].get("created_at", 0))
+        to_evict = len(_ATTACHMENTS) - _MAX_ATTACHMENTS
+        for k, _ in sorted_items[:to_evict]:
+            meta = _ATTACHMENTS.pop(k, None)
+            if meta and meta.get("path"):
+                try:
+                    p = Path(meta["path"])
+                    if p.exists():
+                        p.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
 ALLOWED_EXTENSIONS = {
     ".pdf", ".docx", ".txt", ".md", ".csv", ".json",
@@ -306,7 +337,12 @@ async def upload_file(file: UploadFile = File(...)):
         "path": str(dest_path),
         "created_at": time.time(),
     }
+    # Bounded store: evict expired/oldest before insert (Finding 3)
+    _evict_expired_attachments()
     _ATTACHMENTS[att_id] = meta
+    # Enforce cap immediately after insert (in case of race)
+    if len(_ATTACHMENTS) > _MAX_ATTACHMENTS:
+        _evict_expired_attachments()
 
     return {
         "ok": True,
@@ -322,6 +358,7 @@ async def upload_file(file: UploadFile = File(...)):
 @app.get("/attachments/{attachment_id}")
 async def get_attachment_file(attachment_id: str):
     """Download an uploaded attachment by ID."""
+    _evict_expired_attachments()
     safe_id = Path(attachment_id).name
     meta = _ATTACHMENTS.get(safe_id)
     if meta and Path(meta["path"]).exists():

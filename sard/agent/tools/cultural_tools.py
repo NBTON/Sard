@@ -32,7 +32,9 @@ _CALIBRATED_THRESHOLD = 0.65
 
 PARALLEL_BETA_HEADER = "search-extract-2025-10-10"
 PARALLEL_API_DEFAULT_BASE = "https://api.parallel.ai/v1beta"
-DEFAULT_PARALLEL_API_KEY = "dxl5SMKxtkCCAZjJH_LobPTJ6rGbXYot7YX_JLKK"
+# SECURITY: No hardcoded dev key — PARALLEL_API_KEY must be provided via env
+# (see .env.example). parallel_search/parallel_extract fail closed when missing.
+DEFAULT_PARALLEL_API_KEY = ""  # kept for backward compat; do not populate
 
 # Cultural source preferences & domain filters
 _PREFERRED_DOMAINS = (
@@ -432,6 +434,12 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
     return scored_docs[:k]
 
 
+def _resolve_parallel_api_key(api_key: Optional[str] = None) -> str:
+    """Resolve Parallel API key from explicit arg or env; fail closed when missing."""
+    raw = (api_key or os.environ.get("PARALLEL_API_KEY") or "").strip()
+    return raw
+
+
 def parallel_search(
     objective: str,
     search_queries: Sequence[str],
@@ -439,6 +447,9 @@ def parallel_search(
     api_key: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Live web search via Parallel Search API.
+
+    Fails closed when PARALLEL_API_KEY is not configured (returns [] and
+    lets the router set web_unavailable_warning; no hardcoded fallback).
 
     Args:
         objective: Natural language information need describing the exact cultural context.
@@ -450,11 +461,10 @@ def parallel_search(
         List of ranked ``{"url": str, "title": str, "excerpts": list[str], "publish_date": str}``.
     """
     t0 = time.monotonic()
-    resolved_key = (
-        api_key
-        or os.environ.get("PARALLEL_API_KEY")
-        or DEFAULT_PARALLEL_API_KEY
-    ).strip()
+    resolved_key = _resolve_parallel_api_key(api_key)
+    if not resolved_key:
+        logger.warning("PARALLEL_API_KEY not configured; parallel_search failing closed (no hardcoded fallback).")
+        return []
 
     search_queries_list = [q.strip() for q in search_queries if q and q.strip()]
     if not search_queries_list:
@@ -568,11 +578,10 @@ def parallel_extract(
     if not safe_urls:
         return []
 
-    resolved_key = (
-        api_key
-        or os.environ.get("PARALLEL_API_KEY")
-        or DEFAULT_PARALLEL_API_KEY
-    ).strip()
+    resolved_key = _resolve_parallel_api_key(api_key)
+    if not resolved_key:
+        logger.warning("PARALLEL_API_KEY not configured; parallel_extract failing closed.")
+        return []
 
     results: list[dict[str, Any]] = []
 
