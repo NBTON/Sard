@@ -593,7 +593,9 @@ class ZvecRepository:
             c.dense_rank = rank
             if c.dense_score is not None:
                 c.dense_score = round(max(-1.0, min(1.0, 1.0 - float(c.dense_score))), 4)
-            c.score_type = "dense"
+            # Dense scores are cosine similarities; FTS scores are BM25 — never compare without calibration
+            from sard.rag.schemas import ScoreType as _ST
+            c.score_type = _ST.DENSE.value
         return candidates
 
     def fts_search(
@@ -619,7 +621,8 @@ class ZvecRepository:
             c.fts_score = c.dense_score
             c.dense_score = None
             c.fts_rank = rank
-            c.score_type = "fts"
+            from sard.rag.schemas import ScoreType as _ST2
+            c.score_type = _ST2.FTS.value
         return candidates
 
     def fetch_by_ids(self, chunk_ids: list[str]) -> dict[str, RetrievedCandidate]:

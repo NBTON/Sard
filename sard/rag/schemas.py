@@ -134,6 +134,8 @@ class ScoreType(str, Enum):
     RRF = "rrf"
     RERANK = "rerank"
     CALIBRATED_CONFIDENCE = "calibrated_confidence"
+    LEXICAL = "lexical"
+    WEB = "web"
 
 
 @dataclass

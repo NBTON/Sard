@@ -137,9 +137,9 @@ class GroundedRetriever:
         if allow_web_search and len(rag_hits) < 3:
             try:
                 web_hits = self.parallel_search(
-                    query=query,
+                    objective=query,
+                    search_queries=[query],
                     max_results=3,
-                    domains_filter=["saudipedia.com", "moc.gov.sa", "spa.gov.sa", "heritage.moc.gov.sa", "unesco.org"],
                 )
                 for wh in web_hits:
                     title = wh.get("title", "")

@@ -13,6 +13,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from sard.agent.cultural_router import (
+    CulturalQueryResult,
     CulturalRouter,
     RetrievalDecision,
     RAG_HIGH_CONFIDENCE_THRESHOLD,

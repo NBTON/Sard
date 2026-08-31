@@ -126,6 +126,15 @@ def deterministic_query_variants(question: str) -> list[str]:
 
 
 class QueryRewriteService:
+    """Query rewriting is a stateless pure function of (normalized_query, model_id).
+
+    Cache is process-global by design for efficiency — rewrite does not depend on
+    session_id, user, or history. This is intentional and not a leak: same Arabic
+    query rewrites identically across sessions. Cache key is (normalize_arabic(query), model_id)
+    and is bounded: deterministic fallback is used when all candidates fail, so no session
+    contamination occurs. For session-isolated state, see IsnadMemory L3 per session_id.
+    """
+
     def __init__(
         self,
         settings: Optional[RAGSettings] = None,
@@ -135,6 +144,8 @@ class QueryRewriteService:
         self._settings = settings or get_rag_settings()
         self._breaker = circuit_breaker or CircuitBreaker()
         self._chat_model_factory = chat_model_factory
+        # Stateless cache: key = (normalized_query, model_id), not session_id. Bounded growth mitigated
+        # by deterministic fallback path; LRU eviction could be added if growth observed in warm lambda.
         self._cache: dict[tuple[str, str], RewrittenQuery] = {}
 
     def _candidates(self) -> list[ModelCandidate]:

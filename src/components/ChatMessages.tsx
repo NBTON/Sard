@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { Artifact, Citation, Lang, Message } from "@/types";
 import { SardMiniMark, ThinkingWeave } from "./SardMark";
 import { t } from "@/lib/copy";
+import { getUniqueDisplayNames } from "@/lib/api";
 
 function cleanContent(text: string): string {
   if (!text) return "";
@@ -137,6 +138,16 @@ function AgentCard({
 
   const isVerified = Boolean(citations.length > 0);
   const formattedContent = React.useMemo(() => cleanContent(m.content), [m.content]);
+
+  // Compute unique display names for duplicate filenames handling
+  const displayNameMap = React.useMemo(() => {
+    if (!m.artifacts || m.artifacts.length === 0) return new Map<string, string>();
+    try {
+      return getUniqueDisplayNames(m.artifacts);
+    } catch {
+      return new Map<string, string>();
+    }
+  }, [m.artifacts]);
 
   return (
     <div
@@ -520,17 +531,25 @@ function AgentCard({
                   const kind = (a.kind || "").toLowerCase();
                   const isPptx = fmt === "pptx" || kind === "presentation";
                   const isDocx = fmt === "docx";
+                  const isPdf = fmt === "pdf";
                   const isCal = fmt === "ics" || kind === "calendar";
                   const isCard = kind === "card" || a.type === "card";
                   const isRecipe = kind === "recipe" || a.type === "recipe_craft_card";
                   const isMemoir = kind === "memoir" || a.type === "family_memoir_booklet";
                   const isDiagram = kind === "diagram" || fmt === "svg";
+                  const isSvg = fmt === "svg";
+                  const isPng = fmt === "png";
+                  const isJson = fmt === "json";
+                  const isCsv = fmt === "csv";
+                  const isTxt = fmt === "txt";
                   const isRes = kind === "verified_research" || a.type === "verified_research";
 
                   const icon = isPptx
                     ? "📊"
                     : isDocx
                     ? "📝"
+                    : isPdf
+                    ? "📄"
                     : isRecipe
                     ? "🍲"
                     : isCal
@@ -539,20 +558,36 @@ function AgentCard({
                     ? "💌"
                     : isMemoir
                     ? "📖"
+                    : isSvg
+                    ? "🖼️"
+                    : isPng
+                    ? "🖼️"
+                    : isJson
+                    ? "🔷"
+                    : isCsv
+                    ? "📊"
+                    : isTxt
+                    ? "📝"
                     : isDiagram
                     ? "🧭"
                     : isRes
                     ? "🏛️"
                     : "📄";
-                  const formatLabel = fmt.toUpperCase() || "DOC";
+                  const formatLabel = fmt.toUpperCase() || (kind ? kind.toUpperCase() : "DOC");
+                  const displayName = displayNameMap.get(a.id) || a.title || a.filename;
+                 const secondaryLabel = a.title && a.filename && a.title !== a.filename ? a.filename : null;
 
                   const isFailed = a.status === "failed";
                   const isPending = a.status === "pending";
+                  const isSkipped = a.status === "skipped";
+                  const isDegraded = (a as any).degraded === true || (a.status as string) === "degraded";
 
                   if (isFailed) {
                     return (
                       <div
                         key={a.id || i}
+                        data-testid="artifact-failed"
+                        data-format={fmt}
                         style={{
                           display: "inline-flex",
                           alignItems: "center",
@@ -567,7 +602,8 @@ function AgentCard({
                         }}
                       >
                         <span>⚠️</span>
-                        <span style={{ fontWeight: 600 }}>{a.title || a.filename}</span>
+                        <span style={{ fontWeight: 600 }}>{displayName}</span>
+                        {secondaryLabel && <span style={{ fontSize: 11, opacity: 0.7 }}>({secondaryLabel})</span>}
                         <span
                           style={{
                             fontSize: 11,
@@ -579,6 +615,64 @@ function AgentCard({
                         >
                           {a.error || (isAr ? "تعذر التوليد" : "Failed")}
                         </span>
+                        <span style={{ fontSize: 10, background: "#141210", color: "#FAF7F1", padding: "2px 5px", borderRadius: 4 }}>{formatLabel}</span>
+                      </div>
+                    );
+                  }
+
+                  if (isSkipped) {
+                    return (
+                      <div
+                        key={a.id || i}
+                        data-testid="artifact-skipped"
+                        data-format={fmt}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 8,
+                          background: "#E8E0D2",
+                          border: "1.5px solid #8A8178",
+                          borderRadius: 12,
+                          padding: "8px 14px",
+                          fontSize: 13,
+                          color: "#3A342E",
+                        }}
+                      >
+                        <span>⏭️</span>
+                        <span style={{ fontWeight: 600 }}>{displayName}</span>
+                        <span style={{ fontSize: 11, background: "#8A8178", color: "#FFF", padding: "2px 6px", borderRadius: 4 }}>{isAr ? "تم التخطي" : "Skipped"}</span>
+                        <span style={{ fontSize: 10, background: "#141210", color: "#FAF7F1", padding: "2px 5px", borderRadius: 4 }}>{formatLabel}</span>
+                      </div>
+                    );
+                  }
+
+                  if (isDegraded) {
+                    return (
+                      <div
+                        key={a.id || i}
+                        data-testid="artifact-degraded"
+                        data-format={fmt}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 8,
+                          background: "rgba(196, 164, 106, 0.12)",
+                          border: "1.5px solid #C4A46A",
+                          borderRadius: 12,
+                          padding: "8px 14px",
+                          fontSize: 13,
+                          color: "#8A8178",
+                        }}
+                      >
+                        <span>⚡</span>
+                        <span style={{ fontWeight: 600 }}>{displayName}</span>
+                        <span style={{ fontSize: 11, background: "#C4A46A", color: "#141210", padding: "2px 6px", borderRadius: 4 }}>{isAr ? "جودة منخفضة" : "Degraded"}</span>
+                        <span style={{ fontSize: 10, background: "#141210", color: "#FAF7F1", padding: "2px 5px", borderRadius: 4 }}>{formatLabel}</span>
+                        {a.download_url && a.download_url !== "#" && (
+                          <a href={a.download_url} download={a.filename} target="_blank" rel="noreferrer" style={{ background: "#4A513C", color: "#FFFFFF", borderRadius: 6, padding: "4px 8px", fontSize: 11, fontWeight: 700, textDecoration: "none" }}>
+                            <span>⬇</span> <span>{isAr ? "تحميل" : "Download"}</span>
+                          </a>
+                        )}
                       </div>
                     );
                   }
@@ -587,6 +681,8 @@ function AgentCard({
                     return (
                       <div
                         key={a.id || i}
+                        data-testid="artifact-pending"
+                        data-format={fmt}
                         style={{
                           display: "inline-flex",
                           alignItems: "center",
@@ -600,10 +696,12 @@ function AgentCard({
                         }}
                       >
                         <span>⏳</span>
-                        <span>{a.title || a.filename}</span>
+                        <span>{displayName}</span>
+                        {secondaryLabel && <span style={{ fontSize: 11, opacity: 0.6 }}>({secondaryLabel})</span>}
                         <span style={{ fontSize: 11, color: "#C4A46A" }}>
                           {isAr ? "جارٍ التوليد..." : "Generating..."}
                         </span>
+                        <span style={{ fontSize: 10, background: "#141210", color: "#FAF7F1", padding: "2px 5px", borderRadius: 4 }}>{formatLabel}</span>
                       </div>
                     );
                   }
@@ -611,6 +709,10 @@ function AgentCard({
                   return (
                     <div
                       key={a.id || i}
+                      data-testid="artifact-created"
+                      data-format={fmt}
+                      data-filename={a.filename}
+                      data-session={m.id}
                       style={{
                         display: "inline-flex",
                         alignItems: "center",
@@ -627,9 +729,10 @@ function AgentCard({
                       }}
                     >
                       <span style={{ fontSize: 16 }}>{icon}</span>
-                      <span style={{ fontFamily: "'Noto Naskh Arabic', serif", fontWeight: 700 }}>
-                        {a.title || a.filename}
+                      <span style={{ fontFamily: "'Noto Naskh Arabic', serif", fontWeight: 700 }} title={a.filename}>
+                        {displayName}
                       </span>
+                      {secondaryLabel && <span style={{ fontSize: 11, color: "#8A8178", fontWeight: 400 }}>· {secondaryLabel}</span>}
                       <span
                         style={{
                           fontSize: 10,

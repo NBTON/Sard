@@ -166,9 +166,92 @@ class ChatService:
                 error_message="الرجاء إدخال سؤال قبل الإرسال.",
             )
 
-        # 1. Intent & Modality Classification
+        # 1. Intent & Modality Classification (survives every fallback)
         intent = classify_intent(user_query, messages=messages, attachments=attachments)
         artifacts: list[dict[str, Any]] = []
+
+        def _empty_hedge(query: str) -> str:
+            # Explicit Arabic hedge, never empty string, never shrimp/Eastern/UNESCO canned article
+            return (
+                f"تعذّر توليد إجابة موثقة عن: \"{query[:120]}\" في الوقت الحالي.\n\n"
+                "حفاظًا على الأمانة المعرفية، لا أقدّم توليفًا غير مُسنَد بلا مصادر.\n"
+                "يمكنني مساعدتك في:\n"
+                "- برامج ومسارات سياحية وتراثية مخصصة حسب المنطقة والمدة.\n"
+                "- معلومات موثقة عن المواقع الأثرية والفنون والحرف اليدوية.\n"
+                "- الفعاليات والمواسم الثقافية لوزارة الثقافة.\n\n"
+                "يرجى توضيح المنطقة أو السياق المطلوب، أو إعادة المحاولة."
+            )
+
+        def _maybe_orchestrate(text_for_artifact: str, citations_for_artifact: list[dict[str, str]]) -> list[dict[str, Any]]:
+            # Centralized artifact orchestration used in BOTH hybrid and direct paths.
+            # Invariant: explicit artifact intent (requested_formats) always triggers orchestrator,
+            # even when use_hybrid_retrieval is False or planner failed or model returned empty.
+            # General PDF (SAUDI_CULTURAL_FACTUAL with pdf) must still render as generic document,
+            # not as itinerary-only rendering – orchestrator handles kind via capability + format.
+            needs_artifact = intent.explicit_artifact_request or intent.domain_capability in (
+                Capability.PRESENTATION_DECK,
+                Capability.RECIPE_CARD,
+                Capability.CALENDAR_SYNC,
+                Capability.GREETING_CARD,
+                Capability.ETIQUETTE_SIMULATOR,
+                Capability.ORAL_HISTORY,
+            )
+            # Also cover general artifact case: SAUDI_CULTURAL_FACTUAL with explicit format
+            if not needs_artifact and intent.explicit_artifact_request:
+                needs_artifact = True
+            if not needs_artifact:
+                return []
+            if status_callback:
+                try:
+                    status_callback("generating_artifacts", f"جارٍ إعداد وتوليد المخرجات المطلوبة ({', '.join(intent.requested_formats)})...")
+                except Exception:
+                    pass
+            local_artifacts: list[dict[str, Any]] = []
+            try:
+                generated = self.orchestrator.orchestrate_from_intent(
+                    intent=intent,
+                    raw_text=text_for_artifact or _empty_hedge(user_query),
+                    sources=tuple(citations_for_artifact),
+                )
+                for art_res in generated:
+                    local_artifacts.append(art_res.to_dict())
+                # If orchestrator returned empty but intent requested formats, surface failed artifacts
+                if not local_artifacts:
+                    for fmt in intent.requested_formats:
+                        if fmt != "text":
+                            failed_res = ArtifactResult(
+                                id=f"art-{session_id or 'failed'}-{fmt}",
+                                kind="document",
+                                format=fmt,
+                                title=f"مخرج ثقافي: {intent.extracted_topic}",
+                                filename=f"sard-{fmt}",
+                                mime_type="application/octet-stream",
+                                size_bytes=0,
+                                status="failed",
+                                download_url=None,
+                                error=f"تعذر توليد ملف {fmt.upper()} حالياً. الرجاء إعادة المحاولة لاحقاً.",
+                                error_category="orchestrator_empty",
+                            )
+                            local_artifacts.append(failed_res.to_dict())
+            except Exception as art_exc:
+                logger.exception("Artifact generation failed: %s", art_exc)
+                for fmt in intent.requested_formats:
+                    if fmt != "text":
+                        failed_res = ArtifactResult(
+                            id=f"art-{session_id or 'failed'}-{fmt}",
+                            kind="document",
+                            format=fmt,
+                            title=f"مخرج ثقافي: {intent.extracted_topic}",
+                            filename=f"sard-{fmt}",
+                            mime_type="application/octet-stream",
+                            size_bytes=0,
+                            status="failed",
+                            download_url=None,
+                            error=f"تعذر توليد ملف {fmt.upper()} حالياً. الرجاء إعادة المحاولة لاحقاً.",
+                            error_category="renderer_exception",
+                        )
+                        local_artifacts.append(failed_res.to_dict())
+            return local_artifacts
 
         # Hybrid retrieval path via Isnād Planner & Agentic Cultural Tools
         if use_hybrid_retrieval:
@@ -202,46 +285,16 @@ class ChatService:
                 text_resp = sanitize_cultural_output(cultural_res.answer_text)
                 decision = cultural_res.decision
                 citations = cultural_res.citations
+                # planner_result stays None on fallback, but citations/text are preserved
 
-            # 3. Artifact Orchestration
-            # Check if an artifact is explicitly requested or triggered by capability
-            if intent.explicit_artifact_request or intent.domain_capability in (
-                Capability.PRESENTATION_DECK,
-                Capability.RECIPE_CARD,
-                Capability.CALENDAR_SYNC,
-                Capability.GREETING_CARD,
-                Capability.ETIQUETTE_SIMULATOR,
-                Capability.ORAL_HISTORY,
-            ):
-                if status_callback:
-                    status_callback("generating_artifacts", f"جارٍ إعداد وتوليد المخرجات المطلوبة ({', '.join(intent.requested_formats)})...")
+            # Empty output must be explicit hedge, not empty string
+            if not text_resp or not text_resp.strip():
+                text_resp = _empty_hedge(user_query)
+                if decision is None:
+                    decision = "hedge"
 
-                try:
-                    generated_artifacts = self.orchestrator.orchestrate_from_intent(
-                        intent=intent,
-                        raw_text=text_resp,
-                        sources=tuple(citations),
-                    )
-                    for art_res in generated_artifacts:
-                        artifacts.append(art_res.to_dict())
-                except Exception as art_exc:
-                    logger.exception("Artifact generation failed: %s", art_exc)
-                    # Add failed artifact result to public contract
-                    for fmt in intent.requested_formats:
-                        if fmt != "text":
-                            failed_res = ArtifactResult(
-                                id=f"art-{session_id or 'failed'}",
-                                kind="document",
-                                format=fmt,
-                                title=f"مخرج ثقافي: {intent.extracted_topic}",
-                                filename=f"sard-{fmt}",
-                                mime_type="application/octet-stream",
-                                size_bytes=0,
-                                status="failed",
-                                download_url=None,
-                                error=f"تعذر توليد ملف {fmt.upper()} حالياً. الرجاء إعادة المحاولة لاحقاً.",
-                            )
-                            artifacts.append(failed_res.to_dict())
+            # 3. Artifact Orchestration — always via helper (BOTH paths)
+            artifacts = _maybe_orchestrate(text_resp, citations)
 
             return ChatResult(
                 ok=True,
@@ -252,12 +305,15 @@ class ChatService:
                 artifacts=artifacts,
             )
 
-        # Direct conversation path
+        # Direct conversation path — MUST also support artifact intent
         try:
             model = self._get_model()
         except ModelConfigError as exc:
             logger.warning("Chat model configuration error: %s", exc)
-            return ChatResult(ok=False, error_message=str(exc))
+            # Even on config error, if artifact requested, return failed artifact so SSE can surface it
+            if intent.explicit_artifact_request:
+                artifacts = _maybe_orchestrate(_empty_hedge(user_query), [])
+            return ChatResult(ok=False, error_message=str(exc), artifacts=artifacts)
 
         try:
             lc_messages: list[BaseMessage] = [SystemMessage(content=_SYSTEM_PROMPT)]
@@ -277,17 +333,23 @@ class ChatService:
             text = getattr(response, "content", "")
             if not isinstance(text, str):
                 text = str(text)
+            text = sanitize_cultural_output(text)
+            if not text or not text.strip():
+                text = _empty_hedge(user_query)
 
-            return ChatResult(ok=True, text=sanitize_cultural_output(text))
+            artifacts = _maybe_orchestrate(text, [])
+            return ChatResult(ok=True, text=text, artifacts=artifacts)
 
         except Exception as exc:
             logger.exception("Unexpected error while invoking the chat model: %s", exc)
+            artifacts = _maybe_orchestrate(_empty_hedge(user_query), []) if intent.explicit_artifact_request else []
             return ChatResult(
                 ok=False,
                 error_message=(
                     "حدث خطأ غير متوقع أثناء الاتصال بنموذج الدردشة. "
                     "الرجاء المحاولة مرة أخرى لاحقًا."
                 ),
+                artifacts=artifacts,
             )
 
 
