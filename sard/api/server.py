@@ -591,7 +591,7 @@ async def chat_endpoint(req: ChatRequest):
                             }, ensure_ascii=False),
                         }
 
-                    # Await future with timeout; cancellation propagates
+                    # Await future with timeout; cancellation is fallback, not abort
                     if not future.done():
                         try:
                             hybrid_chat_res = await asyncio.wait_for(future, timeout=max(0.5, deadline - time.monotonic()))
@@ -600,13 +600,14 @@ async def chat_endpoint(req: ChatRequest):
                             logger.warning("Hybrid chat future timed out (run_id=%s).", run_id)
                             hybrid_chat_res = None
                         except asyncio.CancelledError:
-                            logger.info("Hybrid chat cancelled (run_id=%s).", run_id)
-                            raise
+                            logger.info("Hybrid chat cancelled (run_id=%s). Falling back to direct.", run_id)
+                            hybrid_chat_res = None
                     else:
                         try:
                             hybrid_chat_res = await future
                         except asyncio.CancelledError:
-                            raise
+                            logger.info("Hybrid chat cancelled (run_id=%s). Falling back to direct.", run_id)
+                            hybrid_chat_res = None
                         except Exception as exc:
                             logger.warning("Isnād planner future exception (run_id=%s): %s. Falling back to direct chat.", run_id, type(exc).__name__)
                             hybrid_chat_res = None
