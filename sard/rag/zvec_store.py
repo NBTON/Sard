@@ -391,6 +391,80 @@ class ZvecRepository:
                 found.append({"path": str(meta_path.parent), **meta})
         return found
 
+    @classmethod
+    def diagnose_collection_compatibility(
+        cls, base_path: str, embedding_model: str, expected_dimension: Optional[int] = None
+    ) -> dict[str, Any]:
+        """Provide detailed, actionable diagnostic status for collections at base_path."""
+        base = Path(base_path)
+        if not base.exists():
+            return {
+                "status": "missing_base_path",
+                "compatible": False,
+                "message": f"مسار المجموعة الأساسي غير موجود ({base_path}). قم بتشغيل أمر الفهرسة لإنشاء المجموعة.",
+                "collections": [],
+            }
+        collections = cls.inspect_collections_for_model(base_path, embedding_model)
+        if not collections:
+            all_meta_paths = list(base.glob("*/schema-v*/sard_collection_meta.json"))
+            if all_meta_paths:
+                found_models = []
+                for p in all_meta_paths:
+                    try:
+                        m = json.loads(p.read_text(encoding="utf-8"))
+                        found_models.append(m.get("embedding_model"))
+                    except Exception:
+                        pass
+                return {
+                    "status": "model_mismatch",
+                    "compatible": False,
+                    "message": f"لا توجد مجموعة مهيأة للنموذج المطلوب ({embedding_model}). النماذج المتوفرة: {found_models}. أعد الفهرسة عبر `uv run python -m sard.cli.rag ingest data/corpus`.",
+                    "collections": [],
+                }
+            return {
+                "status": "empty_repository",
+                "compatible": False,
+                "message": "لا توجد أي مجموعات مفهرسة بعد في هذا المسار. قم بالفهرسة أولاً.",
+                "collections": [],
+            }
+
+        for meta in collections:
+            if str(meta.get("schema_version")) != SCHEMA_VERSION:
+                return {
+                    "status": "incompatible_schema_version",
+                    "compatible": False,
+                    "message": f"المجموعة مبنية بمخطط قديم (schema-v{meta.get('schema_version')})، والمخطط الحالي هو schema-v{SCHEMA_VERSION}. يلزم إعادة الفهرسة.",
+                    "collections": collections,
+                }
+            if meta.get("normalization_version") != NORMALIZATION_VERSION:
+                return {
+                    "status": "incompatible_normalization_version",
+                    "compatible": False,
+                    "message": f"المجموعة مبنية بإصدار تسوية قديم ({meta.get('normalization_version')}). يلزم إعادة الفهرسة.",
+                    "collections": collections,
+                }
+            if meta.get("chunking_version") != CHUNKING_VERSION:
+                return {
+                    "status": "incompatible_chunking_version",
+                    "compatible": False,
+                    "message": f"المجموعة مبنية بإصدار تقطيع قديم ({meta.get('chunking_version')}). يلزم إعادة الفهرسة.",
+                    "collections": collections,
+                }
+            if expected_dimension is not None and meta.get("embedding_dimension") != expected_dimension:
+                return {
+                    "status": "incompatible_dimension",
+                    "compatible": False,
+                    "message": f"بُعد التضمين في المجموعة ({meta.get('embedding_dimension')}) لا يطابق البُعد المتوقع ({expected_dimension}).",
+                    "collections": collections,
+                }
+
+        return {
+            "status": "ready",
+            "compatible": True,
+            "message": "المجموعة متوافقة وجاهزة للاستخدام.",
+            "collections": collections,
+        }
+
     def close(self) -> None:
         """Best-effort clean shutdown: flush pending writes and release the
         Python reference so Zvec's underlying resources can be freed."""
@@ -517,6 +591,9 @@ class ZvecRepository:
         candidates = [self._doc_to_candidate(d) for d in results]
         for rank, c in enumerate(candidates, start=1):
             c.dense_rank = rank
+            if c.dense_score is not None:
+                c.dense_score = round(max(-1.0, min(1.0, 1.0 - float(c.dense_score))), 4)
+            c.score_type = "dense"
         return candidates
 
     def fts_search(
@@ -542,6 +619,7 @@ class ZvecRepository:
             c.fts_score = c.dense_score
             c.dense_score = None
             c.fts_rank = rank
+            c.score_type = "fts"
         return candidates
 
     def fetch_by_ids(self, chunk_ids: list[str]) -> dict[str, RetrievedCandidate]:
@@ -584,6 +662,7 @@ class ZvecRepository:
             page_number=page_number if page_number not in (None, 0) else page_number,
             content_hash=f.get("content_hash", ""),
             dense_score=doc.score,
+            region=extra_metadata.get("region") or None,
             extra_metadata=extra_metadata,
         )
 

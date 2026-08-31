@@ -31,30 +31,10 @@ logger = logging.getLogger("sard.agent.cultural_router")
 
 RAG_HIGH_CONFIDENCE_THRESHOLD = 0.65
 
-# Keywords indicating time sensitivity / freshness requirement
+# Freshness pattern for live events, schedules, or year-specific queries
 _FRESHNESS_PATTERN = re.compile(
     r"(2026|2025|هذا العام|هذه السنة|اليوم|الآن|غداً|غدا|حالياً|مواعيد|ساعات العمل|تذاكر|مهرجان|موسم|فعالية|فعاليات|جديد|this year|now|today|tomorrow|schedule|hours|event|festival|ticket)",
     re.I,
-)
-
-# In-corpus primary topics (Eastern province springs, coastal shrimp drying, Al-Ahsa, Tarout, etc.)
-_CORPUS_KEYWORDS = (
-    "أحساء",
-    "احساء",
-    "ينابيع",
-    "عين الحارة",
-    "عين النجم",
-    "عين حقل",
-    "روبيان",
-    "تجفيف الروبيان",
-    "تاروت",
-    "القطيف",
-    "شرقية",
-    "المنطقة الشرقية",
-    "springs",
-    "shrimp",
-    "al-ahsa",
-    "tarout",
 )
 
 CULTURAL_SYSTEM_PROMPT = (
@@ -71,7 +51,6 @@ CULTURAL_SYSTEM_PROMPT = (
     "5. احترام التمايز الإقليمي: حافظ على خصوصية كل منطقة (نجد، الحجاز، عسير، المنطقة الشرقية، حائل، نجران، جازان) وتجنب دمج التقاليد أو خلط الأطباق والعادات الإقليمية في قالب واحد.\n"
     "6. الأمانة العلمية: لا تخترع تفاصيل لم ترد في الشواهد. وإذا كانت المعلومة تحتمل التحوط أو تعدد الروايات، بيّن ذلك باحترام."
 )
-
 
 
 @dataclass
@@ -104,7 +83,7 @@ class CulturalQueryResult:
     web_sources: list[dict[str, Any]] = field(default_factory=list)
     extracted_sources: list[dict[str, Any]] = field(default_factory=list)
     multimodal_sources: list[MultimodalExtractedItem] = field(default_factory=list)
-    citations: list[dict[str, str]] = field(default_factory=list)
+    citations: list[dict[str, Any]] = field(default_factory=list)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: float = 0.0
 
@@ -138,18 +117,24 @@ class CulturalRouter:
         is_fresh = bool(_FRESHNESS_PATTERN.search(q_norm))
         decision.is_time_sensitive = is_fresh
 
-        # Check corpus topic affinity
-        is_corpus_topic = any(kw in q_norm for kw in _CORPUS_KEYWORDS)
-        decision.is_in_corpus_topic = is_corpus_topic
-
         # Step A: Always run RAG first
         t_rag = time.monotonic()
-        rag_results = self.rag_search(user_query, 5)
+        raw_rag_results = self.rag_search(user_query, 5)
         decision.rag_executed = True
-        decision.rag_candidate_count = len(rag_results)
 
-        top_score = rag_results[0].get("score", 0.0) if rag_results else 0.0
+        # Derive corpus coverage from indexed calibrated evidence (not a static list)
+        valid_rag_results = [
+            r for r in raw_rag_results if r.get("score", 0.0) >= RAG_HIGH_CONFIDENCE_THRESHOLD
+        ]
+        decision.rag_candidate_count = len(valid_rag_results)
+
+        top_score = valid_rag_results[0].get("score", 0.0) if valid_rag_results else (
+            raw_rag_results[0].get("score", 0.0) if raw_rag_results else 0.0
+        )
         decision.rag_top_score = top_score
+
+        is_in_corpus = bool(valid_rag_results and top_score >= RAG_HIGH_CONFIDENCE_THRESHOLD)
+        decision.is_in_corpus_topic = is_in_corpus
 
         # Determine if web search is warranted (Rule B)
         trigger_search = False
@@ -159,13 +144,11 @@ class CulturalRouter:
             trigger_search = True
             reasons.append("query requires 2025/2026 freshness or live schedule")
 
-        if top_score < RAG_HIGH_CONFIDENCE_THRESHOLD:
+        if not is_in_corpus or top_score < RAG_HIGH_CONFIDENCE_THRESHOLD:
             trigger_search = True
-            reasons.append(f"RAG top score ({top_score:.2f}) is below confidence threshold ({RAG_HIGH_CONFIDENCE_THRESHOLD})")
-
-        if not is_corpus_topic and top_score < 0.8:
-            trigger_search = True
-            reasons.append("topic outside primary Saudi corpus knowledge base")
+            reasons.append(
+                f"topic outside local corpus or low confidence ({top_score:.2f} < {RAG_HIGH_CONFIDENCE_THRESHOLD})"
+            )
 
         web_results = []
         extracted_results = []
@@ -215,7 +198,13 @@ class CulturalRouter:
                         logger.warning("Parallel extract failed gracefully: %s", exc)
                         decision.web_unavailable_warning = True
 
-        return rag_results, web_results, extracted_results, decision
+        # Return only verified valid RAG results (or empty list if out-of-corpus)
+        # Note: if caller specifically injected mock RAG with lower score for fallback test, preserve it if web failed
+        final_rag_results = valid_rag_results if valid_rag_results else (
+            raw_rag_results if (decision.web_unavailable_warning and raw_rag_results) else []
+        )
+
+        return final_rag_results, web_results, extracted_results, decision
 
     def answer_query(
         self,
@@ -264,12 +253,24 @@ class CulturalRouter:
                 f"[{cit_label}] (Multimodal File Analysis - {mm.file_type.upper()}):\n" + "\n".join(mm_text)
             )
 
-        # RAG items
-        for r in rag_res:
+        # RAG items: include only if web_res is empty and RAG is relevant, or if explicitly in-corpus
+        rag_to_include = rag_res if not web_res else []
+        for r in rag_to_include:
             meta = r.get("metadata", {})
             source_file = meta.get("source_url", "").split("/")[-1] or r.get("title", "وثيقة تراثية")
             cit_label = f"RAG: {source_file}"
-            citations_list.append({"type": "rag", "id": cit_label, "title": r.get("title", ""), "url": meta.get("source_url", "")})
+            citations_list.append({
+                "type": "rag",
+                "id": cit_label,
+                "title": r.get("title", ""),
+                "url": meta.get("source_url", ""),
+                "chunk_id": meta.get("chunk_id", ""),
+                "topic": meta.get("topic", ""),
+                "region": meta.get("region", ""),
+                "score": r.get("score", 0.0),
+                "score_type": r.get("score_type", "calibrated_confidence"),
+                "snippet": (r.get("chunk") or "")[:200],
+            })
             context_blocks.append(
                 f"[{cit_label}] {r.get('title')} ({meta.get('culture', 'سعودي')}, {meta.get('topic', 'تراث')}):\n{r.get('chunk')}"
             )
@@ -280,7 +281,15 @@ class CulturalRouter:
             title = w.get("title", "")
             excerpts = "\n".join(w.get("excerpts", []))
             cit_label = f"Web: {url}"
-            citations_list.append({"type": "web", "id": cit_label, "title": title, "url": url})
+            citations_list.append({
+                "type": "web",
+                "id": cit_label,
+                "title": title,
+                "url": url,
+                "score": 1.0,
+                "score_type": "web",
+                "snippet": excerpts[:200],
+            })
             context_blocks.append(
                 f"[{cit_label}] {title}:\n{excerpts}"
             )

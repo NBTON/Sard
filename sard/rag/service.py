@@ -65,11 +65,15 @@ class RAGService:
             settings.zvec_collection_path, embedding_model_id
         )
         if repository is None:
-            raise RAGServiceUnavailableError(
+            diag = ZvecRepository.diagnose_collection_compatibility(
+                settings.zvec_collection_path, embedding_model_id
+            )
+            msg = diag.get("message") or (
                 "لا توجد مجموعة بيانات مُفهرسة بعد لنموذج التضمين الحالي "
                 f"({embedding_model_id}). شغّل أمر الفهرسة أولًا: "
                 "`uv run python -m sard.cli.rag ingest data/corpus`."
             )
+            raise RAGServiceUnavailableError(msg)
 
         breaker = CircuitBreaker()
         embedding_service = EmbeddingService(settings=settings, circuit_breaker=breaker)

@@ -143,7 +143,7 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
     """Retrieve from our curated cultural knowledge base.
 
     Returns:
-        List of dicts: ``[{"source": str, "title": str, "chunk": str, "score": float, "metadata": dict}]``
+        List of dicts: ``[{"source": str, "title": str, "chunk": str, "score": float, "score_type": str, "metadata": dict}]``
     """
     t0 = time.monotonic()
     query_str = (query or "").strip()
@@ -164,8 +164,9 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
             try:
                 candidates = repo.fts_search(query_str, topk=k)
                 for cand in candidates:
-
-                    score_val = getattr(cand, "fts_score", 0.85) or 0.85
+                    score_val = getattr(cand, "confidence_score", None) or getattr(cand, "fts_score", 0.85) or 0.85
+                    if float(score_val) < 0.65:
+                        continue
                     meta = _infer_cultural_metadata(cand.title, cand.content, cand.topic)
                     meta.update({
                         "source_name": cand.source_name,
@@ -174,12 +175,15 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
                         "chunk_id": cand.chunk_id,
                         "publication_date": cand.publication_date or "",
                         "page_number": cand.page_number,
+                        "score_type": "fts",
+                        "confidence_score": round(min(0.95, float(score_val)), 4),
                     })
                     results.append({
                         "source": cand.source_name or "سرد - قاعدة المعرفة الثقافية",
                         "title": cand.title or "وثيقة تراثية",
                         "chunk": cand.content,
                         "score": round(min(0.95, float(score_val)), 4),
+                        "score_type": "fts",
                         "metadata": meta,
                     })
             finally:
@@ -197,9 +201,10 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
                 results.append(cr)
                 existing_chunks.add(cr["chunk"][:100])
 
+    # Filter strictly to relevant items
+    results = [r for r in results if r.get("score", 0.0) >= 0.65]
     results.sort(key=lambda x: x["score"], reverse=True)
     results = results[:k]
-
 
     latency_ms = (time.monotonic() - t0) * 1000
     logger.info(
@@ -213,17 +218,17 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
 
 
 def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
-    """Deterministic local corpus scanner for data/corpus and data/cultural."""
+    """Deterministic local corpus scanner with strict topic and entity relevance calibration."""
     root = Path(__file__).resolve().parents[3]
     corpus_dirs = [root / "data" / "corpus", root / "data" / "cultural"]
-    
+
     stop_words = {
         "في", "من", "على", "عن", "إلى", "الى", "مع", "كيف", "ما", "ماذا", "هل", "تتم",
         "ممارسة", "طريقة", "ماذا", "هو", "هي", "هذا", "هذه", "التي", "الذي", "الذين",
+        "تراث", "تراثية", "التقليدية", "تقليدية", "تاريخ", "تاريخية", "عام", "سنة",
         "the", "a", "an", "in", "of", "and", "how", "what", "is", "are", "for", "to",
     }
     raw_terms = [t for t in re.split(r"[\s,،.?؟]+", query.lower()) if len(t) > 1]
-
 
     def _clean_token(t: str) -> str:
         t = re.sub(r"[^\w\u0600-\u06FF]", "", t).strip()
@@ -233,11 +238,29 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
                 break
         return t
 
-
     cleaned_terms = [_clean_token(t) for t in raw_terms if len(_clean_token(t)) >= 2 and _clean_token(t) not in stop_words]
     terms = cleaned_terms or raw_terms
     if not terms:
         return []
+
+    q_lower = query.lower()
+
+    # Geographical regions mapping to detect cross-region mismatch
+    region_clusters = {
+        "qassim": ["قصيم", "بريدة", "عنيزة", "رس", "بكرية"],
+        "asir": ["عسير", "أبها", "ابها", "رجال ألمع", "المع", "خميس مشيط", "سودة"],
+        "hijaz": ["حجاز", "جدة", "مكة", "مدينة", "طائف", "ينبع", "علا"],
+        "jouf": ["جوف", "سكاكا", "دومة الجندل", "قريات"],
+        "jazan": ["جازان", "جيزان", "فرسان", "صبيا", "أبو عريش"],
+        "najd": ["نجد", "رياض", "درعية", "خرج", "وشم", "سدير"],
+        "north": ["تبوك", "حائل", "عرعر", "حدود شمالية"],
+        "eastern": ["شرقية", "أحساء", "احساء", "قطيف", "تاروت", "دمام", "خبر", "هفوف", "سيهات", "جبيل", "خفجي"],
+    }
+
+    query_regions = set()
+    for reg_name, kws in region_clusters.items():
+        if any(kw in q_lower for kw in kws):
+            query_regions.add(reg_name)
 
     scored_docs: list[dict[str, Any]] = []
 
@@ -259,29 +282,70 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
             title = meta_json.get("title") or md_file.stem.replace("-", " ")
             source_name = meta_json.get("source_name") or "دليل التراث السعودي"
             source_url = meta_json.get("source_url") or f"file://{md_file.name}"
+            topic_str = meta_json.get("topic", "")
 
-            # Calculate keyword relevance score
+            # Document region
+            doc_text_lower = (text + " " + title + " " + topic_str).lower()
+            doc_regions = set()
+            for reg_name, kws in region_clusters.items():
+                if any(kw in doc_text_lower for kw in kws):
+                    doc_regions.add(reg_name)
+            if not doc_regions:
+                doc_regions.add("eastern")
+
+            # Reject geographic mismatch
+            if query_regions and not (query_regions & doc_regions):
+                continue
+
+            # Pilot corpus topic specificity checks
+            is_springs_doc = (
+                "springs" in md_file.parent.name
+                or "springs" in topic_str.lower()
+                or any(k in doc_text_lower for k in ["ينابيع", "عين حارة", "عيون حارة", "مياه حارة"])
+            )
+            is_shrimp_doc = (
+                "coastal" in md_file.parent.name
+                or "shrimp" in topic_str.lower()
+                or any(k in doc_text_lower for k in ["روبيان", "ربيان", "تجفيف"])
+            )
+
+            is_springs_query = any(k in q_lower for k in ["ينابيع", "عين حارة", "عيون حارة", "عين الحارة", "عيون الأحساء", "عيون الاحساء", "مياه حارة", "مياه كبريتية", "springs", "استشفاء"])
+            is_shrimp_query = any(k in q_lower for k in ["روبيان", "ربيان", "تجفيف الروبيان", "تجفيف الربيان", "الروبيان المجفف", "الربيان المجفف", "تاروت", "shrimp"])
+
+            if is_springs_doc and not is_springs_query:
+                continue
+            if is_shrimp_doc and not is_shrimp_query:
+                continue
+
             content_clean = text.lower()
             matches = sum(1 for term in terms if term in content_clean)
-            if matches > 0:
-                match_ratio = matches / max(len(terms), 1)
-                score = min(0.95, match_ratio * 0.70 + (0.25 if match_ratio >= 0.5 else 0.10))
+            if matches == 0:
+                continue
 
-                inferred = _infer_cultural_metadata(title, text, meta_json.get("topic", ""))
-                inferred.update({
-                    "source_name": source_name,
-                    "source_url": source_url,
-                    "citation_id": f"CIT-CORPUS-{md_file.stem[:8].upper()}",
-                    "chunk_id": f"CHUNK-{md_file.stem[:8].upper()}",
-                    "publication_date": meta_json.get("publication_date", ""),
-                })
-                scored_docs.append({
-                    "source": source_name,
-                    "title": title,
-                    "chunk": text[:1500],
-                    "score": round(score, 4),
-                    "metadata": inferred,
-                })
+            match_ratio = matches / max(len(terms), 1)
+            score = min(0.95, match_ratio * 0.70 + (0.25 if match_ratio >= 0.5 else 0.10))
+
+            if score < 0.65:
+                continue
+
+            inferred = _infer_cultural_metadata(title, text, topic_str)
+            inferred.update({
+                "source_name": source_name,
+                "source_url": source_url,
+                "citation_id": f"CIT-CORPUS-{md_file.stem[:8].upper()}",
+                "chunk_id": f"CHUNK-{md_file.stem[:8].upper()}",
+                "publication_date": meta_json.get("publication_date", ""),
+                "score_type": "fts",
+                "confidence_score": round(score, 4),
+            })
+            scored_docs.append({
+                "source": source_name,
+                "title": title,
+                "chunk": text[:1500],
+                "score": round(score, 4),
+                "score_type": "fts",
+                "metadata": inferred,
+            })
 
     scored_docs.sort(key=lambda x: x["score"], reverse=True)
     return scored_docs[:k]

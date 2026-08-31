@@ -118,6 +118,10 @@ class RerankService:
                         "NVIDIA reranker returned a non-numeric relevance score.",
                     )
                 original.rerank_score = float(score)
+                original.confidence_score = round(float(score), 4)
+                original.score_type = "rerank"
+                rerank_thresh = getattr(self._settings, "rerank_relevance_threshold", 0.45)
+                original.is_relevant = (original.rerank_score >= rerank_thresh)
                 original.rerank_rank = rank
                 output.append(original)
             if not output:
@@ -125,7 +129,8 @@ class RerankService:
                     FailureCategory.MALFORMED_OUTPUT,
                     "NVIDIA reranker results could not be mapped back to source chunks.",
                 )
-            return output[:top_n]
+            relevant_output = [c for c in output if c.is_relevant]
+            return relevant_output[:top_n]
 
         try:
             result, events = run_with_fallback(
@@ -160,17 +165,21 @@ class RerankService:
     ) -> RerankOutcome:
         """Deterministic fallback: prefer existing fused rank, else dense,
         else full-text ranking — whichever score is actually present."""
-        has_fused = any(c.fused_score is not None for c in candidates)
-        has_dense = any(c.dense_score is not None for c in candidates)
+        relevant_candidates = [c for c in candidates if getattr(c, "is_relevant", True)]
+        if not relevant_candidates:
+            return RerankOutcome(candidates=[], method_used=method, events=[])
+
+        has_fused = any(c.fused_score is not None for c in relevant_candidates)
+        has_dense = any(c.dense_score is not None for c in relevant_candidates)
 
         if has_fused:
-            ranked = sorted(candidates, key=lambda c: c.fused_score or 0.0, reverse=True)
+            ranked = sorted(relevant_candidates, key=lambda c: c.fused_score or 0.0, reverse=True)
             chosen_method = method
         elif has_dense:
-            ranked = sorted(candidates, key=lambda c: c.dense_score or 0.0, reverse=True)
+            ranked = sorted(relevant_candidates, key=lambda c: c.dense_score or 0.0, reverse=True)
             chosen_method = "dense_fallback"
         else:
-            ranked = sorted(candidates, key=lambda c: c.fts_score or 0.0, reverse=True)
+            ranked = sorted(relevant_candidates, key=lambda c: c.fts_score or 0.0, reverse=True)
             chosen_method = "fts_fallback"
 
         for rank, c in enumerate(ranked, start=1):

@@ -204,3 +204,65 @@ def test_fusion_deduplicates_by_content_hash_across_different_chunk_ids():
     fts = [c("chunk-2", 1)]
     fused = reciprocal_rank_fusion(dense, fts)
     assert len(fused) == 1  # deduplicated despite different chunk IDs
+
+
+def test_low_confidence_retrieval_returns_zero_fused_candidates_and_abstention_decision(tmp_path):
+    """When dense similarity is low and no FTS matches, retrieval must return 0 fused candidates and mark is_relevant=False."""
+    repo = ZvecRepository.open_or_create(
+        base_path=str(tmp_path),
+        embedding_model="embed-primary",
+        embedding_dimension=EMBED_DIM,
+    )
+    chunk = _make_chunk("الينابيع الحارة في الأحساء", "DOC-1", "springs")
+    # Vector orthogonal to query
+    embedded = EmbeddedChunk(chunk, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0], "embed-primary", EMBED_DIM)
+    repo.upsert_chunks([embedded], created_at="2024-01-01T00:00:00Z")
+
+    class OrthogonalEmbeddings:
+        def embed_query(self, query):
+            # Orthogonal vector -> cosine similarity = 0.0
+            return [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+
+    service = RetrievalService(
+        RetrievalDependencies(
+            repository=repo,
+            embedding_model_id="embed-primary",
+            embedding_service=OrthogonalEmbeddings(),
+        ),
+        settings=_settings(dense_similarity_threshold=0.65, min_evidence_confidence=0.60),
+    )
+
+    # Unrelated query with zero lexical overlap
+    result = service.retrieve(_rewritten("زراعة النخيل في القصيم"))
+
+    assert result.is_relevant is False
+    assert result.relevance_decision == "no_relevant_evidence"
+    assert len(result.fused_candidates) == 0
+    assert result.top_confidence < 0.60
+    assert any("لم يتم العثور على شواهد" in w for w in result.warnings)
+
+
+def test_diagnose_collection_compatibility(tmp_path):
+    """Actionable diagnostics should detect missing path, model mismatch, and compatible states."""
+    # 1. Non-existent path
+    diag = ZvecRepository.diagnose_collection_compatibility(str(tmp_path / "nonexistent"), "embed-primary")
+    assert diag["compatible"] is False
+    assert diag["status"] == "missing_base_path"
+
+    # 2. Create collection for model A
+    repo = ZvecRepository.open_or_create(
+        base_path=str(tmp_path / "zvec"),
+        embedding_model="model-A",
+        embedding_dimension=EMBED_DIM,
+    )
+    repo.close()
+
+    # 3. Model mismatch for model B
+    diag_b = ZvecRepository.diagnose_collection_compatibility(str(tmp_path / "zvec"), "model-B")
+    assert diag_b["compatible"] is False
+    assert diag_b["status"] == "model_mismatch"
+
+    # 4. Ready for model A
+    diag_a = ZvecRepository.diagnose_collection_compatibility(str(tmp_path / "zvec"), "model-A", expected_dimension=EMBED_DIM)
+    assert diag_a["compatible"] is True
+    assert diag_a["status"] == "ready"

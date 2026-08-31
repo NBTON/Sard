@@ -267,3 +267,220 @@ def test_chat_service_hybrid_retrieval_integration():
     assert len(result.citations) > 0
 
 
+# =========================================================================
+# Regression Suite: Out-of-Corpus, Out-of-Domain, and Zero Contamination
+# =========================================================================
+
+CONTAMINATION_TERMS = [
+    "تجفيف الروبيان",
+    "تجفيف الربيان",
+    "الروبيان المجفف",
+    "العيون الحارة",
+    "الينابيع الحارة",
+    "جزيرة تاروت",
+]
+
+
+def assert_no_topic_contamination(query: str, res: CulturalQueryResult):
+    """Automatically fail unrelated cases if retrieved context or answer contains pilot contamination."""
+    q_norm = query.lower()
+    is_legit_shrimp = any(k in q_norm for k in ["روبيان", "ربيان", "تاروت", "shrimp", "tarout"])
+    is_legit_springs = any(k in q_norm for k in ["ينابيع", "عين حارة", "عيون حارة", "عين الحارة", "springs", "كبريتية"])
+
+    if is_legit_shrimp or is_legit_springs:
+        return
+
+    # Check RAG sources
+    for r in res.rag_sources:
+        chunk_text = (r.get("chunk", "") + " " + r.get("title", "")).lower()
+        for term in CONTAMINATION_TERMS:
+            assert term not in chunk_text, (
+                f"Topic contamination detected in RAG sources for query '{query}': found '{term}'"
+            )
+
+    # Check citations
+    for c in res.citations:
+        cit_text = (str(c.get("title", "")) + " " + str(c.get("snippet", "")) + " " + str(c.get("id", ""))).lower()
+        for term in CONTAMINATION_TERMS:
+            assert term not in cit_text, (
+                f"Topic contamination detected in citations for query '{query}': found '{term}'"
+            )
+
+    # Check answer text
+    answer_lower = res.answer_text.lower()
+    for term in CONTAMINATION_TERMS:
+        assert term not in answer_lower, (
+            f"Topic contamination detected in answer text for query '{query}': found '{term}'"
+        )
+
+
+def _mock_web_search_for(query: str):
+    """Returns mock web results tailored to the query."""
+    return [
+        {
+            "url": f"https://saudipedia.com/{abs(hash(query))}",
+            "title": f"توثيق رسمي: {query}",
+            "excerpts": [f"معلومات موثقة وشاملة حول {query} وتاريخها وتقاليدها العريقة."],
+            "publish_date": "2026-01-01",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "زراعة النخيل في القصيم",
+        "العمارة التقليدية في رجال ألمع",
+        "تاريخ جدة البلد",
+        "الحرف التقليدية في الجوف",
+        "التراث البحري في جازان",
+    ],
+)
+def test_out_of_corpus_saudi_queries_route_to_web_without_contamination(query):
+    """Out-of-corpus Saudi cultural queries must reject local pilot corpus, route to web, and have zero contamination."""
+    mock_search = MagicMock(side_effect=lambda objective, queries, limit=3: _mock_web_search_for(query))
+    router = CulturalRouter(parallel_search_fn=mock_search, parallel_extract_fn=lambda *a, **kw: [])
+
+    rag_res, web_res, ext_res, decision = router.route_and_retrieve(query)
+
+    # Local RAG must return 0 relevant results
+    assert len(rag_res) == 0, f"RAG returned local chunks for out-of-corpus query '{query}'"
+    assert decision.is_in_corpus_topic is False
+    assert decision.web_search_triggered is True
+
+    # Answer query
+    res = router.answer_query(query)
+    assert len(res.rag_sources) == 0
+    assert len(res.web_sources) > 0
+    assert all(c["type"] == "web" for c in res.citations)
+
+    # Assert ZERO topic contamination
+    assert_no_topic_contamination(query, res)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Explain photosynthesis",
+        "Create a project-management report",
+    ],
+)
+def test_out_of_domain_general_queries_zero_local_results_zero_contamination(query):
+    """General out-of-domain queries must return 0 local results and zero contamination."""
+    router = CulturalRouter(parallel_search_fn=lambda *a, **kw: [], parallel_extract_fn=lambda *a, **kw: [])
+
+    rag_res, web_res, ext_res, decision = router.route_and_retrieve(query)
+
+    assert len(rag_res) == 0, f"RAG returned local chunks for non-cultural query '{query}'"
+    assert decision.is_in_corpus_topic is False
+
+    res = router.answer_query(query)
+    assert len(res.rag_sources) == 0
+    assert len(res.citations) == 0
+
+    assert_no_topic_contamination(query, res)
+
+
+def test_legitimate_shrimp_drying_query_passes_in_corpus():
+    """Legitimate shrimp-drying query must pass via RAG without triggering web search."""
+    router = CulturalRouter()
+    query = "كيف تتم ممارسة تجفيف الروبيان التقليدية في جزيرة تاروت بالمنطقة الشرقية؟"
+
+    rag_res, web_res, ext_res, decision = router.route_and_retrieve(query)
+
+    assert decision.is_in_corpus_topic is True
+    assert decision.rag_candidate_count > 0
+    assert decision.rag_top_score >= RAG_HIGH_CONFIDENCE_THRESHOLD
+    assert decision.web_search_triggered is False
+    assert len(rag_res) > 0
+
+    res = router.answer_query(query)
+    assert len(res.rag_sources) > 0
+    assert len(res.web_sources) == 0
+    assert any(c["type"] == "rag" for c in res.citations)
+
+
+def test_legitimate_al_ahsa_springs_query_passes_in_corpus():
+    """Legitimate Al-Ahsa springs query must pass via RAG without triggering web search."""
+    router = CulturalRouter()
+    query = "أين تقع أشهر الينابيع والعيون الحارة في واحة الأحساء بالمنطقة الشرقية؟"
+
+    rag_res, web_res, ext_res, decision = router.route_and_retrieve(query)
+
+    assert decision.is_in_corpus_topic is True
+    assert decision.rag_candidate_count > 0
+    assert decision.rag_top_score >= RAG_HIGH_CONFIDENCE_THRESHOLD
+    assert decision.web_search_triggered is False
+    assert len(rag_res) > 0
+
+    res = router.answer_query(query)
+    assert len(res.rag_sources) > 0
+    assert len(res.web_sources) == 0
+    assert any(c["type"] == "rag" for c in res.citations)
+
+
+def test_comprehensive_metrics_and_zero_contamination_rate():
+    """Evaluate overall metrics across benchmark query set to verify zero topic-contamination."""
+    benchmark_queries = [
+        # In-corpus (2)
+        ("كيف تتم ممارسة تجفيف الروبيان التقليدية في جزيرة تاروت بالمنطقة الشرقية؟", True, False),
+        ("أين تقع أشهر الينابيع والعيون الحارة في واحة الأحساء بالمنطقة الشرقية؟", True, False),
+        # Out-of-corpus cultural (5)
+        ("زراعة النخيل في القصيم", False, True),
+        ("العمارة التقليدية في رجال ألمع", False, True),
+        ("تاريخ جدة البلد", False, True),
+        ("الحرف التقليدية في الجوف", False, True),
+        ("التراث البحري في جازان", False, True),
+        # Out-of-domain general (2)
+        ("Explain photosynthesis", False, True),
+        ("Create a project-management report", False, True),
+        # Time-sensitive event (1)
+        ("ما هي أبرز مواسم وفعاليات وزارة الثقافة المقامة هذا العام 2026؟", False, True),
+    ]
+
+    mock_search = MagicMock(side_effect=lambda objective, queries, limit=3: _mock_web_search_for(queries[0]))
+    router = CulturalRouter(parallel_search_fn=mock_search, parallel_extract_fn=lambda *a, **kw: [])
+
+    in_corpus_hits = 0
+    in_corpus_total = 0
+    out_of_domain_rejected = 0
+    out_of_domain_total = 0
+    web_routing_correct = 0
+    total_queries = len(benchmark_queries)
+    contaminated_unrelated = 0
+    unrelated_total = 0
+
+    for query, is_in_corpus, should_web_route in benchmark_queries:
+        rag_res, web_res, ext_res, decision = router.route_and_retrieve(query)
+        res = router.answer_query(query)
+
+        if is_in_corpus:
+            in_corpus_total += 1
+            if len(res.rag_sources) > 0 and not decision.web_search_triggered:
+                in_corpus_hits += 1
+        else:
+            out_of_domain_total += 1
+            unrelated_total += 1
+            if len(rag_res) == 0:
+                out_of_domain_rejected += 1
+
+            # Check contamination
+            try:
+                assert_no_topic_contamination(query, res)
+            except AssertionError:
+                contaminated_unrelated += 1
+
+        if decision.web_search_triggered == should_web_route:
+            web_routing_correct += 1
+
+    recall_at_k = in_corpus_hits / in_corpus_total if in_corpus_total else 1.0
+    out_of_domain_rejection_rate = out_of_domain_rejected / out_of_domain_total if out_of_domain_total else 1.0
+    web_routing_accuracy = web_routing_correct / total_queries
+    topic_contamination_rate = contaminated_unrelated / unrelated_total if unrelated_total else 0.0
+
+    assert recall_at_k == 1.0, f"Recall@K for in-corpus questions is {recall_at_k}"
+    assert out_of_domain_rejection_rate == 1.0, f"Out-of-domain rejection rate is {out_of_domain_rejection_rate}"
+    assert web_routing_accuracy == 1.0, f"Web routing accuracy is {web_routing_accuracy}"
+    assert topic_contamination_rate == 0.0, f"Topic contamination rate is {topic_contamination_rate} (expected 0.0)"
+
+
