@@ -410,6 +410,10 @@ async def get_artifact_file(filename: str):
         media_type = "image/png"
     elif fn_lower.endswith(".json"):
         media_type = "application/json"
+    elif fn_lower.endswith(".csv"):
+        media_type = "text/csv; charset=utf-8"
+    elif fn_lower.endswith(".txt"):
+        media_type = "text/plain; charset=utf-8"
     else:
         media_type = "application/octet-stream"
 

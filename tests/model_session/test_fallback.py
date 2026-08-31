@@ -75,17 +75,16 @@ class _FakeModelForRewrite:
 
 
 def test_hardcoded_fallback_qatar_not_eastern():
-    """R1 bug: 'برنامج سياحي في قطر يومين' must NOT return Eastern itinerary.
+    """R1 fix: 'برنامج سياحي في قطر يومين' must NOT return Eastern itinerary.
 
-    Current code DOES (contaminated). This test documents the bug and will
-    fail on current HEAD — Phase-2 must make it pass by shrinking the
-    heuristic to an honest hedge.
+    After Phase-2 fix, the heuristic is narrowed to honest hedge for generic
+    program queries; Eastern itinerary only for springs/shrimp legit queries.
     """
     text = _generate_cultural_fallback_answer("برنامج سياحي في قطر يومين")
     # This query is about Qatar, not Eastern Province — should not contain Ahsa/Qatif itinerary
     has_eastern_itinerary = "اليوم الأول" in text and "الأحساء" in text
-    # Document bug: currently True (leak), expected False after fix
-    assert has_eastern_itinerary is True, "bug not reproduced: expected leak for generic program query on current code"
+    assert has_eastern_itinerary is False, "fixed: generic Qatar program should not leak Eastern itinerary"
+    assert "قطر" in text or "سرد" in text
 
 
 def test_hardcoded_fallback_shrimp_expected():
