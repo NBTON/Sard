@@ -195,6 +195,23 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
                     logger.debug("Compatibility diagnostic skipped: %s", de)
                 candidates = repo.fts_search(query_str, topk=k)
                 for cand in candidates:
+                    # Pilot-topic hard filter: springs/shrimp docs must not leak into unrelated queries (mirrors _scan_local_cultural_corpus)
+                    q_lower = query_str.lower()
+                    doc_text_lower = (cand.title + " " + cand.content + " " + (cand.topic or "")).lower()
+                    is_springs_doc = (
+                        "springs" in (cand.topic or "").lower()
+                        or any(k in doc_text_lower for k in ["ينابيع", "عين حارة", "عيون حارة", "مياه حارة"])
+                    )
+                    is_shrimp_doc = (
+                        "shrimp" in (cand.topic or "").lower()
+                        or any(k in doc_text_lower for k in ["روبيان", "ربيان", "تجفيف"])
+                    )
+                    is_springs_query = any(k in q_lower for k in ["ينابيع", "عين حارة", "عيون حارة", "عين الحارة", "عيون الأحساء", "عيون الاحساء", "مياه حارة", "مياه كبريتية", "springs", "استشفاء"])
+                    is_shrimp_query = any(k in q_lower for k in ["روبيان", "ربيان", "تجفيف الروبيان", "تجفيف الربيان", "الروبيان المجفف", "الربيان المجفف", "تاروت", "shrimp"])
+                    if is_springs_doc and not is_springs_query:
+                        continue
+                    if is_shrimp_doc and not is_shrimp_query:
+                        continue
                     # Use calibrated confidence when available; otherwise calibrate raw FTS BM25
                     raw_ft = getattr(cand, "fts_score", None)
                     conf = getattr(cand, "confidence_score", None)
