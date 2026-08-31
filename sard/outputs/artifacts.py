@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from sard.outputs.validation import ArtifactValidationError, validate_artifact_bytes
+
 
 DEFAULT_OUTPUT_ROOT = Path("output/runs")
 _SAFE_RUN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -98,6 +100,22 @@ class ArtifactManager:
             temp.unlink(missing_ok=True)
             raise ArtifactError("atomic_write", f"Atomic publication failed for {destination.name}.") from exc
 
+    @staticmethod
+    def _format_for(filename: str, artifact_type: str) -> Optional[str]:
+        suffix = Path(filename).suffix.lower().lstrip(".")
+        return suffix or {"raw_text": "txt", "calendar": "ics"}.get(artifact_type)
+
+    @classmethod
+    def _validate_bytes(cls, data: bytes, filename: str, artifact_type: str) -> None:
+        if not data:
+            raise ArtifactError("empty_output", "Generated artifact is empty.")
+        fmt = cls._format_for(filename, artifact_type)
+        if fmt in {"pdf", "docx", "pptx", "ics", "svg", "png", "json", "csv", "txt"}:
+            try:
+                validate_artifact_bytes(fmt, data)
+            except ArtifactValidationError as exc:
+                raise ArtifactError(exc.category, str(exc)) from exc
+
     def write_bytes(
         self,
         data: bytes,
@@ -108,6 +126,7 @@ class ArtifactManager:
         mime_type: str,
         warnings: tuple[str, ...] = (),
     ) -> ArtifactWriteResult:
+        self._validate_bytes(data, filename, artifact_type)
         destination = self._destination(filename)
         temporary = self.run_dir / f".{filename}.{uuid.uuid4().hex}.tmp"
         try:
@@ -154,6 +173,7 @@ class ArtifactManager:
             raise ArtifactError("directory_traversal", "Generated source is outside the run directory.") from exc
         if not source_path.is_file():
             raise ArtifactError("missing_temporary_file", "Generated artifact does not exist.")
+        self._validate_bytes(source_path.read_bytes(), filename, artifact_type)
         destination = self._destination(filename)
         self._publish_temp(source_path, destination)
         return ArtifactWriteResult(
