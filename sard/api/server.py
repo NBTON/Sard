@@ -32,7 +32,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 load_dotenv(_PROJECT_ROOT / ".env")
 
-from sard.agent.capability_routing import StructuredIntent, classify_intent
+from sard.agent.capability_routing import Capability, StructuredIntent, classify_intent
 from sard.agent.chat_service import ChatService, current_status_label
 from sard.agent.graph import GraphDependencies, default_dependencies, run_pipeline
 from sard.agent.util import sanitize_cultural_output
@@ -478,12 +478,18 @@ async def generate_full_itinerary(req: ItineraryRequest):
 async def chat_endpoint(req: ChatRequest):
     """Streaming Chat endpoint with public progress telemetry and verified artifacts.
 
-    Streams Server-Sent Events (SSE):
-    - event: status (public cultural stages)
-    - event: citations (verified references)
-    - event: delta (text tokens)
-    - event: artifacts (verified downloadable PDF / DOCX / PPTX / ICS / SVG)
-    - event: done (verified, sources_count, timings)
+    SSE contract (guaranteed ordering):
+    status → citations (if any) → artifacts (if requested, includes failed) → delta → done
+
+    Invariants enforced here:
+    - Explicit artifact intent (requested_formats via classify_intent) survives every fallback
+    - Retrieval failure never injects irrelevant context (handled in rag layer)
+    - Session isolation: history is client-supplied but never echoed as stale; effective_query is current turn
+    - Bounded timeouts: overall chat deadline via SARD_CHAT_OVERALL_TIMEOUT (default 38s)
+    - Cancellation propagates to executor future
+    - Every stream terminates with done (or error) and logs carry run_id without secrets
+    - Artifacts event always before done, includes both created and failed where applicable
+    - Download verification via orchestrator store
     """
     user_query = _extract_latest_user_query(req)
     all_attachments = _extract_all_attachments(req)
@@ -495,57 +501,88 @@ async def chat_endpoint(req: ChatRequest):
 
     async def sse_generator() -> AsyncGenerator[dict, None]:
         t_start = time.monotonic()
-        citations_sent = []
-        artifacts_sent = []
+        run_id = f"chat-{uuid.uuid4().hex[:10]}"
+        citations_sent: list[dict[str, Any]] = []
+        artifacts_sent: list[dict[str, Any]] = []
         full_response_text = ""
         verified = False
+        # Early intent classification so fallback path knows artifact expectation and can surface failed artifacts
+        early_intent = classify_intent(effective_query, messages=[m.model_dump() for m in req.messages] if req.messages else None, attachments=all_attachments)
+        session_id_out = req.session_id or str(uuid.uuid4())
+        # Overall SSE deadline (bounded). Env overridable, capped at 60s.
+        try:
+            overall_timeout = float(os.environ.get("SARD_CHAT_OVERALL_TIMEOUT", "38"))
+            overall_timeout = max(5.0, min(60.0, overall_timeout))
+        except ValueError:
+            overall_timeout = 38.0
 
-        # 1. Initial Status Event
-        yield {
-            "event": "status",
-            "data": json.dumps({
-                "stage": "init",
-                "message": "جارٍ تحليل السؤال واستكشاف المعارف والوثائق المعتمدة..."
-            }, ensure_ascii=False)
-        }
-        await asyncio.sleep(0.02)
+        try:
+            # 1. Initial Status Event
+            yield {
+                "event": "status",
+                "data": json.dumps({
+                    "stage": "init",
+                    "message": "جارٍ تحليل السؤال واستكشاف المعارف والوثائق المعتمدة..."
+                }, ensure_ascii=False)
+            }
+            await asyncio.sleep(0.02)
 
-        # 2. Conversational greetings quick-check
-        greetings = ["مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "شكرا", "من أنت", "عرفني بنفسك", "من انت", "أهلاً", "hello", "hi"]
-        q_clean = re.sub(r"[^\w\s]", "", effective_query.strip()).lower()
-        is_greeting = any(q_clean == g or q_clean.startswith(g + " ") for g in greetings) and not all_attachments
+            # 2. Conversational greetings quick-check (preserves current query, does not echo stale history)
+            greetings = ["مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "شكرا", "من أنت", "عرفني بنفسك", "من انت", "أهلاً", "hello", "hi"]
+            q_clean = re.sub(r"[^\w\s]", "", effective_query.strip()).lower()
+            is_greeting = any(q_clean == g or q_clean.startswith(g + " ") for g in greetings) and not all_attachments
 
-        if not is_greeting:
-            status_queue: asyncio.Queue = asyncio.Queue()
-            loop = asyncio.get_event_loop()
+            if not is_greeting:
+                status_queue: asyncio.Queue = asyncio.Queue()
+                loop = asyncio.get_event_loop()
 
-            def _sync_status_callback(stage: str, message: str):
-                try:
-                    loop.call_soon_threadsafe(status_queue.put_nowait, (stage, message))
-                except Exception:
-                    pass
-
-            try:
-                chat_service = ChatService()
-                history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
-
-                # Launch chat_service.ask in executor
-                future = loop.run_in_executor(
-                    None,
-                    lambda: chat_service.ask(
-                        effective_query,
-                        messages=history_dicts,
-                        attachments=all_attachments,
-                        use_hybrid_retrieval=True,
-                        session_id=req.session_id,
-                        status_callback=_sync_status_callback,
-                    ),
-                )
-
-                # Stream status events as emitted
-                while not future.done():
+                def _sync_status_callback(stage: str, message: str):
                     try:
-                        stage_info = await asyncio.wait_for(status_queue.get(), timeout=0.08)
+                        loop.call_soon_threadsafe(status_queue.put_nowait, (stage, message))
+                    except Exception:
+                        pass
+
+                hybrid_chat_res = None
+                try:
+                    chat_service = ChatService()
+                    history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
+
+                    # Launch chat_service.ask in executor with bounded timeout
+                    future = loop.run_in_executor(
+                        None,
+                        lambda: chat_service.ask(
+                            effective_query,
+                            messages=history_dicts,
+                            attachments=all_attachments,
+                            use_hybrid_retrieval=True,
+                            session_id=req.session_id,
+                            status_callback=_sync_status_callback,
+                        ),
+                    )
+
+                    # Stream status events as emitted, with overall deadline on the future
+                    # We poll status_queue while waiting, but bound the total wait.
+                    deadline = t_start + overall_timeout
+                    while not future.done():
+                        if time.monotonic() > deadline:
+                            future.cancel()
+                            logger.warning("Chat SSE overall timeout reached (run_id=%s). Cancelling hybrid future.", run_id)
+                            break
+                        try:
+                            stage_info = await asyncio.wait_for(status_queue.get(), timeout=0.08)
+                            yield {
+                                "event": "status",
+                                "data": json.dumps({
+                                    "stage": stage_info[0],
+                                    "message": stage_info[1],
+                                }, ensure_ascii=False),
+                            }
+                        except asyncio.TimeoutError:
+                            pass
+
+                    # Drain remaining status events
+                    while not status_queue.empty():
+                        stage_info = status_queue.get_nowait()
                         yield {
                             "event": "status",
                             "data": json.dumps({
@@ -553,122 +590,278 @@ async def chat_endpoint(req: ChatRequest):
                                 "message": stage_info[1],
                             }, ensure_ascii=False),
                         }
-                    except asyncio.TimeoutError:
-                        pass
 
-                # Drain remaining status events
-                while not status_queue.empty():
-                    stage_info = status_queue.get_nowait()
+                    # Await future with timeout; cancellation propagates
+                    if not future.done():
+                        try:
+                            hybrid_chat_res = await asyncio.wait_for(future, timeout=max(0.5, deadline - time.monotonic()))
+                        except asyncio.TimeoutError:
+                            future.cancel()
+                            logger.warning("Hybrid chat future timed out (run_id=%s).", run_id)
+                            hybrid_chat_res = None
+                        except asyncio.CancelledError:
+                            logger.info("Hybrid chat cancelled (run_id=%s).", run_id)
+                            raise
+                    else:
+                        try:
+                            hybrid_chat_res = await future
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            logger.warning("Isnād planner future exception (run_id=%s): %s. Falling back to direct chat.", run_id, type(exc).__name__)
+                            hybrid_chat_res = None
+
+                    if hybrid_chat_res is not None:
+                        # Preserve artifacts even if hybrid had fallback text or empty model — invariant 1,8
+                        if hybrid_chat_res.citations or hybrid_chat_res.text:
+                            verified = bool(hybrid_chat_res.decision in ("generate", "hedge") or len(hybrid_chat_res.citations) > 0)
+                        # Extract citations (only if present)
+                        for cit in (hybrid_chat_res.citations or []):
+                            citations_sent.append({
+                                "citation_id": cit.get("id", ""),
+                                "title": cit.get("title", ""),
+                                "source_name": cit.get("origin") or cit.get("id", ""),
+                                "source_url": cit.get("url", ""),
+                                "chunk_id": "",
+                                "snippet": cit.get("title", ""),
+                            })
+                        if citations_sent:
+                            yield {
+                                "event": "citations",
+                                "data": json.dumps({
+                                    "citations": citations_sent,
+                                    "count": len(citations_sent)
+                                }, ensure_ascii=False)
+                            }
+                        # Capture text if ok, otherwise keep empty to trigger fallback path below
+                        if hybrid_chat_res.ok:
+                            full_response_text = hybrid_chat_res.text or ""
+                        # Preserve artifacts through fallback (invariant 8)
+                        if hybrid_chat_res.artifacts:
+                            for art in hybrid_chat_res.artifacts:
+                                # De-duplicate by id if fallback also produces same id (should not, but safe)
+                                if not any(a.get("id") == art.get("id") for a in artifacts_sent):
+                                    artifacts_sent.append(art)
+
+                except asyncio.CancelledError:
+                    logger.info("SSE cancelled during hybrid phase (run_id=%s).", run_id)
+                    raise
+                except Exception as exc:
+                    logger.warning("Isnād planner exception (run_id=%s): %s. Falling back to direct chat.", run_id, type(exc).__name__)
+
+            # 3. Fallback if no response text yet — also handles artifact-only requests with empty model
+            # This path must also honor artifact intent: direct model fallback can still produce requested artifact
+            if not full_response_text or not full_response_text.strip():
+                # Check if we already have artifacts from hybrid (even with empty text, artifacts may be present)
+                # If artifacts already satisfy intent, we still need text hedge for delta; otherwise we try direct model
+                needs_text = not full_response_text or not full_response_text.strip()
+                if needs_text:
                     yield {
                         "event": "status",
                         "data": json.dumps({
-                            "stage": stage_info[0],
-                            "message": stage_info[1],
-                        }, ensure_ascii=False),
+                            "stage": "generating",
+                            "message": "جارٍ صياغة إجابة من المستشار الثقافي..."
+                        }, ensure_ascii=False)
+                    }
+                    chat_service = ChatService()
+                    loop = asyncio.get_event_loop()
+                    history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
+                    try:
+                        future2 = loop.run_in_executor(
+                            None,
+                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id),
+                        )
+                        # Bounded wait for direct fallback
+                        remaining = max(2.0, (t_start + overall_timeout) - time.monotonic())
+                        try:
+                            chat_res2 = await asyncio.wait_for(future2, timeout=remaining)
+                        except asyncio.TimeoutError:
+                            future2.cancel()
+                            logger.warning("Direct fallback timed out (run_id=%s).", run_id)
+                            chat_res2 = None
+                        except asyncio.CancelledError:
+                            logger.info("Direct fallback cancelled (run_id=%s).", run_id)
+                            raise
+
+                        if chat_res2 is not None:
+                            # Merge artifacts from direct fallback (invariant: artifact intent survives)
+                            if chat_res2.artifacts:
+                                for art in chat_res2.artifacts:
+                                    if not any(a.get("id") == art.get("id") for a in artifacts_sent):
+                                        artifacts_sent.append(art)
+                            if chat_res2.ok and chat_res2.text and chat_res2.text.strip():
+                                full_response_text = chat_res2.text
+                                # direct fallback is not verified via citations
+                                verified = False
+                            elif chat_res2.text and chat_res2.text.strip():
+                                full_response_text = chat_res2.text
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning("Direct fallback exception (run_id=%s): %s", run_id, type(exc).__name__)
+
+                # If still no text, decide between generic hedge vs failed artifact
+                if not full_response_text or not full_response_text.strip():
+                    # If artifact was requested and we have no created artifact yet, ensure failed artifacts are surfaced
+                    if early_intent.explicit_artifact_request and not any(a.get("status") == "created" for a in artifacts_sent):
+                        # ChatService direct path already attempted orchestrator and should have produced failed artifacts
+                        # But if artifacts_sent is still empty (e.g., both paths had exceptions before orchestration),
+                        # synthesize failed artifacts here so SSE never silently drops requested format
+                        if not artifacts_sent:
+                            for fmt in early_intent.requested_formats:
+                                if fmt != "text":
+                                    artifacts_sent.append({
+                                        "id": f"art-{run_id}-{fmt}",
+                                        "kind": "document",
+                                        "format": fmt,
+                                        "type": fmt,
+                                        "title": f"مخرج ثقافي: {early_intent.extracted_topic}",
+                                        "filename": f"sard-{fmt}",
+                                        "mime_type": "application/octet-stream",
+                                        "size_bytes": 0,
+                                        "status": "failed",
+                                        "download_url": None,
+                                        "url": "",
+                                        "error": f"تعذر توليد ملف {fmt.upper()} حالياً. الرجاء إعادة المحاولة لاحقاً.",
+                                        "error_category": "fallback_empty",
+                                        "warnings": [],
+                                        "preview": None,
+                                        "checksum": None,
+                                        "data": None,
+                                    })
+                        # Still need a text body for delta: use generic hedge but mention artifact failure is in artifacts event
+                        full_response_text = _generate_cultural_fallback_answer(effective_query)
+                        # Append hint that artifact failed (kept in hedge, not as canned itinerary)
+                        full_response_text += "\n\n> تعذر إنشاء الملف المطلوب في هذه المحاولة؛ راجع تفاصيل المخرجات أدناه."
+                    else:
+                        full_response_text = _generate_cultural_fallback_answer(effective_query)
+                    verified = False
+
+            # 4. Sanitize and ensure explicit hedge if empty (never empty string, never shrimp for unrelated)
+            full_response_text = sanitize_cultural_output(full_response_text)
+            if not full_response_text or not full_response_text.strip():
+                full_response_text = _generate_cultural_fallback_answer(effective_query)
+
+            # 5. SSE contract: artifacts event always before delta/done if artifacts exist; includes failed
+            if artifacts_sent:
+                # Ensure artifacts are verified where possible: successful artifacts have downloadable verified bytes
+                # Failed artifacts must never appear as created
+                for art in artifacts_sent:
+                    if art.get("status") == "failed":
+                        assert art.get("download_url") is None, "failed artifact must not have download_url"
+                    if art.get("status") == "created":
+                        assert art.get("download_url"), "created artifact must have download_url"
+                yield {
+                    "event": "artifacts",
+                    "data": json.dumps({"artifacts": artifacts_sent}, ensure_ascii=False)
+                }
+            elif early_intent.explicit_artifact_request:
+                # Edge: intent requested artifact but neither path emitted artifacts (should not happen due to above synthesis)
+                # Emit failed artifacts now to honor contract
+                fallback_failed = []
+                for fmt in early_intent.requested_formats:
+                    if fmt != "text":
+                        fallback_failed.append({
+                            "id": f"art-{run_id}-{fmt}",
+                            "kind": "document",
+                            "format": fmt,
+                            "type": fmt,
+                            "title": f"مخرج ثقافي: {early_intent.extracted_topic}",
+                            "filename": f"sard-{fmt}",
+                            "mime_type": "application/octet-stream",
+                            "size_bytes": 0,
+                            "status": "failed",
+                            "download_url": None,
+                            "url": "",
+                            "error": f"تعذر توليد ملف {fmt.upper()} حالياً. الرجاء إعادة المحاولة لاحقاً.",
+                            "error_category": "fallback_empty",
+                            "warnings": [],
+                            "preview": None,
+                            "checksum": None,
+                            "data": None,
+                        })
+                if fallback_failed:
+                    artifacts_sent.extend(fallback_failed)
+                    yield {
+                        "event": "artifacts",
+                        "data": json.dumps({"artifacts": artifacts_sent}, ensure_ascii=False)
                     }
 
-                chat_res = await future
+            # Stream delta tokens smoothly (preserve current query text, not stale history)
+            chunk_size = 4
+            words = full_response_text.split(" ")
+            for i in range(0, len(words), chunk_size):
+                chunk = " ".join(words[i : i + chunk_size])
+                if i + chunk_size < len(words):
+                    chunk += " "
+                yield {
+                    "event": "delta",
+                    "data": json.dumps({"text": chunk}, ensure_ascii=False)
+                }
+                await asyncio.sleep(0.015)
 
-                if chat_res.ok:
-                    full_response_text = chat_res.text or ""
-                    verified = bool(chat_res.decision in ("generate", "hedge") or len(chat_res.citations) > 0)
-
-                    # Extract and send citations
-                    for cit in chat_res.citations:
-                        citations_sent.append({
-                            "citation_id": cit.get("id", ""),
-                            "title": cit.get("title", ""),
-                            "source_name": cit.get("origin") or cit.get("id", ""),
-                            "source_url": cit.get("url", ""),
-                            "chunk_id": "",
-                            "snippet": cit.get("title", ""),
-                        })
-
-                    if citations_sent:
-                        yield {
-                            "event": "citations",
-                            "data": json.dumps({
-                                "citations": citations_sent,
-                                "count": len(citations_sent)
-                            }, ensure_ascii=False)
-                        }
-
-                    # Stream real generated / verified artifacts (independent from text presence)
-                    if chat_res.artifacts:
-                        for art in chat_res.artifacts:
-                            artifacts_sent.append(art)
-                        yield {
-                            "event": "artifacts",
-                            "data": json.dumps({"artifacts": artifacts_sent}, ensure_ascii=False)
-                        }
-
-            except Exception as exc:
-                logger.warning("Isnād planner exception: %s. Falling back to direct chat.", exc)
-
-        # 3. Fallback if no response text yet
-        if not full_response_text:
-            yield {
-                "event": "status",
-                "data": json.dumps({
-                    "stage": "generating",
-                    "message": "جارٍ صياغة إجابة من المستشار الثقافي..."
-                }, ensure_ascii=False)
-            }
-            chat_service = ChatService()
-            loop = asyncio.get_event_loop()
-            history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
-            chat_res = await loop.run_in_executor(
-                None,
-                lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False),
-            )
-
-            if chat_res.ok and chat_res.text:
-                full_response_text = chat_res.text
-                verified = False
-            else:
-                full_response_text = _generate_cultural_fallback_answer(effective_query)
-                verified = False
-
-        # 4. Sanitize and stream tokens smoothly
-        full_response_text = sanitize_cultural_output(full_response_text)
-        if not full_response_text.strip():
-            full_response_text = _generate_cultural_fallback_answer(effective_query)
-
-        chunk_size = 4
-        words = full_response_text.split(" ")
-        for i in range(0, len(words), chunk_size):
-            chunk = " ".join(words[i : i + chunk_size])
-            if i + chunk_size < len(words):
-                chunk += " "
-            yield {
-                "event": "delta",
-                "data": json.dumps({"text": chunk}, ensure_ascii=False)
-            }
-            await asyncio.sleep(0.015)
-
-        # 5. Final Done Event
-        total_time_ms = (time.monotonic() - t_start) * 1000
-        yield {
-            "event": "done",
-            "data": json.dumps({
-                "verified": verified,
-                "sources_count": len(citations_sent),
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "timings_ms": {
-                    "total_ms": round(total_time_ms, 1),
-                },
-                "artifacts_count": len(artifacts_sent),
-                "session_id": req.session_id or str(uuid.uuid4()),
-            }, ensure_ascii=False)
-        }
+        except asyncio.CancelledError:
+            logger.info("SSE stream cancelled by client (run_id=%s).", run_id)
+            # Ensure downstream knows it was cancelled: emit error then done if not already sent
+            # EventSourceResponse will close; we still attempt to yield a done with error flag if possible
+            try:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"run_id": run_id, "error": "تم إلغاء الطلب.", "cancelled": True}, ensure_ascii=False)
+                }
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            logger.exception("Unexpected SSE error (run_id=%s): %s", run_id, type(exc).__name__)
+            # Emit error event but still guarantee done (contract)
+            try:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"run_id": run_id, "error": "حدث خطأ غير متوقع أثناء المعالجة. الرجاء المحاولة لاحقاً."}, ensure_ascii=False)
+                }
+            except Exception:
+                pass
+        finally:
+            # 5. Final Done Event — always emitted even on empty/error (contract). Includes run_id, no secrets.
+            total_time_ms = (time.monotonic() - t_start) * 1000
+            try:
+                yield {
+                    "event": "done",
+                    "data": json.dumps({
+                        "verified": bool(verified),
+                        "sources_count": len(citations_sent),
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "timings_ms": {
+                            "total_ms": round(total_time_ms, 1),
+                        },
+                        "artifacts_count": len(artifacts_sent),
+                        "session_id": session_id_out,
+                        "run_id": run_id,
+                    }, ensure_ascii=False)
+                }
+            except Exception:
+                pass
+            logger.info("SSE done (run_id=%s, session_id=%s, verified=%s, artifacts=%d, sources=%d, total_ms=%.1f)",
+                        run_id, session_id_out[:8] if len(session_id_out) > 8 else session_id_out, verified, len(artifacts_sent), len(citations_sent), total_time_ms)
 
     return EventSourceResponse(sse_generator())
 
 
 def _generate_cultural_fallback_answer(query: str) -> str:
-    """Rich cultural response when offline/fallback is active."""
-    q_norm = query.lower()
-    if "روبيان" in q_norm or "تاروت" in q_norm or "تجفيف" in q_norm:
+    """Query-aware generic hedge — never injects shrimp/springs/Eastern/UNESCO canned articles as fallback.
+
+    Invariants:
+    - If query legitimately contains shrimp/springs terms, return that specific mini-fallback (still query-aware).
+    - Otherwise return explicit Arabic friendly hedge mentioning Sard capabilities, not empty string, no itinerary.
+    - Respects requested_formats at SSE layer: artifact failure is emitted as artifacts event, not as text substitution.
+    """
+    q_norm = (query or "").lower()
+    # Narrow legitimate shrimp query: must contain explicit shrimp lexeme
+    has_shrimp = any(k in q_norm for k in ["روبيان", "ربيان", "تاروت", "shrimp"])
+    has_springs = any(k in q_norm for k in ["ينابيع", "عيون حارة", "عين حارة", "مياه كبريتية", "springs"])
+    # Only shrimp/springs legitimate branches are kept; Eastern/UNESCO canned articles removed
+    if has_shrimp and any(k in q_norm for k in ["روبيان", "ربيان", "تجفيف", "تاروت", "shrimp"]):
         return (
             "تُعد حرفة **تجفيف الروبيان** في جزيرة تاروت بمحافظة القطيف إحدى أقدم الحرف والتقاليد البحرية "
             "في المنطقة الشرقية بالمملكة العربية السعودية.\n\n"
@@ -679,42 +872,22 @@ def _generate_cultural_fallback_answer(query: str) -> str:
             "4. **التقشير والتعبئة**: يُفصل القشر عن اللحم المجفف يدوياً، ويُحفظ ليُستخدم في أشهر المأكولات التراثية مثل الكبسة والمحموس والثريد.\n\n"
             "هذه الحرفة تمثل جزءاً حيوياً من التراث الثقافي غير المادي الذي تحرص **وزارة الثقافة** على توثيقه وإبرازه."
         )
-    elif "شرقية" in q_norm or "برنامج" in q_norm or "يومين" in q_norm:
+    if has_springs:
         return (
-            "أهلاً بك! يسرني تقديم برنامج سياحي وثقافي مقترح لاستكشاف كنوز **المنطقة الشرقية** التراثية على مدار يومين:\n\n"
-            "### اليوم الأول: عبق التراث في واحة الأحساء (موقع تراث عالمي - اليونسكو)\n"
-            "- **الصباح (09:00 - 12:00)**: زيارة **قصر إبراهيم الأثري** و**بيت البيعة**، والتعرف على العمارة الدفاعية والتاريخية.\n"
-            "- **الغداء (12:30 - 02:00)**: تجربة المأكولات الحساوية التقليدية (العيش الحساوي والخبز الأحمر بالدبس).\n"
-            "- **المساء (04:00 - 08:00)**: جولة في **سوق القيصرية التراثي** وشراء المنتجات الحرفية، يليه استكشاف **جبل القارة** ومغاراته الطبيعية الساحرة.\n\n"
-            "### اليوم الثاني: الساحل والتقاليد البحرية في الدمام والقطيف\n"
-            "- **الصباح (09:30 - 01:00)**: زيارة **جزيرة تاروت** و**قلعة تاروت التاريخية**، واستكشاف أزقة الديرة القديمة ومنازلها التراثية.\n"
-            "- **الغداء (01:30 - 03:00)**: وجبة بحرية طازجة من خيرات الخليج العربي.\n"
-            "- **المساء (04:30 - 08:30)**: جولة في **مركز الملك عبد العزيز للثقافة العالمية (إثراء)** بالظهران، والاطلاع على المعارض الفنية والمكتبة الثقافية.\n\n"
-            "أتمنى لك رحلة ثقافية ملهمة وممتعة!"
+            f"بخصوص استفسارك حول الينابيع والعيون الحارة: *\"{query[:120]}\"*\n\n"
+            "تُعد الينابيع والعيون الحارة جزءاً من التراث الطبيعي في بعض مناطق المملكة، وتُرتبط بمعارف استشفائية وتقاليد محلية.\n"
+            "لعدم توفر مصدر موثق كافٍ لهذا الاستعلام في الوقت الحالي، يُرجى تحديد المنطقة (مثلاً: الأحساء، الليث، عسير) أو السياق المطلوب، وسأقدّم توثيقاً أدق مع الإسناد."
         )
-    elif "علا" in q_norm or "درعية" in q_norm or "يونسكو" in q_norm or "طريف" in q_norm:
-        return (
-            "تزخر المملكة العربية السعودية بالعديد من مواقع التراث العالمي المسجلة لدى **اليونسكو** والتي تشرف عليها وترعاها منظومة الثقافة:\n\n"
-            "1. **حي الطريف بالدرعية (2010)**: مهد الدولة السعودية الأولى، ونموذج رائع للعمارة النجدية الطينية.\n"
-            "2. **موقع الحِجر بالأُعلا (2008)**: أول موقع سعودي يُدرج على قائمة اليونسكو، ويضم مدافن نبطية منحوتة في الصخور بدقة متناهية.\n"
-            "3. **جدة التاريخية (البلد) (2014)**: تتميز برواشينها الخشبية الفريدة ونمطها المعماري الحجازي العريق.\n"
-            "4. **الفنون الصخرية في منطقة حائل (2015)**: نقوش أثرية تعود لآلاف السنين في جبة والشويمس.\n"
-            "5. **واحة الأحساء (2018)**: أكبر واحة نخيل قائمة بذاتها في العالم، تشتمل على قنوات ري وعيون مائية ومعالم تاريخية.\n"
-            "6. **منطقة حمى الثقافية بنجران (2021)**: طريق قوافل قديم يزخر بآلاف الرسوم الصخرية والكتابات القديمة.\n"
-            "7. **محمية عروق بني معارض (2023)**: أول موقع تراث طبيعي عالمي في المملكة في الربع الخالي.\n"
-            "8. **المنظر الثقافي لمنطقة الفاو الأثرية (2024)**: عاصمة مملكة كندة الأولى على أطراف الربع الخالي.\n\n"
-            "هل ترغب في تفاصيل أكثر أو تنظيم مسار زيارة لأحد هذه المواقع؟"
-        )
-    else:
-        return (
-            f"مرحباً بك! كرفيقك الثقافي في **سرد**، يسعدني مساعدتك في استكشاف ثقافة المملكة العربية السعودية وتراثها الغني.\n\n"
-            f"بخصوص استفسارك حول: *\"{query}\"*\n\n"
-            "يمكنني تزويدك بـ:\n"
-            "- برامج ومسارات سياحية وتراثية مخصصة حسب اهتماماتك والمدة الزمنية.\n"
-            "- معلومات موثقة ومستندة إلى مراجع عن المواقع الأثرية، الفنون التقليدية، والحرف اليدوية.\n"
-            "- أهم الفعاليات والمواسم الثقافية التي تنظمها قطاعات وهيئات **وزارة الثقافة**.\n\n"
-            "كيف تفضل أن نبدأ رحلتنا الاستكشافية اليوم؟"
-        )
+    # Generic hedge — query-aware, friendly, Arabic, no canned Eastern/UNESCO itinerary
+    return (
+        f"تعذّر توليد إجابة موثقة عن: \"{query[:120]}\" في الوقت الحالي.\n\n"
+        "حفاظًا على الأمانة المعرفية، لا أقدّم توليفًا غير مُسنَد بلا مصادر.\n"
+        "كرفيقك الثقافي في **سرد**، يمكنني مساعدتك في:\n"
+        "- برامج ومسارات سياحية وتراثية مخصصة حسب المنطقة والمدة.\n"
+        "- معلومات موثقة عن المواقع الأثرية والفنون والحرف اليدوية.\n"
+        "- الفعاليات والمواسم الثقافية التي تنظمها قطاعات وهيئات **وزارة الثقافة**.\n\n"
+        "يرجى توضيح المنطقة أو السياق المطلوب، أو إعادة المحاولة."
+    )
 
 
 # --- Agentic Cultural Feature Models & Endpoints ---
