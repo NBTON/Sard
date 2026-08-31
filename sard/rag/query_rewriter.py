@@ -67,6 +67,43 @@ class _RewriteCacheKey:
     model_version: str
 
 
+_PILOT_TOPIC_ENTITIES = (
+    "تجفيف الروبيان",
+    "تجفيف الربيان",
+    "الروبيان المجفف",
+    "الربيان المجفف",
+    "العيون الحارة",
+    "الينابيع الحارة",
+    "روبيان",
+    "ربيان",
+    "تاروت",
+    "shrimp",
+    "tarout",
+)
+
+
+def _sanitize_search_variants(variants: list[str], original_question: str) -> list[str]:
+    """Ensure search variants NEVER inject pilot-topic entities (shrimp/springs/tarout) into unrelated queries."""
+    orig_norm = normalize_arabic(original_question)
+    allowed_entities = [e for e in _PILOT_TOPIC_ENTITIES if normalize_arabic(e) in orig_norm]
+
+    clean_variants = []
+    for var in variants:
+        var_norm = normalize_arabic(var)
+        is_contaminated = False
+        for entity in _PILOT_TOPIC_ENTITIES:
+            entity_norm = normalize_arabic(entity)
+            if entity_norm in var_norm and entity not in allowed_entities and entity_norm not in orig_norm:
+                is_contaminated = True
+                break
+        if not is_contaminated:
+            clean_variants.append(var)
+
+    if not clean_variants:
+        clean_variants = [normalize_arabic(original_question) or original_question]
+    return clean_variants
+
+
 def deterministic_query_variants(question: str) -> list[str]:
     """Return bounded Arabic lexical variants without translating or adding facts."""
 
@@ -84,7 +121,8 @@ def deterministic_query_variants(question: str) -> list[str]:
     original = question.strip()
     if original and original not in variants:
         variants.append(original)
-    return list(dict.fromkeys(value for value in variants if value))[:4]
+    deduped = list(dict.fromkeys(value for value in variants if value))[:4]
+    return _sanitize_search_variants(deduped, question)
 
 
 class QueryRewriteService:
@@ -173,6 +211,7 @@ class QueryRewriteService:
                 if str(v).strip()
             ]
             search_variants = [v for v in search_variants if v]
+            search_variants = _sanitize_search_variants(search_variants, question)
             if normalized_cache_key not in search_variants:
                 search_variants = [normalized_cache_key, *search_variants]
             search_variants = search_variants[:4] or [normalized_cache_key]

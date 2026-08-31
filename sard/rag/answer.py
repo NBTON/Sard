@@ -156,9 +156,9 @@ class AnswerService:
         )
 
     def generate(self, question: str, candidates: list[RetrievedCandidate]) -> tuple[AnswerResult, list[FallbackEvent]]:
-        top = candidates[: self._settings.final_top_k]
+        top = [c for c in candidates[: self._settings.final_top_k] if getattr(c, "is_relevant", True)]
         if not top:
-            return self._extractive_fallback(question, top, "لا توجد قطع مسترجعة لتغذية النموذج."), []
+            return self._extractive_fallback(question, top, "لا توجد قطع مسترجعة ذات صلة لتغذية النموذج."), []
 
         valid_ids = {c.citation_id for c in top}
         context = pack_context(top)

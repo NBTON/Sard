@@ -111,6 +111,9 @@ class RAGSettings:
     enable_query_rewrite: bool
     enable_fts: bool
     enable_rerank: bool
+    dense_similarity_threshold: float = 0.65
+    rerank_relevance_threshold: float = 0.45
+    min_evidence_confidence: float = 0.60
     parallel_api_key: str = ""
     parallel_search_base_url: str = "https://api.parallel.ai/v1beta"
 
@@ -150,6 +153,13 @@ class RAGSettings:
         ):
             if value < 1:
                 raise NVIDIAConfigError(f"{name} يجب أن يكون 1 أو أكثر.")
+        for name, value in (
+            ("RAG_DENSE_SIMILARITY_THRESHOLD", self.dense_similarity_threshold),
+            ("RAG_RERANK_RELEVANCE_THRESHOLD", self.rerank_relevance_threshold),
+            ("RAG_MIN_EVIDENCE_CONFIDENCE", self.min_evidence_confidence),
+        ):
+            if not (0.0 <= value <= 1.0):
+                raise NVIDIAConfigError(f"{name} يجب أن يكون بين 0.0 و 1.0.")
         if not self.zvec_collection_path.strip():
             raise NVIDIAConfigError("ZVEC_COLLECTION_PATH لا يجوز أن يكون فارغًا.")
         return self
@@ -226,6 +236,9 @@ def get_rag_settings() -> RAGSettings:
         enable_query_rewrite=_env_bool("RAG_ENABLE_QUERY_REWRITE", True),
         enable_fts=_env_bool("RAG_ENABLE_FTS", True),
         enable_rerank=_env_bool("RAG_ENABLE_RERANK", True),
+        dense_similarity_threshold=_env_float("RAG_DENSE_SIMILARITY_THRESHOLD", 0.65),
+        rerank_relevance_threshold=_env_float("RAG_RERANK_RELEVANCE_THRESHOLD", 0.45),
+        min_evidence_confidence=_env_float("RAG_MIN_EVIDENCE_CONFIDENCE", 0.60),
         parallel_api_key=_env("PARALLEL_API_KEY"),
         parallel_search_base_url=_env("PARALLEL_SEARCH_BASE_URL", "https://api.parallel.ai/v1beta"),
     )

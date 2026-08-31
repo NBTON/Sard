@@ -126,6 +126,16 @@ class RetrievalFilters:
     publication_date: Optional[str] = None
 
 
+class ScoreType(str, Enum):
+    """Explicit score type classification to prevent uncalibrated cross-scale comparisons."""
+
+    DENSE = "dense"
+    FTS = "fts"
+    RRF = "rrf"
+    RERANK = "rerank"
+    CALIBRATED_CONFIDENCE = "calibrated_confidence"
+
+
 @dataclass
 class RetrievedCandidate:
     """One candidate chunk plus per-channel scoring/rank bookkeeping."""
@@ -150,6 +160,10 @@ class RetrievedCandidate:
     fused_rank: Optional[int] = None
     rerank_score: Optional[float] = None
     rerank_rank: Optional[int] = None
+    confidence_score: Optional[float] = None
+    score_type: Optional[str] = None
+    is_relevant: bool = True
+    region: Optional[str] = None
     extra_metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -176,6 +190,9 @@ class RetrievalResult:
     reranker_used: str  # "nvidia" | "rrf_fallback" | "dense_fallback" | "fts_fallback"
     fallback_events: list[Any] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    is_relevant: bool = True
+    relevance_decision: str = "relevant"
+    top_confidence: float = 0.0
 
 
 # --------------------------------------------------------------------------

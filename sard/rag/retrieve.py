@@ -79,6 +79,72 @@ def reciprocal_rank_fusion(
     return ranked
 
 
+def calibrate_candidate_confidence(
+    candidate: RetrievedCandidate,
+    dense_threshold: float = 0.65,
+    min_confidence: float = 0.60,
+) -> float:
+    """Compute a calibrated confidence score [0.0, 1.0] across heterogeneous score scales."""
+    dense_score = candidate.dense_score
+    fts_score = candidate.fts_score
+
+    # 1. Dense cosine similarity calibration [-1.0, 1.0]
+    dense_conf = 0.0
+    if dense_score is not None:
+        if dense_score >= 0.80:
+            dense_conf = min(0.98, 0.85 + (dense_score - 0.80) * 0.6)
+        elif dense_score >= dense_threshold:
+            dense_conf = 0.65 + (dense_score - dense_threshold) * 1.3
+        elif dense_score >= (dense_threshold - 0.10):
+            dense_conf = 0.35 + (dense_score - (dense_threshold - 0.10)) * 3.0
+        else:
+            dense_conf = max(0.0, (dense_score - 0.30) * 1.0) if dense_score > 0.30 else 0.0
+
+    # 2. FTS score calibration (BM25 raw score scale)
+    fts_conf = 0.0
+    if fts_score is not None and fts_score > 0:
+        f_score = float(fts_score)
+        if f_score >= 1.5:
+            fts_conf = min(0.95, 0.70 + (f_score - 1.5) * 0.1)
+        elif f_score >= 1.0:
+            fts_conf = 0.55 + (f_score - 1.0) * 0.30
+        elif f_score >= 0.5:
+            fts_conf = 0.35 + (f_score - 0.5) * 0.40
+        else:
+            # Low BM25 score (<0.5) indicates accidental single-stopword hit (e.g. "في")
+            fts_conf = f_score * 0.50
+
+    # 3. Channel combination
+    if dense_score is not None and fts_score is not None and fts_score > 0:
+        if dense_score >= dense_threshold and fts_conf >= 0.55:
+            # Strong dual-channel corroboration
+            conf = min(0.98, max(dense_conf, fts_conf) + 0.08)
+        elif dense_score >= dense_threshold:
+            # Strong dense with weak FTS
+            conf = dense_conf
+        elif fts_conf >= 0.60:
+            # Strong FTS with weak dense
+            conf = fts_conf
+        else:
+            # Both channels weak or accidental nearest-neighbor / stopword
+            conf = max(dense_conf, fts_conf) * 0.4
+    elif fts_score is not None and fts_score > 0:
+        conf = fts_conf
+    elif dense_score is not None:
+        if dense_score >= dense_threshold:
+            conf = dense_conf
+        else:
+            # Uncorroborated low-similarity nearest neighbor: severe penalty
+            conf = dense_conf * 0.4
+    else:
+        conf = 0.0
+
+    candidate.confidence_score = round(conf, 4)
+    candidate.score_type = "calibrated_confidence"
+    candidate.is_relevant = (candidate.confidence_score >= min_confidence)
+    return candidate.confidence_score
+
+
 @dataclass
 class RetrievalDependencies:
     repository: ZvecRepository
@@ -197,19 +263,41 @@ class RetrievalService:
             mode = RetrievalMode.UNAVAILABLE
             warnings.append("تعذّر الاسترجاع بالكامل: لا نتائج دلالية ولا نصية متاحة.")
 
-        fused = fused[: settings.fused_candidates]
+        # Calibrate all candidate scores against explicit threshold
+        dense_thresh = getattr(settings, "dense_similarity_threshold", 0.65)
+        min_conf = getattr(settings, "min_evidence_confidence", 0.60)
+
+        for candidate in fused:
+            calibrate_candidate_confidence(candidate, dense_thresh, min_conf)
+
+        raw_fused = fused[: settings.fused_candidates]
+        relevant_fused = [c for c in raw_fused if c.is_relevant]
+
+        has_relevant = bool(relevant_fused)
+        top_confidence = raw_fused[0].confidence_score if raw_fused else 0.0
+
+        if not has_relevant:
+            relevance_decision = "no_relevant_evidence"
+            warnings.append("لم يتم العثور على شواهد محلية كافية الثقة بالاستعلام.")
+            fused_to_return = []
+        else:
+            relevance_decision = "relevant"
+            fused_to_return = relevant_fused
 
         return RetrievalResult(
             query=rewritten.original_question,
             rewritten=rewritten,
             dense_candidates=dense_candidates,
             fts_candidates=fts_candidates,
-            fused_candidates=fused,
+            fused_candidates=fused_to_return,
             reranked_candidates=[],
             mode=mode,
             reranker_used="",
             fallback_events=fallback_events,
             warnings=warnings,
+            is_relevant=has_relevant,
+            relevance_decision=relevance_decision,
+            top_confidence=top_confidence,
         )
 
     @staticmethod
