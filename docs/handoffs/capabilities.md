@@ -66,7 +66,7 @@ After commit, `git status --porcelain` will be clean except for this handoff.
   docs/handoffs/capabilities.md   # this file
   ```
 
-  Hash after commit: _to be filled by git log_ (run `git log --oneline -1` on `herdr/capabilities`).
+  Hash after commit: `a66c89a` (`feat(capabilities): add declarative registry, matrix, and public-path verification`) — verified `uv run python -m pytest tests/capabilities -v` 24 passed.
 
 - **Branch:** `herdr/capabilities` worktree `C:\Users\nawaf\.herdr\worktrees\Sard_Agent\herdr-capabilities` (isolated via `herdr` worktree discipline; no shared-file writes).
 
