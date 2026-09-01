@@ -143,6 +143,7 @@ function ChatAppContent() {
       query: trimmed,
       attachments: atts,
       sessionId,
+      lang,
       signal: controller.signal,
       onStatus: (statusText) => {
         setMessages((prev) =>

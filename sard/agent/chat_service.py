@@ -20,10 +20,13 @@ from sard.agent.capability_routing import (
 )
 from sard.agent.cultural_router import (
     CULTURAL_SYSTEM_PROMPT,
+    CULTURAL_SYSTEM_PROMPT_EN,
     CulturalQueryResult,
     CulturalRouter,
     RetrievalDecision,
 )
+from sard.agent.lang_utils import resolve_language
+from sard.agent.scope_guard import check_scope_before_retrieval
 from sard.agent.util import sanitize_cultural_output
 from sard.config.models import ModelConfigError, get_chat_model, get_model_settings
 from sard.outputs.orchestrator import (
@@ -37,6 +40,7 @@ from sard.schemas.isnad import IsnadChain, PlannerResult
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = CULTURAL_SYSTEM_PROMPT
+_SYSTEM_PROMPT_EN = CULTURAL_SYSTEM_PROMPT_EN
 
 
 @dataclass(frozen=True)
@@ -152,12 +156,14 @@ class ChatService:
         self,
         user_query: str,
         mock_multimodal_files: Optional[dict] = None,
+        lang: str = "ar",
     ) -> CulturalQueryResult:
         """Run the hybrid cultural router and synthesize an answer grounded in RAG/Web/Multimodal sources."""
         return self.router.answer_query(
             user_query,
             llm_invoke_fn=self._invoke_llm_str if (self._injected_model is not None or self._can_load_model()) else None,
             mock_multimodal_files=mock_multimodal_files,
+            lang=lang,
         )
 
     def ask(
@@ -169,6 +175,7 @@ class ChatService:
         session_id: Optional[str] = None,
         mock_multimodal_files: Optional[dict] = None,
         status_callback: Optional[Callable[[str, str], None]] = None,
+        lang: Optional[str] = None,
     ) -> ChatResult:
         """Send a user query (or full conversation messages) to the configured assistant.
 
@@ -178,7 +185,24 @@ class ChatService:
         if not user_query or not user_query.strip():
             return ChatResult(
                 ok=False,
-                error_message="الرجاء إدخال سؤال قبل الإرسال.",
+                error_message="الرجاء إدخال سؤال قبل الإرسال." if (lang or "ar") == "ar" else "Please enter a question before sending.",
+            )
+
+        # Resolve language: explicit locale wins, else infer from query
+        resolved_lang = resolve_language(lang, user_query)
+
+        # Scope guardrail: block clearly out-of-scope foreign-only queries before any retrieval
+        should_block, scope_response = check_scope_before_retrieval(user_query, lang=resolved_lang)
+        if should_block:
+            # Still allow artifact generation if the blocked query explicitly requested an artifact?
+            # No — scope block takes precedence; do not generate artifacts for out-of-scope.
+            return ChatResult(
+                ok=True,
+                text=sanitize_cultural_output(scope_response),
+                decision="scope_block",
+                citations=[],
+                planner_result=None,
+                artifacts=[],
             )
 
         # 1. Intent & Modality Classification (survives every fallback)
@@ -188,6 +212,22 @@ class ChatService:
         def _empty_hedge(query: str) -> str:
             q_norm = (query or "").lower().strip()
             if any(q_norm == g or q_norm.startswith(g + " ") for g in ["من أنت", "من انت", "عرفني بنفسك", "عرف بنفسك", "ما هو سرد", "مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "أهلاً", "hello", "hi", "who are you"]):
+                if resolved_lang == "en":
+                    return (
+                        "Welcome! 🇸🇦\n\n"
+                        "I am **Sard**, your Saudi Cultural Companion — grounded in verified records from the **Saudi Ministry of Culture** and **King Abdulaziz Foundation**.\n\n"
+                        "### How can I help you today?\n"
+                        "1. **Regional heritage & identity** across the 13 Saudi regions.\n"
+                        "2. **Eleven cultural sectors**: Heritage, Culinary Arts, Fashion, Literature, Music, Architecture, Museums, Visual Arts, Theater, Film, and Libraries.\n"
+                        "3. **Interactive outputs**:\n"
+                        "   - **Presentations (PowerPoint .pptx)** for cultural briefings.\n"
+                        "   - **Recipe & craft cards (PDF)**.\n"
+                        "   - **Etiquette & hospitality simulators** with flowcharts.\n"
+                        "   - **Proverbs & dialects** with lore.\n"
+                        "   - **Memoir booklets** for family oral history.\n"
+                        "   - **Heritage calendars (.ics)**.\n\n"
+                        "Please ask a question or pick a topic to begin!"
+                    )
                 return (
                     "أهلاً وسهلاً بك! 🇸🇦\n\n"
                     "أنا **سرد**، رفيقك الثقافي الذكي ومستشارك المعتمد لاستكشاف التراث والحضارة في المملكة العربية السعودية، "
@@ -204,7 +244,17 @@ class ChatService:
                     "   - مزامنة **المواسم الفلكية والمناسبات التراثية (.ics)**.\n\n"
                     "تفضل بطرح سؤالك أو اختر موضوعاً للبدء!"
                 )
-            # Explicit Arabic hedge, never empty string, never shrimp/Eastern/UNESCO canned article
+            # Bilingual hedge
+            if resolved_lang == "en":
+                return (
+                    f"Unable to generate a verified answer for: \"{query[:120]}\" at this time.\n\n"
+                    "To preserve knowledge integrity, I don't generate unsourced syntheses.\n"
+                    "I can help you with:\n"
+                    "- Tailored heritage and tourism itineraries by region and duration.\n"
+                    "- Verified information on archaeological sites, arts, and handicrafts.\n"
+                    "- Cultural events and seasons organized by the Ministry of Culture.\n\n"
+                    "Please clarify the region or context you need, or try again."
+                )
             return (
                 f"تعذّر توليد إجابة موثقة عن: \"{query[:120]}\" في الوقت الحالي.\n\n"
                 "حفاظًا على الأمانة المعرفية، لا أقدّم توليفًا غير مُسنَد بلا مصادر.\n"
@@ -236,7 +286,8 @@ class ChatService:
                 return []
             if status_callback:
                 try:
-                    status_callback("generating_artifacts", f"جارٍ إعداد وتوليد المخرجات المطلوبة ({', '.join(intent.requested_formats)})...")
+                    msg = f"جارٍ إعداد وتوليد المخرجات المطلوبة ({', '.join(intent.requested_formats)})..." if resolved_lang == "ar" else f"Preparing requested outputs ({', '.join(intent.requested_formats)})..."
+                    status_callback("generating_artifacts", msg)
                 except Exception:
                     pass
             local_artifacts: list[dict[str, Any]] = []
@@ -300,6 +351,7 @@ class ChatService:
                     session_id=session_id,
                     mock_multimodal_files=mock_multimodal_files,
                     status_callback=status_callback,
+                    lang=resolved_lang,
                 )
                 for ev in plan_res.visible_sources:
                     citations.append({
@@ -310,11 +362,15 @@ class ChatService:
                         "source_type": ev.source_type,
                     })
 
-                text_resp = sanitize_cultural_output(plan_res.answer_ar or plan_res.answer_en or "")
+                # Choose answer language based on resolved locale
+                if resolved_lang == "en":
+                    text_resp = sanitize_cultural_output(plan_res.answer_en or plan_res.answer_ar or "")
+                else:
+                    text_resp = sanitize_cultural_output(plan_res.answer_ar or plan_res.answer_en or "")
                 decision = plan_res.chain.decision
             except Exception as exc:
                 logger.warning("Isnād planner execution encountered exception: %s. Falling back to cultural router.", exc)
-                cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files)
+                cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files, lang=resolved_lang)
                 text_resp = sanitize_cultural_output(cultural_res.answer_text)
                 decision = cultural_res.decision
                 citations = cultural_res.citations
@@ -346,10 +402,15 @@ class ChatService:
             # Even on config error, if artifact requested, return failed artifact so SSE can surface it
             if intent.explicit_artifact_request:
                 artifacts = _maybe_orchestrate(_empty_hedge(user_query), [])
-            return ChatResult(ok=False, error_message=str(exc), artifacts=artifacts)
+            # Localize error message if possible
+            err_msg = str(exc)
+            if resolved_lang == "en" and "ANTHROPIC_API_KEY" in err_msg:
+                err_msg = "Server not configured: missing API credentials. Please configure ANTHROPIC_API_KEY or another provider."
+            return ChatResult(ok=False, error_message=err_msg, artifacts=artifacts)
 
         try:
-            lc_messages: list[BaseMessage] = [SystemMessage(content=_SYSTEM_PROMPT)]
+            system_prompt = _SYSTEM_PROMPT_EN if resolved_lang == "en" else _SYSTEM_PROMPT
+            lc_messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
             if messages:
                 for m in messages[:-1]:
                     role = m.get("role")

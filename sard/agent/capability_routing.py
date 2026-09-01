@@ -95,6 +95,24 @@ _FORMAT_PNG_RE = re.compile(
     re.I,
 )
 
+# --- Artifact creation intent helpers (bilingual, robust aliases) ---
+_CREATION_VERB_RE = re.compile(
+    r"(أنشئ|انشئ|أنشئ لي|اعطني|أعطني|أعطني ملف|اعطني ملف|صمم|جهز|حضّر|حضر|حوّل|حول|حول هذا|حوّل هذا|سوّي|سوي|اعمل|احتاج|أحتاج|أحتاج ملف|اريد|أريد|أريد ملف|create|make|generate|need|i need|give me|provide|want|build|design|convert|turn into|prepare|produce|حوّل هذا إلى|حول هذا إلى)",
+    re.I,
+)
+_FORMAT_QUESTION_RE = re.compile(
+    r"(ما هو\s*(?:ملف\s*)?(?:pdf|docx|pptx|ics|svg|png|تقرير|عرض تقديمي|بوربوينت)|ما هي\s*(?:صيغة|مميزات|فوائد).*(?:pdf|docx|pptx)|what is\s*(?:a\s*)?(?:pdf|docx|pptx|ics|svg|png|presentation|report|powerpoint)|define\s*(?:pdf|docx|pptx)|explain\s*what\s*is\s*(?:pdf|pptx))",
+    re.I,
+)
+_REPORT_DOWNLOADABLE_RE = re.compile(
+    r"(تقرير\s*قابل\s*للتحميل|تقرير\s*للطباعة|قابل\s*للتحميل|قابل\s*للطباعة|تحويل.*تقرير|حوّل.*تقرير|حول.*تقرير|printable\s+report|downloadable\s+report|convert.*to.*report|make.*report\s*downloadable|generate.*report)",
+    re.I,
+)
+_GENERIC_REPORT_WITH_VERB_RE = re.compile(
+    r"(?:حوّل|حول|أنشئ|انشئ|اعطني|أعطني|صمم|جهز|احتاج|أحتاج|create|make|generate|convert).*(?:تقرير|report|مستند|document|وثيقة)",
+    re.I,
+)
+
 _PRESENTATION_HINT = re.compile(
     r"(عرض تقديمي|شرائح|بوربوينت|pptx|presentation|slides|سلايدات|برزنتيشن|إيجاز ثقافي|powerpoint)",
     re.I,
@@ -155,10 +173,31 @@ _DOC_OCR_HINT = re.compile(r"(مخطوطة|وثيقة|صفحة|مسح|ocr|pdf|ma
 _3D_HINT = re.compile(r"(مجسم|نموذج ثلاثي|3d|mesh|ply|obj|stl|nifti)", re.I)
 
 
+def is_format_question(query: str) -> bool:
+    """Return True if the user is asking about a format (e.g. 'what is PDF?') without creation intent."""
+    q = query.strip()
+    if _FORMAT_QUESTION_RE.search(q):
+        # If creation verb also present, treat as creation request, not pure question
+        if _CREATION_VERB_RE.search(q):
+            return False
+        # Check that no creation verb like 'أنشئ' etc is near format term
+        return True
+    # Fallback: question mark + format word + no creation verb
+    q_low = q.lower()
+    has_question = "?" in q or "؟" in q or q_low.startswith("ما هو") or q_low.startswith("ما هي") or q_low.startswith("what is") or q_low.startswith("what are")
+    has_format_word = any(k in q_low for k in ["pdf", "docx", "pptx", "powerpoint", "presentation"])
+    if has_question and has_format_word and not _CREATION_VERB_RE.search(q):
+        return True
+    return False
+
+
 def extract_requested_formats(query: str) -> List[str]:
     """Detect explicitly requested output file formats in Arabic and English queries."""
     formats: List[str] = []
     q = query.strip()
+
+    if is_format_question(q):
+        return []
 
     if _FORMAT_PDF_RE.search(q):
         formats.append("pdf")
@@ -174,6 +213,23 @@ def extract_requested_formats(query: str) -> List[str]:
         # Only add png if not solely referencing an input @file.png
         if any(w in q.lower() for w in ["png", "بصيغة png", "بطاقة صورة", "بطاقة"]):
             formats.append("png")
+
+    # Generic downloadable/printable report -> infer PDF if creation intent present
+    if not is_format_question(q):
+        if _REPORT_DOWNLOADABLE_RE.search(q):
+            if "pdf" not in formats:
+                formats.append("pdf")
+        elif _GENERIC_REPORT_WITH_VERB_RE.search(q):
+            # e.g. "حوّل هذا إلى تقرير" or "create a report about..." -> default to pdf
+            if "pdf" not in formats and "docx" not in formats:
+                # Only infer if no explicit format already and creation verb present
+                if _CREATION_VERB_RE.search(q):
+                    formats.append("pdf")
+        # English printable report heuristic
+        q_low = q.lower()
+        if ("printable" in q_low or "downloadable" in q_low) and ("report" in q_low or "تقرير" in q_low):
+            if "pdf" not in formats:
+                formats.append("pdf")
 
     return formats
 
@@ -241,41 +297,83 @@ def classify_intent(
     elif "image" in modalities and (_FILE_IMAGE_RE.search(q_lower) or "صورة" in q_lower):
         domain_cap = Capability.VISION
 
-    # Specialized tool heuristics
+    # Specialized tool heuristics (order: presentation -> recipe -> greeting to avoid "card" collision)
     elif _PRESENTATION_HINT.search(q):
-        domain_cap = Capability.PRESENTATION_DECK
-        if "pptx" not in req_formats:
-            req_formats.append("pptx")
-            explicit_artifact = True
-    elif _GREETING_HINT.search(q) and any(k in q_lower for k in ["بطاقة", "كارت", "تهنئة", "معايدة"]):
-        domain_cap = Capability.GREETING_CARD
-        if not req_formats:
-            req_formats.extend(["pdf", "svg"])
-            explicit_artifact = True
-    elif _RECIPE_HINT.search(q) and any(k in q_lower for k in ["وصفة", "طريقة", "مقادير", "طبخة", "recipe"]):
-        domain_cap = Capability.RECIPE_CARD
-        if "pdf" in req_formats or "بطاقة" in q_lower:
+        if is_format_question(q):
+            domain_cap = Capability.SIMPLE_CONVERSATION
+        else:
+            domain_cap = Capability.PRESENTATION_DECK
+            if "pptx" not in req_formats:
+                req_formats.append("pptx")
+                explicit_artifact = True
+    elif _RECIPE_HINT.search(q) and any(k in q_lower for k in ["وصفة", "طريقة", "مقادير", "طبخة", "recipe", "dish", "card"]):
+        if is_format_question(q):
+            domain_cap = Capability.SIMPLE_CONVERSATION
+        else:
+            # Ensure it's really a recipe request, not just "dish" in isolation without card/recipe context
+            if any(k in q_lower for k in ["وصفة", "recipe", "بطاقة وصفة", "recipe card"]):
+                domain_cap = Capability.RECIPE_CARD
+                if "pdf" not in req_formats:
+                    req_formats.append("pdf")
+                explicit_artifact = True
+            elif "طبخة" in q_lower or "مقادير" in q_lower or "طريقة" in q_lower:
+                domain_cap = Capability.RECIPE_CARD
+                if "pdf" not in req_formats:
+                    req_formats.append("pdf")
+                explicit_artifact = True
+            else:
+                # Generic cooking term without card -> still recipe but not necessarily artifact unless explicit
+                domain_cap = Capability.RECIPE_CARD
+                if "pdf" not in req_formats and "بطاقة" in q_lower:
+                    req_formats.append("pdf")
+                    explicit_artifact = True
+                elif "pdf" in req_formats:
+                    explicit_artifact = True
+    elif _GREETING_HINT.search(q) and any(k in q_lower for k in ["بطاقة", "كارت", "تهنئة", "معايدة", "greeting", "card"]):
+        # Require greeting-specific context, not just lone "card" (which could be recipe)
+        has_greeting_context = any(k in q_lower for k in ["تهنئة", "معايدة", "يوم التأسيس", "اليوم الوطني", "عيد", "greeting", "foundation day", "national day", "ramadan", "eid"])
+        has_card = "card" in q_lower or "بطاقة" in q_lower or "كارت" in q_lower
+        if (has_greeting_context and has_card) or any(k in q_lower for k in ["بطاقة تهنئة", "greeting card"]):
+            if is_format_question(q):
+                domain_cap = Capability.SIMPLE_CONVERSATION
+            else:
+                domain_cap = Capability.GREETING_CARD
+                if not req_formats:
+                    req_formats.extend(["pdf", "svg"])
+                    explicit_artifact = True
+                elif "pdf" not in req_formats and "svg" not in req_formats:
+                    req_formats.append("pdf")
+                    explicit_artifact = True
+        else:
+            # Lone "card" without greeting context -> likely recipe card already handled; treat as simple to allow fallthrough
+            domain_cap = Capability.SIMPLE_CONVERSATION
+    elif _CALENDAR_HINT.search(q) and any(k in q_lower for k in ["تقويم", "مزامنة", "روزنامة", "calendar", "سهيل", "المربعانية"]) and not _ITINERARY_KEYWORDS.search(q):
+        if is_format_question(q):
+            domain_cap = Capability.SIMPLE_CONVERSATION
+        else:
+            domain_cap = Capability.CALENDAR_SYNC
+            if "ics" not in req_formats:
+                req_formats.append("ics")
+                explicit_artifact = True
+    elif _ETIQUETTE_HINT.search(q):
+        if is_format_question(q):
+            domain_cap = Capability.SIMPLE_CONVERSATION
+        else:
+            domain_cap = Capability.ETIQUETTE_SIMULATOR
+            if "svg" not in req_formats:
+                req_formats.append("svg")
+                explicit_artifact = True
+    elif _ORAL_HISTORY_HINT.search(q) and any(k in q_lower for k in ["شفوي", "حكواتي", "سيرة", "ذكريات", "memoir"]):
+        if is_format_question(q):
+            domain_cap = Capability.SIMPLE_CONVERSATION
+        else:
+            domain_cap = Capability.ORAL_HISTORY
             if "pdf" not in req_formats:
                 req_formats.append("pdf")
-            explicit_artifact = True
-    elif _CALENDAR_HINT.search(q) and any(k in q_lower for k in ["تقويم", "مزامنة", "روزنامة", "calendar", "سهيل", "المربعانية"]) and not _ITINERARY_KEYWORDS.search(q):
-        domain_cap = Capability.CALENDAR_SYNC
-        if "ics" not in req_formats:
-            req_formats.append("ics")
-            explicit_artifact = True
-    elif _ETIQUETTE_HINT.search(q):
-        domain_cap = Capability.ETIQUETTE_SIMULATOR
-        if "svg" not in req_formats:
-            req_formats.append("svg")
-            explicit_artifact = True
-    elif _ORAL_HISTORY_HINT.search(q) and any(k in q_lower for k in ["شفوي", "حكواتي", "سيرة", "ذكريات", "memoir"]):
-        domain_cap = Capability.ORAL_HISTORY
-        if "pdf" not in req_formats:
-            req_formats.append("pdf")
-            explicit_artifact = True
-    elif _DIALECT_HINT.search(q) and any(k in q_lower for k in ["لهجة", "مثل", "أمثال", "سالفة", "معنى", "مصطلح", "proverb"]):
+                explicit_artifact = True
+    elif _DIALECT_HINT.search(q) and any(k in q_lower for k in ["لهجة", "مثل", "أمثال", "سالفة", "معنى", "مصطلح", "proverb", "dialect", "slang"]):
         domain_cap = Capability.DIALECT_PROVERB
-    elif _ARTISAN_HINT.search(q) and any(k in q_lower for k in ["حرفة", "سدو", "بشت", "ورد", "قط", "أصالة", "craft"]):
+    elif _ARTISAN_HINT.search(q) and any(k in q_lower for k in ["حرفة", "سدو", "بشت", "ورد", "قط", "أصالة", "craft", "artisan", "sadu", "bisht"]):
         domain_cap = Capability.ARTISAN_CRAFT
     elif _RESEARCH_HINT.search(q):
         domain_cap = Capability.VERIFIED_RESEARCH
@@ -290,10 +388,13 @@ def classify_intent(
     elif _MAP_HINT.search(q):
         domain_cap = Capability.MAP_GENERATION
     elif _DIAGRAM_HINT.search(q):
-        domain_cap = Capability.DIAGRAM_GENERATION
-        if "svg" not in req_formats:
-            req_formats.append("svg")
-            explicit_artifact = True
+        if is_format_question(q):
+            domain_cap = Capability.SIMPLE_CONVERSATION
+        else:
+            domain_cap = Capability.DIAGRAM_GENERATION
+            if "svg" not in req_formats:
+                req_formats.append("svg")
+                explicit_artifact = True
     elif _FRESH_KEYWORDS.search(q):
         domain_cap = Capability.FRESH_EVENT_PLACE
     elif any(k in q_lower for k in ["أين", "متى", "من هو", "تاريخ", "تراث", "ثقافة", "موقع", "يونسكو", "وزارة الثقافة", "نجد", "الحجاز", "عسير", "العلا", "الدرعية", "history", "heritage", "culture", "alula", "diriyah", "riyadh", "saudi", "briefing"]):
@@ -301,6 +402,15 @@ def classify_intent(
     elif len(q.split()) > 30 or any(k in q_lower for k in ["لماذا", "كيف", "analyse", "analyze", "explain why"]):
         domain_cap = Capability.COMPLEX_REASONING
     else:
+        domain_cap = Capability.SIMPLE_CONVERSATION
+
+    # Final safeguard: if this was a pure format question, never claim artifact
+    if is_format_question(q):
+        explicit_artifact = False
+        # Remove any artifact formats that were spuriously added (should already be empty)
+        req_formats = [f for f in req_formats if f == "text"]
+        if not req_formats:
+            req_formats = []
         domain_cap = Capability.SIMPLE_CONVERSATION
 
     # Extract topic heuristics

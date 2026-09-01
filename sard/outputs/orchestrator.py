@@ -926,28 +926,30 @@ class ArtifactOrchestrator:
             if fmt == "text":
                 continue
 
-            # Determine kind from domain capability
+            # Determine kind from domain capability (bilingual titles)
+            import re as _re
+            is_ar = bool(_re.search(r"[\u0600-\u06FF]", intent.extracted_topic))
             if intent.domain_capability == Capability.PRESENTATION_DECK or fmt == "pptx":
                 kind = "presentation"
-                title = f"عرض تقديمي: {intent.extracted_topic}"
+                title = f"عرض تقديمي: {intent.extracted_topic}" if is_ar else f"Presentation: {intent.extracted_topic}"
             elif intent.domain_capability == Capability.CALENDAR_SYNC or fmt == "ics":
                 kind = "calendar"
-                title = f"تقويم ومواسم: {intent.extracted_topic}"
+                title = f"تقويم ومواسم: {intent.extracted_topic}" if is_ar else f"Heritage Calendar: {intent.extracted_topic}"
             elif intent.domain_capability == Capability.GREETING_CARD:
                 kind = "card"
-                title = f"بطاقة تهنئة: {intent.extracted_topic}"
+                title = f"بطاقة تهنئة: {intent.extracted_topic}" if is_ar else f"Greeting Card: {intent.extracted_topic}"
             elif intent.domain_capability == Capability.ETIQUETTE_SIMULATOR or fmt == "svg":
                 kind = "diagram"
-                title = f"مخطط إرشادي: {intent.extracted_topic}"
+                title = f"مخطط إرشادي: {intent.extracted_topic}" if is_ar else f"Guidance Diagram: {intent.extracted_topic}"
             elif intent.domain_capability == Capability.RECIPE_CARD:
                 kind = "recipe"
-                title = f"بطاقة وصفة: {intent.extracted_topic}"
+                title = f"بطاقة وصفة: {intent.extracted_topic}" if is_ar else f"Recipe Card: {intent.extracted_topic}"
             elif intent.domain_capability == Capability.ORAL_HISTORY:
                 kind = "memoir"
-                title = f"سيرة وتاريخ شفوي: {intent.extracted_topic}"
+                title = f"سيرة وتاريخ شفوي: {intent.extracted_topic}" if is_ar else f"Memoir: {intent.extracted_topic}"
             else:
                 kind = "document"
-                title = f"تقرير ثقافي: {intent.extracted_topic}"
+                title = f"تقرير ثقافي: {intent.extracted_topic}" if is_ar else f"Cultural Report: {intent.extracted_topic}"
 
             req = ArtifactRequest(
                 format=fmt,

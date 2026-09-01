@@ -50,11 +50,41 @@ class IsnadPlanner:
         lang: str = "ar",
     ) -> PlannerResult:
         """Synchronous execution of the Isnād planning loop."""
+        # Scope guardrail first (do not let retrieval override confident out-of-scope)
+        try:
+            from sard.agent.scope_guard import check_scope_before_retrieval
+            should_block, scope_text = check_scope_before_retrieval(query, lang=lang)
+            if should_block:
+                from sard.schemas.isnad import IsnadChain
+                chain = IsnadChain(request_id=f"req-{uuid.uuid4().hex[:8]}", classification="other", region="unknown", evidence=[], atoms=[], conflicts=[], score="low", decision="refuse", missing=["out_of_scope"])
+                from sard.schemas.isnad import Evidence
+                # Return a PlannerResult that surfaces the scope message directly
+                # Use language-appropriate field
+                if lang == "en":
+                    return __import__("sard.schemas.isnad", fromlist=["PlannerResult"]).PlannerResult(chain=chain, answer_ar=scope_text, answer_en=scope_text, visible_sources=[], follow_up="Please add a Saudi heritage angle if you wish.")
+                else:
+                    return __import__("sard.schemas.isnad", fromlist=["PlannerResult"]).PlannerResult(chain=chain, answer_ar=scope_text, answer_en=scope_text, visible_sources=[], follow_up="هل تود إضافة جانب سعودي للمقارنة؟")
+        except Exception:
+            pass
+
         req_id = f"req-{uuid.uuid4().hex[:8]}"
         canvas = self.memory.create_canvas(req_id)
 
         def _notify(stage: str, msg_ar: str):
             if status_callback:
+                # Localize status if lang is English
+                if lang == "en":
+                    # Simple mapping for key statuses
+                    en_map = {
+                        "جارٍ تصنيف الاستفسار وفحص المرفقات والوسائط...": "Classifying query and checking attachments...",
+                        "جارٍ تحديد المنطقة والسياق التراثي وهوية السائل...": "Locating cultural region and context...",
+                        "جارٍ استرجاع الشواهد من موسوعة المعارف والوثائق المعتمدة...": "Retrieving evidence from verified heritage records...",
+                        "جارٍ تجميع سلسلة الإسناد وتدقيق نسبة الشواهد...": "Assembling provenance chain...",
+                        "جارٍ احتساب درجة الإسناد وفحص موثوقية الأصول...": "Scoring provenance confidence...",
+                        "جارٍ اتخاذ القرار التوثيقي (توليد / تحوط / رفض)...": "Making documentation decision...",
+                        "جارٍ صياغة الرواية المعتمدة مع إظهار الإسناد والمصادر...": "Composing verified narrative with sources...",
+                    }
+                    msg_ar = en_map.get(msg_ar, msg_ar)
                 status_callback(stage, msg_ar)
 
         # Stage 1: Classify
@@ -92,6 +122,24 @@ class IsnadPlanner:
             target_region=location.region,
             mock_multimodal_files=mock_multimodal_files,
         )
+        # Dialect/proverb weak-evidence filter: require lexical overlap, otherwise treat as no evidence to force clarification
+        if classification == "dialect":
+            import re as _re2
+            proverb_terms = [t for t in _re2.findall(r"[\u0600-\u06FF]+", query) if len(t) > 2]
+            if proverb_terms:
+                has_match = False
+                for ev in evidence:
+                    low = (ev.excerpt or "").lower()
+                    for term in proverb_terms:
+                        if term.lower() in low:
+                            has_match = True
+                            break
+                    if has_match:
+                        break
+                if not has_match:
+                    # Keep logs but clear evidence to trigger low confidence ask flow without irrelevant citations
+                    logs.append("تضارب معجمي للمثل: لا تطابق لفظي في الشواهد المسترجعة — تم تصفية الأدلة وطلب توضيح.")
+                    evidence = []
         ev_ids = [e.source_id for e in evidence]
         canvas.set_stage_status(
             "retrieve",

@@ -56,6 +56,7 @@ export interface StreamChatOptions {
   attachments?: Attachment[];
   sessionId?: string;
   itineraryMode?: boolean;
+  lang?: string;
   signal?: AbortSignal;
   onStatus?: (statusText: string) => void;
   onCitations?: (citations: Citation[]) => void;
@@ -165,6 +166,7 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
     attachments,
     sessionId,
     itineraryMode = false,
+    lang,
     signal,
     onStatus,
     onCitations,
@@ -199,6 +201,8 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
           session_id: sessionId,
           itinerary_mode: itineraryMode,
           attachments: formattedAttachments,
+          lang: lang || undefined,
+          locale: lang || undefined,
         }),
         signal,
       });

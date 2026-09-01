@@ -106,8 +106,32 @@ def generate_isnad_response(
             follow_up="هل ترغب في تحديد المنطقة التراثية أو الاستفسار عن موقع موثق محدد؟",
         )
 
-    # Case 2: Clarification / Ask
+    # Case 2: Clarification / Ask (with dialect/proverb specialization)
     if chain.decision == "ask":
+        # Dialect/proverb weak-evidence specialization
+        if chain.classification == "dialect":
+            if lang == "en":
+                answer_en = (
+                    "I couldn't find verified documentation for this proverb or dialect expression.\n\n"
+                    "To provide an accurate interpretation, please clarify:\n"
+                    "- The exact wording as you heard it.\n"
+                    "- The region/dialect (Najdi, Hijazi, Eastern, Southern).\n"
+                    "- The speaker context or occasion where it's used.\n"
+                    "- If you want a **tentative** linguistic interpretation, I can offer one clearly marked as tentative without unrelated citations."
+                )
+                answer_ar = answer_en
+            else:
+                answer_ar = (
+                    "لم أجد توثيقًا كافيًا لهذا المثل أو العبارة العامية في السجلات التراثية المتاحة.\n\n"
+                    "للتفسير الدقيق، هل يمكنك توضيح:\n"
+                    "- النص الحرفي للمثل كما سمعته.\n"
+                    "- المنطقة أو اللهجة (نجدية، حجازية، شرقاوية، جنوبية).\n"
+                    "- سياق الاستخدام أو المناسبة.\n"
+                    "- إن رغبت بتفسير لغوي **مبدئي ومُحتمل** يمكنني تقديمه مع التنبيه الواضح أنه اجتهاد لغوي غير موثق بلا استشهاد غير ذي صلة."
+                )
+                answer_en = answer_ar
+            return PlannerResult(chain=chain, answer_ar=answer_ar, answer_en=answer_en, visible_sources=[], follow_up="يرجى تزويد النص الحرفي والمنطقة." if lang=="ar" else "Please provide exact wording and region.")
+        # Generic ask
         answer_ar = (
             "أهلاً بك! لتزويدك بالرواية والتوثيق التراثي الدقيق المستند إلى مراجع وزارة الثقافة، "
             "يُرجى توضيح المنطقة أو المناسبة المستهدفة:\n\n"
@@ -115,16 +139,24 @@ def generate_isnad_response(
             "- ما هو السياق أو المناسبة؟ (مثال: عمارة تقليدية، عادات ضيافة، طعام شعبي، أزياء)\n\n"
             "سأقوم فوراً بربط استفسارك بسلسلة الإسناد والوثائق الخاصة بالمنطقة المطلوبة."
         )
-        answer_en = (
-            "To provide you with verified cultural narratives, please specify the exact region "
-            "(e.g., Najd, Hijaz, Asir, Eastern Province) and the specific context."
-        )
+        if lang == "en":
+            answer_en = (
+                "To provide you with verified cultural narratives, please specify the exact region "
+                "(e.g., Najd, Hijaz, Asir, Eastern Province) and the specific context.\n\n"
+                "- Which region are you interested in?\n"
+                "- What context or occasion (architecture, hospitality, cuisine, attire)?"
+            )
+        else:
+            answer_en = (
+                "To provide you with verified cultural narratives, please specify the exact region "
+                "(e.g., Najd, Hijaz, Asir, Eastern Province) and the specific context."
+            )
         return PlannerResult(
             chain=chain,
             answer_ar=answer_ar,
             answer_en=answer_en,
             visible_sources=[],
-            follow_up="يرجى تحديد المنطقة التراثية.",
+            follow_up="يرجى تحديد المنطقة التراثية." if lang=="ar" else "Please specify the heritage region.",
         )
 
     # Case 3 & 4: Generate or Hedge
@@ -164,34 +196,62 @@ def generate_isnad_response(
             follow_up="هل تود استكشاف المزيد عن تفاصيل العمارة النجدية أو أنواع الأخشاب المحلية المستخدمة؟",
         )
 
-    # Standard Grounded Synthesis
+    # Standard Grounded Synthesis (language-aware)
     if llm_invoke_fn:
         try:
-            sys_prompt = (
-                "أنت «سرد»، المستشار الثقافي السعودي الأصيل. صُغ إجابة موثقة، غنية، وأنيقة باللغة العربية الفصحى مستندة للشواهد المعطاة.\n"
-                "القواعد الصارمة:\n"
-                "1. انسب كل تفصيل إلى منطقته ومصدره بدقة وانسيابية.\n"
-                "2. يُمنع منعاً باتاً ذكر كلمة RAG أو أي وسوم برمجية أو تقنية في النص.\n"
-                "3. نسّق الإجابة بشكل جذاب وعناوين واضحة وجداول نظيفة دون وسوم HTML.\n"
-                "4. لا تخلط أي مصطلحات إنجليزية في النص العربي نهائياً."
-            )
-            context = "\n".join(f"[{ev.origin} | {ev.region}]: {ev.excerpt}" for ev in chain.evidence)
-            user_prompt = f"السؤال: {query_text}\n\nالشواهد المعتمدة:\n{context}\n\nصغ الإجابة بالعربية الفصحى مع المصطلحات التراثية المناسبة:"
-            llm_text = llm_invoke_fn(sys_prompt, user_prompt)
-            if llm_text and len(llm_text.strip()) > 30:
-                from sard.agent.util import sanitize_cultural_output
-                full_ar = sanitize_cultural_output(llm_text.strip())
-                return PlannerResult(
-                    chain=chain,
-                    answer_ar=full_ar,
-                    answer_en=None,
-                    visible_sources=visible_sources,
+            if lang == "en":
+                sys_prompt = (
+                    "You are Sard, the authentic Saudi cultural advisor. Compose a verified, rich, elegant answer in English strictly grounded in the provided evidences.\n"
+                    "Strict rules:\n"
+                    "1. Attribute each detail to its region and source smoothly.\n"
+                    "2. Never mention RAG or technical tags.\n"
+                    "3. Format attractively with clear headings and clean tables without HTML.\n"
+                    "4. Do not fabricate lineage, dates, or traditions not in evidence."
                 )
+                context = "\n".join(f"[{ev.origin} | {ev.region}]: {ev.excerpt}" for ev in chain.evidence)
+                user_prompt = f"Question: {query_text}\n\nVerified evidences:\n{context}\n\nCompose the answer in English with appropriate cultural terminology:"
+                llm_text = llm_invoke_fn(sys_prompt, user_prompt)
+                if llm_text and len(llm_text.strip()) > 30:
+                    from sard.agent.util import sanitize_cultural_output
+                    full_en = sanitize_cultural_output(llm_text.strip())
+                    return PlannerResult(
+                        chain=chain,
+                        answer_ar=None,
+                        answer_en=full_en,
+                        visible_sources=visible_sources,
+                    )
+            else:
+                sys_prompt = (
+                    "أنت «سرد»، المستشار الثقافي السعودي الأصيل. صُغ إجابة موثقة، غنية، وأنيقة باللغة العربية الفصحى مستندة للشواهد المعطاة.\n"
+                    "القواعد الصارمة:\n"
+                    "1. انسب كل تفصيل إلى منطقته ومصدره بدقة وانسيابية.\n"
+                    "2. يُمنع منعاً باتاً ذكر كلمة RAG أو أي وسوم برمجية أو تقنية في النص.\n"
+                    "3. نسّق الإجابة بشكل جذاب وعناوين واضحة وجداول نظيفة دون وسوم HTML.\n"
+                    "4. لا تخلط أي مصطلحات إنجليزية في النص العربي نهائياً."
+                )
+                context = "\n".join(f"[{ev.origin} | {ev.region}]: {ev.excerpt}" for ev in chain.evidence)
+                user_prompt = f"السؤال: {query_text}\n\nالشواهد المعتمدة:\n{context}\n\nصغ الإجابة بالعربية الفصحى مع المصطلحات التراثية المناسبة:"
+                llm_text = llm_invoke_fn(sys_prompt, user_prompt)
+                if llm_text and len(llm_text.strip()) > 30:
+                    from sard.agent.util import sanitize_cultural_output
+                    full_ar = sanitize_cultural_output(llm_text.strip())
+                    return PlannerResult(
+                        chain=chain,
+                        answer_ar=full_ar,
+                        answer_en=None,
+                        visible_sources=visible_sources,
+                    )
         except Exception as exc:
             logger.warning("LLM synthesis error in generator: %s", exc)
 
-    # Deterministic fallback synthesis grounded in evidence atoms
+    # Deterministic fallback synthesis grounded in evidence atoms (bilingual)
     excerpts_bullet = "\n".join(f"- **{ev.origin}**: {ev.excerpt}" for ev in chain.evidence)
+    if lang == "en":
+        answer_en = f"Based on verified documentation for region **{chain.region}**:\n\n{excerpts_bullet}\n"
+        if chain.decision == "hedge":
+            answer_en += "\n*(Note: details are based on available sources with caution on exact dates.)*\n"
+        answer_en += _format_isnad_references(visible_sources)
+        return PlannerResult(chain=chain, answer_ar=None, answer_en=answer_en, visible_sources=visible_sources, follow_up="Would you like to see more documents on this topic?")
     answer_ar = (
         f"بناءً على التوثيق المعتمد لمنطقة **{chain.region}**:\n\n"
         f"{excerpts_bullet}\n"

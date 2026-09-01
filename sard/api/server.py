@@ -140,6 +140,8 @@ class ChatRequest(BaseModel):
     itinerary_mode: Optional[bool] = Field(False, description="Whether to trigger full itinerary generation")
     dates: Optional[List[str]] = Field(default_factory=list, description="Optional dates for itinerary")
     attachments: Optional[List[AttachmentPayload]] = Field(default_factory=list, description="Top-level uploaded attachments")
+    lang: Optional[str] = Field(None, description="Explicit UI locale: 'ar' or 'en' (authoritative when present)")
+    locale: Optional[str] = Field(None, description="Alias for lang")
 
 
 class ItineraryRequest(BaseModel):
@@ -158,6 +160,21 @@ def _extract_latest_user_query(req: ChatRequest) -> str:
         if msg.role == "user" and msg.content.strip():
             return msg.content.strip()
     return ""
+
+def _resolve_request_lang(req: ChatRequest, effective_query: str) -> str:
+    # Explicit locale wins (lang or locale), else infer from query
+    explicit = (req.lang or req.locale or "").strip().lower()
+    if explicit in ("ar", "en"):
+        return explicit
+    if explicit.startswith("ar"):
+        return "ar"
+    if explicit.startswith("en"):
+        return "en"
+    # Infer
+    import re as _re
+    if _re.search(r"[\u0600-\u06FF]", effective_query):
+        return "ar"
+    return "en"
 
 
 def _extract_all_attachments(req: ChatRequest) -> List[Dict[str, Any]]:
@@ -550,6 +567,7 @@ async def chat_endpoint(req: ChatRequest):
         raise HTTPException(status_code=400, detail="الرجاء كتابة رسالة أو إرفاق ملف قبل الإرسال.")
 
     effective_query = user_query or "يرجى تحليل وتلخيص الملفات المرفقة واستخراج المعلومات الثقافية والتراثية منها."
+    resolved_lang = _resolve_request_lang(req, effective_query)
 
     async def sse_generator() -> AsyncGenerator[dict, None]:
         t_start = time.monotonic()
@@ -569,12 +587,13 @@ async def chat_endpoint(req: ChatRequest):
             overall_timeout = 38.0
 
         try:
-            # 1. Initial Status Event
+            # 1. Initial Status Event (language-aware)
+            init_msg = "جارٍ تحليل السؤال واستكشاف المعارف والوثائق المعتمدة..." if resolved_lang == "ar" else "Analyzing question and gathering verified heritage knowledge..."
             yield {
                 "event": "status",
                 "data": json.dumps({
                     "stage": "init",
-                    "message": "جارٍ تحليل السؤال واستكشاف المعارف والوثائق المعتمدة..."
+                    "message": init_msg
                 }, ensure_ascii=False)
             }
             await asyncio.sleep(0.02)
@@ -599,7 +618,7 @@ async def chat_endpoint(req: ChatRequest):
                     chat_service = ChatService()
                     history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
 
-                    # Launch chat_service.ask in executor with bounded timeout
+                    # Launch chat_service.ask in executor with bounded timeout (pass resolved language)
                     future = loop.run_in_executor(
                         None,
                         lambda: chat_service.ask(
@@ -609,6 +628,7 @@ async def chat_endpoint(req: ChatRequest):
                             use_hybrid_retrieval=True,
                             session_id=req.session_id,
                             status_callback=_sync_status_callback,
+                            lang=resolved_lang,
                         ),
                     )
 
@@ -709,11 +729,12 @@ async def chat_endpoint(req: ChatRequest):
                 # If artifacts already satisfy intent, we still need text hedge for delta; otherwise we try direct model
                 needs_text = not full_response_text or not full_response_text.strip()
                 if needs_text:
+                    gen_msg = "جارٍ صياغة إجابة من المستشار الثقافي..." if resolved_lang == "ar" else "Composing answer from the cultural advisor..."
                     yield {
                         "event": "status",
                         "data": json.dumps({
                             "stage": "generating",
-                            "message": "جارٍ صياغة إجابة من المستشار الثقافي..."
+                            "message": gen_msg
                         }, ensure_ascii=False)
                     }
                     chat_service = ChatService()
@@ -722,7 +743,7 @@ async def chat_endpoint(req: ChatRequest):
                     try:
                         future2 = loop.run_in_executor(
                             None,
-                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id),
+                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id, lang=resolved_lang),
                         )
                         # Bounded wait for direct fallback
                         remaining = max(2.0, (t_start + overall_timeout) - time.monotonic())
@@ -783,17 +804,18 @@ async def chat_endpoint(req: ChatRequest):
                                         "data": None,
                                     })
                         # Still need a text body for delta: use generic hedge but mention artifact failure is in artifacts event
-                        full_response_text = _generate_cultural_fallback_answer(effective_query)
+                        full_response_text = _generate_cultural_fallback_answer(effective_query, lang=resolved_lang)
                         # Append hint that artifact failed (kept in hedge, not as canned itinerary)
-                        full_response_text += "\n\n> تعذر إنشاء الملف المطلوب في هذه المحاولة؛ راجع تفاصيل المخرجات أدناه."
+                        fail_hint = "\n\n> تعذر إنشاء الملف المطلوب في هذه المحاولة؛ راجع تفاصيل المخرجات أدناه." if resolved_lang == "ar" else "\n\n> The requested file could not be created in this attempt; see outputs below."
+                        full_response_text += fail_hint
                     else:
-                        full_response_text = _generate_cultural_fallback_answer(effective_query)
+                        full_response_text = _generate_cultural_fallback_answer(effective_query, lang=resolved_lang)
                     verified = False
 
             # 4. Sanitize and ensure explicit hedge if empty (never empty string, never shrimp for unrelated)
             full_response_text = sanitize_cultural_output(full_response_text)
             if not full_response_text or not full_response_text.strip():
-                full_response_text = _generate_cultural_fallback_answer(effective_query)
+                full_response_text = _generate_cultural_fallback_answer(effective_query, lang=resolved_lang)
 
             # 5. SSE contract: artifacts event always before delta/done if artifacts exist; includes failed
             if artifacts_sent:
@@ -901,20 +923,38 @@ async def chat_endpoint(req: ChatRequest):
     return EventSourceResponse(sse_generator())
 
 
-def _generate_cultural_fallback_answer(query: str) -> str:
+def _generate_cultural_fallback_answer(query: str, lang: str = "ar") -> str:
     """Query-aware generic hedge — never injects shrimp/springs/Eastern/UNESCO canned articles as fallback.
 
     Invariants:
     - If query legitimately contains shrimp/springs terms, return that specific mini-fallback (still query-aware).
-    - Otherwise return explicit Arabic friendly hedge mentioning Sard capabilities, not empty string, no itinerary.
+    - Otherwise return explicit hedge in requested language mentioning Sard capabilities.
     - Respects requested_formats at SSE layer: artifact failure is emitted as artifacts event, not as text substitution.
     """
     q_norm = (query or "").lower().strip()
+    # Determine greeting language based on resolved lang
     is_greeting = any(
         q_norm == g or q_norm.startswith(g + " ")
         for g in ["من أنت", "من انت", "عرفني بنفسك", "عرف بنفسك", "ما هو سرد", "مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "أهلاً", "hello", "hi", "who are you"]
     )
     if is_greeting:
+        if lang == "en":
+            return (
+                "Welcome! 🇸🇦\n\n"
+                "I am **Sard**, your intelligent cultural companion for Saudi heritage and civilization, "
+                "grounded in records of the **Saudi Ministry of Culture** and **King Abdulaziz Foundation**.\n\n"
+                "### How can I help you today?\n"
+                "1. **Regional heritage & identity** across the 13 Saudi regions.\n"
+                "2. **Eleven cultural sectors**: Heritage, Culinary Arts, Fashion, Literature, Music, Architecture, Museums, Visual Arts, Theater, Film, and Libraries.\n"
+                "3. **Interactive outputs**:\n"
+                "   - **Presentations (PowerPoint .pptx)**\n"
+                "   - **Recipe & craft cards (PDF)**\n"
+                "   - **Etiquette & hospitality simulators**\n"
+                "   - **Proverbs & dialects**\n"
+                "   - **Memoir booklets**\n"
+                "   - **Heritage calendars (.ics)**\n\n"
+                "Please ask a question or pick a topic to begin!"
+            )
         return (
             "أهلاً وسهلاً بك! 🇸🇦\n\n"
             "أنا **سرد**، رفيقك الثقافي الذكي ومستشارك المعتمد لاستكشاف التراث والحضارة في المملكة العربية السعودية، "
@@ -953,7 +993,17 @@ def _generate_cultural_fallback_answer(query: str) -> str:
             "تُعد الينابيع والعيون الحارة جزءاً من التراث الطبيعي في بعض مناطق المملكة، وتُرتبط بمعارف استشفائية وتقاليد محلية.\n"
             "لعدم توفر مصدر موثق كافٍ لهذا الاستعلام في الوقت الحالي، يُرجى تحديد المنطقة (مثلاً: الأحساء، الليث، عسير) أو السياق المطلوب، وسأقدّم توثيقاً أدق مع الإسناد."
         )
-    # Generic hedge — query-aware, friendly, Arabic, no canned Eastern/UNESCO itinerary
+     # Generic hedge — language-aware
+    if lang == "en":
+        return (
+            f"Unable to generate a verified answer for: \"{query[:120]}\" at this time.\n\n"
+            "To preserve knowledge integrity, I don't generate unsourced syntheses.\n"
+            "As your cultural companion **Sard**, I can help you with:\n"
+            "- Tailored heritage and tourism itineraries by region and duration.\n"
+            "- Verified information on archaeological sites, arts, and handicrafts.\n"
+            "- Cultural events and seasons organized by the Ministry of Culture.\n\n"
+            "Please clarify the region or context you need, or try again."
+        )
     return (
         f"تعذّر توليد إجابة موثقة عن: \"{query[:120]}\" في الوقت الحالي.\n\n"
         "حفاظًا على الأمانة المعرفية، لا أقدّم توليفًا غير مُسنَد بلا مصادر.\n"
