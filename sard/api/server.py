@@ -74,14 +74,75 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR = OUTPUT_DIR / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# In-memory mapping of uploaded attachments (bounded with TTL/GC — Finding 3)
+# Attachment index: in-memory cache + durable JSON sidecar so a second
+# process/instance can resolve attachment_id from disk (G4).
 _ATTACHMENTS: Dict[str, Dict[str, Any]] = {}
 _MAX_ATTACHMENTS = 100
 _ATTACHMENT_TTL_SECONDS = 3600  # 1 hour
 
 
+def _attachment_index_path() -> Path:
+    try:
+        return UPLOAD_DIR / ".attachment-index.json"
+    except Exception:
+        return Path(".attachment-index.json")
+
+
+def _load_attachment_index() -> None:
+    """Hydrate in-memory map from durable sidecar (second-process support)."""
+    try:
+        idx_path = _attachment_index_path()
+        if not idx_path.exists():
+            return
+        import json as _json
+
+        data = _json.loads(idx_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, dict) and v.get("path") and Path(v["path"]).exists():
+                    _ATTACHMENTS.setdefault(k, v)
+    except Exception:
+        pass
+
+
+def _persist_attachment_index() -> None:
+    try:
+        import json as _json
+
+        idx_path = _attachment_index_path()
+        tmp = idx_path.with_name(f".{idx_path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(_json.dumps(_ATTACHMENTS, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(idx_path)
+    except Exception:
+        pass
+
+
+def _resolve_attachment_meta(att_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve attachment across processes: memory → index file → glob fallback."""
+    safe = Path(str(att_id or "")).name
+    if not safe:
+        return None
+    meta = _ATTACHMENTS.get(safe)
+    if meta and meta.get("path") and Path(meta["path"]).exists():
+        return meta
+    # Hydrate from durable index once, then retry
+    _load_attachment_index()
+    meta = _ATTACHMENTS.get(safe)
+    if meta and meta.get("path") and Path(meta["path"]).exists():
+        return meta
+    # Glob fallback: files are stored as {att_id}_{stem}{ext}
+    try:
+        matches = list(UPLOAD_DIR.glob(f"{safe}*"))
+        if matches and matches[0].is_file():
+            return {"attachment_id": safe, "filename": matches[0].name, "path": str(matches[0]), "mime_type": "application/octet-stream", "size_bytes": matches[0].stat().st_size}
+    except Exception:
+        pass
+    return None
+
+
 def _evict_expired_attachments() -> None:
     """Evict attachments older than TTL or beyond max count (LRU). Deletes files."""
+    _load_attachment_index()
     now = time.time()
     # TTL eviction
     expired = [k for k, v in list(_ATTACHMENTS.items()) if now - v.get("created_at", now) > _ATTACHMENT_TTL_SECONDS]
@@ -107,6 +168,7 @@ def _evict_expired_attachments() -> None:
                         p.unlink(missing_ok=True)
                 except Exception:
                     pass
+    _persist_attachment_index()
 
 ALLOWED_EXTENSIONS = {
     ".pdf", ".docx", ".txt", ".md", ".csv", ".json",
@@ -188,6 +250,54 @@ def _extract_all_attachments(req: ChatRequest) -> List[Dict[str, Any]]:
     return attachments_list
 
 
+def _is_model_configured(provider: str = "") -> bool:
+    """Truthful provider-key check (G1). ModelSettings has no api_key field;
+    inspect real env vars per provider instead of AttributeError."""
+    try:
+        prov = (provider or os.environ.get("MODEL_PROVIDER", "")).strip().lower()
+        if not prov or prov == "auto":
+            # Any known key counts as configured (auto-detect mirrors models._read_settings)
+            return bool(
+                os.environ.get("GEMINI_API_KEY", "").strip()
+                or os.environ.get("GOOGLE_API_KEY", "").strip()
+                or os.environ.get("OPENAI_API_KEY", "").strip()
+                or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+                or os.environ.get("OPENROUTER_API_KEY", "").strip()
+                or os.environ.get("NVIDIA_API_KEY", "").strip()
+                or os.environ.get("NVIDIA_CHAT_BASE_URL", "").strip()
+            )
+        if prov == "gemini":
+            return bool(os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip())
+        if prov == "openai":
+            return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+        if prov == "anthropic":
+            return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+        if prov == "nvidia":
+            return bool(os.environ.get("NVIDIA_API_KEY", "").strip() or os.environ.get("NVIDIA_CHAT_BASE_URL", "").strip())
+        if prov == "openrouter":
+            return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+        return False
+    except Exception:
+        return False
+
+
+def _check_storage_readiness() -> dict:
+    """Durable vs ephemeral storage truth (G3)."""
+    try:
+        from sard.runtime_paths import durable_storage_configured, output_root_is_ephemeral
+    except Exception:
+        return {"durable": False, "mode": "unknown"}
+    durable = bool(durable_storage_configured())
+    ephemeral = bool(output_root_is_ephemeral())
+    if durable:
+        mode = "durable_blob"
+    elif ephemeral:
+        mode = "ephemeral_unconfigured"
+    else:
+        mode = "local_filesystem"
+    return {"durable": durable, "mode": mode, "ephemeral_host": ephemeral}
+
+
 def _check_rag_readiness() -> dict:
     try:
         from sard.rag.bundled_retriever import get_bundled_retriever
@@ -264,11 +374,34 @@ async def system_status():
     """Returns public system status without exposing internal model/provider IDs."""
     rag_info = _check_rag_readiness()
     enable_dev = os.environ.get("SARD_ENABLE_DEV_OBSERVABILITY", "").lower() in ("1", "true", "yes")
+
+    try:
+        _ms = get_model_settings()
+        _prov = getattr(_ms, "provider", "")
+    except Exception:
+        _prov = os.environ.get("MODEL_PROVIDER", "")
+    model_configured = _is_model_configured(_prov)
+    storage_info = _check_storage_readiness()
+
+    rag_avail = bool(rag_info.get("available", False))
+    if not model_configured and not rag_avail:
+        system_state = "unavailable"
+        status_label_ar = "غير متوفر"
+    elif not model_configured or not rag_avail:
+        system_state = "degraded"
+        status_label_ar = "محدود"
+    else:
+        system_state = "ready"
+        status_label_ar = "جاهز"
+
     base = {
-        "status_label": "جاهز" if rag_info.get("available") else "جاهز",
-        "verified": rag_info.get("available", False),
-        "sources": {"verified": rag_info.get("available", False)},
+        "status": system_state,
+        "status_label": status_label_ar,
+        "verified": rag_avail,
+        "sources": {"verified": rag_avail},
         "rag": rag_info,
+        "model_configured": model_configured,
+        "storage": storage_info,
         "model": {"mode": "auto", "preference": "auto"},
         "moc_branding": "Saudi Ministry of Culture (MOC) 2026",
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -368,6 +501,7 @@ async def upload_file(file: UploadFile = File(...)):
     # Bounded store: evict expired/oldest before insert (Finding 3)
     _evict_expired_attachments()
     _ATTACHMENTS[att_id] = meta
+    _persist_attachment_index()
     # Enforce cap immediately after insert (in case of race)
     if len(_ATTACHMENTS) > _MAX_ATTACHMENTS:
         _evict_expired_attachments()
@@ -388,9 +522,9 @@ async def get_attachment_file(attachment_id: str):
     """Download an uploaded attachment by ID."""
     _evict_expired_attachments()
     safe_id = Path(attachment_id).name
-    meta = _ATTACHMENTS.get(safe_id)
+    meta = _resolve_attachment_meta(safe_id)
     if meta and Path(meta["path"]).exists():
-        return FileResponse(path=meta["path"], filename=meta["filename"], media_type=meta["mime_type"])
+        return FileResponse(path=meta["path"], filename=meta.get("filename", safe_id), media_type=meta.get("mime_type", "application/octet-stream"))
 
     # Fallback search in UPLOAD_DIR
     matches = list(UPLOAD_DIR.glob(f"{safe_id}*"))
@@ -554,7 +688,7 @@ async def chat_endpoint(req: ChatRequest):
     - Explicit artifact intent (requested_formats via classify_intent) survives every fallback
     - Retrieval failure never injects irrelevant context (handled in rag layer)
     - Session isolation: history is client-supplied but never echoed as stale; effective_query is current turn
-    - Bounded timeouts: overall chat deadline via SARD_CHAT_OVERALL_TIMEOUT (default 38s)
+    - Bounded timeouts: overall chat deadline via SARD_CHAT_OVERALL_TIMEOUT (default 35s; client 50s => 15s slack)
     - Cancellation propagates to executor future
     - Every stream terminates with done (or error) and logs carry run_id without secrets
     - Artifacts event always before done, includes both created and failed where applicable
@@ -580,11 +714,13 @@ async def chat_endpoint(req: ChatRequest):
         early_intent = classify_intent(effective_query, messages=[m.model_dump() for m in req.messages] if req.messages else None, attachments=all_attachments)
         session_id_out = req.session_id or str(uuid.uuid4())
         # Overall SSE deadline (bounded). Env overridable, capped at 60s.
+        # P1-4: default 35s with client 50s => deliberate 15s slack so terminal
+        # artifacts+done always arrive before client abort.
         try:
-            overall_timeout = float(os.environ.get("SARD_CHAT_OVERALL_TIMEOUT", "38"))
+            overall_timeout = float(os.environ.get("SARD_CHAT_OVERALL_TIMEOUT", "35"))
             overall_timeout = max(5.0, min(60.0, overall_timeout))
         except ValueError:
-            overall_timeout = 38.0
+            overall_timeout = 35.0
 
         try:
             # 1. Initial Status Event (language-aware)
@@ -613,28 +749,50 @@ async def chat_endpoint(req: ChatRequest):
                     except Exception:
                         pass
 
+                resolved_files = {}
+                for att in all_attachments:
+                    att_id = att.get("attachment_id") or att.get("id")
+                    if not att_id:
+                        continue
+                    att_meta = _resolve_attachment_meta(att_id)
+                    if att_meta:
+                        file_path = att_meta.get("path")
+                        if file_path and Path(file_path).exists():
+                            orig_fname = att_meta.get("filename") or Path(file_path).name
+                            resolved_files[orig_fname] = {
+                                "file_path": file_path,
+                                "path": file_path,
+                                "mime_type": att_meta.get("mime_type"),
+                                "size_bytes": att_meta.get("size_bytes"),
+                            }
+                            resolved_files[att_id] = resolved_files[orig_fname]
+                            resolved_files[Path(file_path).name] = resolved_files[orig_fname]
+
                 hybrid_chat_res = None
                 try:
                     chat_service = ChatService()
                     history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
 
-                    # Launch chat_service.ask in executor with bounded timeout (pass resolved language)
+                    # Overall deadline shared with orchestrator for orphan discard (G11).
+                    deadline = t_start + overall_timeout
+                    # Launch chat_service.ask in executor with bounded timeout (pass resolved language & resolved attachments)
                     future = loop.run_in_executor(
                         None,
-                        lambda: chat_service.ask(
+                        lambda _dl=deadline: chat_service.ask(
                             effective_query,
                             messages=history_dicts,
                             attachments=all_attachments,
+                            mock_multimodal_files=resolved_files if resolved_files else None,
                             use_hybrid_retrieval=True,
                             session_id=req.session_id,
                             status_callback=_sync_status_callback,
                             lang=resolved_lang,
+                            deadline_monotonic=_dl,
                         ),
                     )
 
                     # Stream status events as emitted, with overall deadline on the future
                     # We poll status_queue while waiting, but bound the total wait.
-                    deadline = t_start + overall_timeout
                     while not future.done():
                         if time.monotonic() > deadline:
                             future.cancel()
@@ -741,21 +899,27 @@ async def chat_endpoint(req: ChatRequest):
                     loop = asyncio.get_event_loop()
                     history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
                     try:
+                        _dl2 = t_start + overall_timeout
                         future2 = loop.run_in_executor(
                             None,
-                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id, lang=resolved_lang),
+                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id, lang=resolved_lang, deadline_monotonic=_dl2),
                         )
-                        # Bounded wait for direct fallback
-                        remaining = max(2.0, (t_start + overall_timeout) - time.monotonic())
-                        try:
-                            chat_res2 = await asyncio.wait_for(future2, timeout=remaining)
-                        except asyncio.TimeoutError:
+                        # Bounded wait for direct fallback: strict monotonic deadline
+                        remaining = (t_start + overall_timeout) - time.monotonic()
+                        if remaining <= 0.2:
                             future2.cancel()
-                            logger.warning("Direct fallback timed out (run_id=%s).", run_id)
+                            logger.warning("Monotonic deadline expired before direct fallback (run_id=%s).", run_id)
                             chat_res2 = None
-                        except asyncio.CancelledError:
-                            logger.info("Direct fallback cancelled (run_id=%s).", run_id)
-                            raise
+                        else:
+                            try:
+                                chat_res2 = await asyncio.wait_for(future2, timeout=remaining)
+                            except asyncio.TimeoutError:
+                                future2.cancel()
+                                logger.warning("Direct fallback timed out (run_id=%s).", run_id)
+                                chat_res2 = None
+                            except asyncio.CancelledError:
+                                logger.info("Direct fallback cancelled (run_id=%s).", run_id)
+                                raise
 
                         if chat_res2 is not None:
                             # Merge artifacts from direct fallback (invariant: artifact intent survives)

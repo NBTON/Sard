@@ -56,6 +56,27 @@ class StructuredIntent:
     extracted_topic: str = ""
     region: str = ""
 
+    @property
+    def target_formats(self) -> tuple[str, ...]:
+        return self.requested_formats
+
+    @property
+    def canonical_topic(self) -> str:
+        return self.extracted_topic
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "domain_capability": getattr(self.domain_capability, "value", str(self.domain_capability)),
+            "requested_formats": list(self.requested_formats),
+            "target_formats": list(self.requested_formats),
+            "input_modalities": list(self.input_modalities),
+            "interactive_mode": self.interactive_mode,
+            "explicit_artifact_request": self.explicit_artifact_request,
+            "extracted_topic": self.extracted_topic,
+            "canonical_topic": self.extracted_topic,
+            "region": self.region,
+        }
+
 
 @dataclass(frozen=True)
 class ModelCandidate:
@@ -96,8 +117,12 @@ _FORMAT_PNG_RE = re.compile(
 )
 
 # --- Artifact creation intent helpers (bilingual, robust aliases) ---
+_FORMAT_JSON_RE = re.compile(r"(?:\.json\b|(?:\b|و)json\b|ملف\s*json|بصيغة\s*json)", re.I)
+_FORMAT_CSV_RE = re.compile(r"(?:\.csv\b|(?:\b|و)csv\b|ملف\s*csv|جدول\s*بيانات|csv\s*file)", re.I)
+_FORMAT_TXT_RE = re.compile(r"(?:\.txt\b|(?:\b|و)txt\b|ملف\s*نصي|نص\s*خام|txt\s*file)", re.I)
+
 _CREATION_VERB_RE = re.compile(
-    r"(أنشئ|انشئ|أنشئ لي|اعطني|أعطني|أعطني ملف|اعطني ملف|صمم|جهز|حضّر|حضر|حوّل|حول|حول هذا|حوّل هذا|سوّي|سوي|اعمل|احتاج|أحتاج|أحتاج ملف|اريد|أريد|أريد ملف|create|make|generate|need|i need|give me|provide|want|build|design|convert|turn into|prepare|produce|حوّل هذا إلى|حول هذا إلى)",
+    r"(اكتب|إكتب|أعد|اعد|أعدّ|اعدّ|صدّر|صدر|تصدير|ولّد|ولد|توليد|نزّل|نزل|تحميل|صيغ|صغ|أنشئ|انشئ|أنشئ لي|اعطني|أعطني|أعطني ملف|اعطني ملف|صمم|جهز|حضّر|حضر|حوّل|حول|حول هذا|حوّل هذا|سوّي|سوي|اعمل|احتاج|أحتاج|أحتاج ملف|اريد|أريد|أريد ملف|write|export|download|create|make|generate|need|i need|give me|provide|want|build|design|convert|turn into|prepare|produce|حوّل هذا إلى|حول هذا إلى)",
     re.I,
 )
 _FORMAT_QUESTION_RE = re.compile(
@@ -213,6 +238,12 @@ def extract_requested_formats(query: str) -> List[str]:
         # Only add png if not solely referencing an input @file.png
         if any(w in q.lower() for w in ["png", "بصيغة png", "بطاقة صورة", "بطاقة"]):
             formats.append("png")
+    if _FORMAT_JSON_RE.search(q):
+        formats.append("json")
+    if _FORMAT_CSV_RE.search(q):
+        formats.append("csv")
+    if _FORMAT_TXT_RE.search(q):
+        formats.append("txt")
 
     # Generic downloadable/printable report -> infer PDF if creation intent present
     if not is_format_question(q):

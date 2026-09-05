@@ -82,14 +82,14 @@
 | `conversation` | 15s | none | deterministic cultural fallback |
 | `local_rag` | 30s | 1× RAG transient | abstain (Case E) or trigger `web_research` |
 | `web_research` | 60s | 2× search + 1× extract | `evidence_limited` + filtered citations |
-| `document_extraction` / `ocr` | 30s | 1× provider then `core_fallback` | template placeholder per page (not hallucinated) |
+| `document_extraction` / `ocr` | 30s | 1× provider then truthful failure | missing key → `capability_unavailable`; call error → `failed/provider_error` (no fabricated text) |
 | `pdf/docx/pptx` | 30–45s | single deterministic build | `failed ArtifactResult` with Arabic message + `error_category` |
 | `itinerary` | 90s | verify→compose ×2 | partial: `raw_text+PDF` survive; `ICS` skipped with `missing_dates` |
-| `ics` | 10s | none; empty query → 4 curated events | `HERITAGE_EVENTS_DATABASE[:4]` |
+| `ics` | 10s | none; empty filters → `missing_filters`, filtered no-match → 0 events | no silent `HERITAGE_EVENTS_DATABASE[:4]`; explicit clarification |
 | `diagram/image_card` | 15–20s | none | `unsafe_xml` reject or PNG header fallback |
-| `json/csv/txt` | 5s | none | `unparseable/empty_output/invalid_schema` as failed result |
-| `audio` | 60s | none beyond fallback | diaspora oral-history template diarization |
-| `vision` | 45s | single DashScope POST | local EXIF/dimensions probe |
+| `json/csv/txt` | 5s | none; chat fast-path skips RAG/web | `unparseable/empty_output/invalid_schema` as failed result; pure data requests render in ms |
+| `audio` | 60s | none; missing key → `capability_unavailable` | offline probe metadata only (no transcript); call error → `failed/provider_error` |
+| `vision` | 45s | single DashScope POST; missing key → `capability_unavailable` | PIL probe only offline; call error → `failed/provider_error` (never fabricated) |
 | `three_d` | 20s | none | `header_summary` notice |
 
 ## Progress stages per capability (subset of unified pattern)

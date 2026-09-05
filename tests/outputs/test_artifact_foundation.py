@@ -35,7 +35,9 @@ def _request(fmt: str, **kwargs) -> ArtifactRequest:
 @pytest.mark.parametrize("fmt", ["pdf", "docx", "pptx", "ics", "svg", "png", "json", "csv", "txt"])
 def test_every_public_format_is_validated_and_retrievable(fmt, tmp_path):
     store = FileSystemArtifactStore(tmp_path)
-    result = ArtifactOrchestrator(store).generate_artifact(_request(fmt, kind="calendar" if fmt == "ics" else "document"))
+    # G7: ICS needs a real matching topic (no canned fallback).
+    _topic = "سهيل" if fmt == "ics" else "العمارة النجدية / Najdi architecture"
+    result = ArtifactOrchestrator(store).generate_artifact(_request(fmt, kind="calendar" if fmt == "ics" else "document", topic=_topic))
 
     assert result.status == "created", result.error
     assert result.size_bytes > 0

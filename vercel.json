@@ -5,5 +5,13 @@
       "source": "/api/:path*",
       "destination": "/api/index.py"
     }
-  ]
+  ],
+  "functions": {
+    "api/**/*.py": {
+      "maxDuration": 60
+    },
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  }
 }

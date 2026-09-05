@@ -70,6 +70,13 @@ Thumbs.db
 .claude-flow/daemon-state.json
 .claude/memory.db
 .swarm/memory.db
+.swarm/memory.db-shm
+.swarm/memory.db-wal
 .swarm/backups/
 *.db
+# Second-pass working dirs (never commit)
+scratch/
+output/uploads/.attachment-index.json
+output/artifacts/
+.next/
 

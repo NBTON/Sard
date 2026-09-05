@@ -131,8 +131,24 @@ def tool_generate_recipe_or_craft_card(
     difficulty: str = "متوسط",
     servings: str = "٦ أشخاص",
 ) -> Dict[str, Any]:
-    """Generates a printable PDF recipe card or craft guide."""
+    """Generates a printable PDF recipe card or craft guide (G5: no empty sections)."""
     renderer = RecipeCardRenderer(OUTPUT_DIR)
+
+    # G5: unknown item with no inputs must not emit empty sections — explicit clarification.
+    _known_markers = ("جريش", "jareesh", "سدو", "sadu", "نسيج", "craft")
+    _has_inputs = bool(ingredients_or_materials) and bool(steps)
+    _is_known = any(m in (item_name or "").lower() or m in (item_name or "") for m in _known_markers) or card_type == "craft"
+    if not ingredients_or_materials and not steps and not _is_known and (item_name or "").strip():
+        return {
+            "success": False,
+            "artifact_type": "recipe_craft_card",
+            "title": None,
+            "filename": None,
+            "download_url": None,
+            "card_data": None,
+            "error_category": "no_match",
+            "message_ar": f"الطبق أو الحرفة «{item_name}» غير مدرجة في البطاقات المعتمدة (الجريش، السدو). حدد المكونات والخطوات أو اختر صنفاً معتمداً.",
+        }
 
     if not ingredients_or_materials and "جريش" in item_name:
         card = create_jareesh_recipe_card()
@@ -202,10 +218,30 @@ def tool_sync_heritage_calendar(
     month: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Searches heritage seasons & festivals and produces Google Calendar links + .ics payload."""
+    # G7: empty filters must not silently emit all/first-4 canned events.
+    if not (query or "").strip() and not category and not region and not month:
+        return {
+            "success": False,
+            "artifact_type": "calendar_ics",
+            "filename": None,
+            "download_url": None,
+            "total_events": 0,
+            "events": [],
+            "error_category": "missing_filters",
+            "message_ar": "حدد استفساراً أو تصنيفاً أو منطقة أو شهراً لمزامنة التقويم التراثي؛ لا توجد فعاليات افتراضية بدون مدخلات.",
+        }
     sync = HeritageCalendarSync()
     events = sync.search_events(query=query, category=category, region=region, month=month)
     if not events:
-        events = list(HERITAGE_EVENTS_DATABASE[:4])
+        return {
+            "success": True,
+            "artifact_type": "calendar_ics",
+            "filename": None,
+            "download_url": None,
+            "total_events": 0,
+            "events": [],
+            "message_ar": f"لم يتم العثور على فعاليات أو مواسم تراثية مطابقة للمدخلات ({query or category or region}).",
+        }
 
     safe_filename = f"sard-calendar-{uuid.uuid4().hex[:6]}.ics"
     path, filename = sync.save_ics_file(safe_filename, OUTPUT_DIR, events=events)
@@ -355,14 +391,50 @@ def tool_decode_dialect_or_proverb(
     region_key = dialect_region.lower() if dialect_region.lower() in DIALECT_LEXICON_DATABASE else "najdi"
     lexicon = DIALECT_LEXICON_DATABASE[region_key]
 
-    matched_proverb = None
-    for p in lexicon["proverbs"]:
-        if any(w in phrase_or_proverb for w in p["proverb"].split()[:2]):
-            matched_proverb = p
+    # Check terms first
+    matched_term = None
+    matched_term_name = None
+    for term, term_data in lexicon["terms"].items():
+        if term in phrase_or_proverb or phrase_or_proverb in term:
+            matched_term = term_data
+            matched_term_name = term
             break
 
+    # Check proverbs
+    matched_proverb = None
+    if phrase_or_proverb.strip():
+        for p_item in lexicon["proverbs"]:
+            if any(w in phrase_or_proverb for w in p_item["proverb"].split()[:2]) or phrase_or_proverb in p_item["proverb"]:
+                matched_proverb = p_item
+                break
+
+    if matched_term and not matched_proverb:
+        return {
+            "success": True,
+            "artifact_type": "dialect_lore_card",
+            "region_name": lexicon["region_name"],
+            "input_phrase": phrase_or_proverb,
+            "proverb_title": matched_term_name,
+            "meaning_ar": matched_term["meaning"],
+            "lore_story_ar": f"سالفة ومغزى المصطلح: من التعبيرات التراثية المتجذرة في {lexicon['region_name']}، وتُعد دلالة أصيلة على الحفاوة والشهامة.",
+            "situational_context_ar": matched_term.get("usage", ""),
+            "common_regional_terms": lexicon["terms"],
+            "message_ar": f"تم شرح مصطلح «{matched_term_name}» وسياق استخدامه في {lexicon['region_name']}.",
+        }
+
     if not matched_proverb:
-        matched_proverb = lexicon["proverbs"][0]
+        return {
+            "success": True,
+            "artifact_type": "dialect_lore_card",
+            "region_name": lexicon["region_name"],
+            "input_phrase": phrase_or_proverb,
+            "proverb_title": None,
+            "meaning_ar": f"المثل أو التعبير «{phrase_or_proverb}» غير مدرج في معجم الأمثال المعتمد لمنطقة {lexicon['region_name']}.",
+            "lore_story_ar": "",
+            "situational_context_ar": "",
+            "common_regional_terms": lexicon["terms"],
+            "message_ar": f"لم يتم العثور على مثل مطابق لـ«{phrase_or_proverb}» في قاعدة أمثال {lexicon['region_name']}. تم استعراض المصطلحات الإقليمية الشائعة.",
+        }
 
     return {
         "success": True,
@@ -430,10 +502,22 @@ ARTISAN_CRAFT_DATABASE = {
 
 
 def tool_advise_artisan_craft(
-    craft_name: str = "sadu",
+    craft_name: str = "",
 ) -> Dict[str, Any]:
-    """Advises on traditional Saudi crafts, authentication criteria, and care guidelines."""
-    craft_key = "sadu"
+    """Advises on traditional Saudi crafts (G8: no silent sadu default)."""
+    if not (craft_name or "").strip():
+        return {
+            "success": False,
+            "artifact_type": "artisan_craft_guide",
+            "craft_name": craft_name,
+            "region": "",
+            "description": "حدد اسم الحرفة اليدوية (السدو، البشت الحساوي، الورد الطائفي، القط العسيري).",
+            "authentication_checklist": [],
+            "care_instructions": "",
+            "error_category": "missing_input",
+            "message_ar": "حدد اسم الحرفة اليدوية المطلوبة من الدليل المعتمد.",
+        }
+    craft_key = None
     name_lower = craft_name.lower()
     if "بشت" in name_lower or "مشلح" in name_lower or "hasawi" in name_lower:
         craft_key = "hasawi_bisht"
@@ -441,6 +525,20 @@ def tool_advise_artisan_craft(
         craft_key = "taif_rose"
     elif "قط" in name_lower or "عسير" in name_lower or "qatt" in name_lower:
         craft_key = "aseeri_qatt"
+    elif "سدو" in name_lower or "sadu" in name_lower or "نسيج" in name_lower:
+        craft_key = "sadu"
+
+    if not craft_key:
+        return {
+            "success": False,
+            "artifact_type": "artisan_craft_guide",
+            "craft_name": craft_name,
+            "region": "",
+            "description": f"الحرفة «{craft_name}» غير مسجلة حالياً في قاعدة الحرف اليدوية المعتمدة (تشمل: السدو، البشت الحساوي، الورد الطائفي، القط العسيري).",
+            "authentication_checklist": [],
+            "care_instructions": "",
+            "message_ar": f"الحرفة «{craft_name}» غير مدرجة في دليل الحرف المعتمد حالياً.",
+        }
 
     craft_info = ARTISAN_CRAFT_DATABASE[craft_key]
 
@@ -594,13 +692,16 @@ def tool_conduct_verified_research(
         {"author": "هيئة التراث", "title": "أطلس المواقع الأثرية والعمارة التقليدية في المملكة", "year": "2023", "doc_type": "دراسة ميدانية"},
     ]
 
+    # G6: template timeline is NOT verified research — label explicitly.
     return {
         "success": True,
         "artifact_type": "verified_research_report",
         "topic": topic,
         "authority": primary_authority,
+        "verification": "template",
+        "warnings": ["template_timeline_not_verified"],
         "timeline_svg": svg_markup,
         "timeline_milestones": [asdict(m) for m in milestones],
         "bibliography": bibliography,
-        "message_ar": f"تم إجراء التوثيق الأكاديمي المعتمد لـ«{topic}» مع سلسلة الإسناد والمراجع وقائمة المصادر الرسمية.",
+        "message_ar": f"عرض قالب توثيقي عام لـ«{topic}» (خط زمني استرشادي غير موثق من مصدر مباشر). للتوثيق المعتمد حدد المرجع أو فعّل البحث الموثق بمزود.",
     }

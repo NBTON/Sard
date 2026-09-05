@@ -27,9 +27,40 @@ function ChatAppContent() {
   // This satisfies Browser Test #13 (Two sessions) and guards against stale-history contamination.
   const sessionStoreRef = useRef<Map<string, Message[]>>(new Map());
 
-  // Persist current messages into the store whenever sessionId+messages change (for isolation verification)
+  // Restore active session on mount
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const lastSession = localStorage.getItem("sard_active_session");
+        if (lastSession) {
+          const stored = localStorage.getItem(`sard_session_${lastSession}`);
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setSessionId(lastSession);
+              setMessages(parsed);
+              sessionStoreRef.current.set(lastSession, parsed);
+              setView("chat");
+            }
+          }
+        }
+      } catch (e) {
+        // Safe fallback if localStorage is unavailable
+      }
+    }
+  }, []);
+
+  // Persist current messages into the store and localStorage whenever sessionId+messages change
   useEffect(() => {
     sessionStoreRef.current.set(sessionId, messages);
+    if (typeof window !== "undefined" && messages.length > 0) {
+      try {
+        localStorage.setItem(`sard_session_${sessionId}`, JSON.stringify(messages));
+        localStorage.setItem("sard_active_session", sessionId);
+      } catch (e) {
+        // quota or privacy mode guard
+      }
+    }
   }, [sessionId, messages]);
 
   function goHome() {
@@ -38,9 +69,21 @@ function ChatAppContent() {
 
   function handleNewChat() {
     // Save current session's messages before leaving
-    if (messages.length > 0) sessionStoreRef.current.set(sessionId, [...messages]);
+    if (messages.length > 0) {
+      sessionStoreRef.current.set(sessionId, [...messages]);
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.setItem(`sard_session_${sessionId}`, JSON.stringify(messages));
+        } catch (e) {}
+      }
+    }
     const newId = `sard_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     setSessionId(newId);
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.setItem("sard_active_session", newId);
+      } catch (e) {}
+    }
     setMessages([]);
     setView("chat");
     if (abortRef.current) {
@@ -72,30 +115,28 @@ function ChatAppContent() {
       id: `u_${Date.now()}`,
       role: "user",
       content: trimmed,
-      attachments: atts.length > 0 ? [...atts] : undefined,
       timestamp: Date.now(),
+      attachments: atts.length > 0 ? [...atts] : undefined,
     };
     const thinkId = `a_${Date.now()}`;
-    const thinkingMsg: Message = {
+    const assistantPlaceholder: Message = {
       id: thinkId,
       role: "assistant",
       content: "",
       timestamp: Date.now(),
       isThinking: true,
-      isStreaming: true,
+      statusStage: lang === "en" ? "Analyzing request..." : "جارٍ تحليل الطلب واستكشاف التراث المعتمد...",
     };
 
-    setMessages((prev) => [...prev, userMsg, thinkingMsg]);
+    setMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setInput("");
     setComposerAttachments([]);
     setIsStreaming(true);
 
+    // Smooth scroll down
     setTimeout(() => {
       if (scrollRef.current) {
-        scrollRef.current.scrollTo({
-          top: scrollRef.current.scrollHeight,
-          behavior: "smooth",
-        });
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
       }
     }, 50);
 
@@ -111,7 +152,7 @@ function ChatAppContent() {
     }));
     const controller = new AbortController();
     abortRef.current = controller;
-    // Client-side timeout matches server SARD_CHAT_OVERALL_TIMEOUT (38s) + 2s grace: handles #11 Timeout scenario.
+    // Client-side timeout provides 15s slack over backend overall deadline (35s)
     const timeoutId = setTimeout(() => {
       if (!controller.signal.aborted) {
         controller.abort();
@@ -134,7 +175,7 @@ function ChatAppContent() {
           )
         );
       }
-    }, 40000);
+    }, 50000);
 
     let gotFirstToken = false;
 
@@ -153,28 +194,61 @@ function ChatAppContent() {
         );
       },
       onDelta: (delta) => {
-        setMessages((prev) =>
-          prev.map((m) => {
-            if (m.id !== thinkId) return m;
-            const nextContent = (gotFirstToken ? m.content : "") + delta;
-            if (!gotFirstToken) gotFirstToken = true;
-            return {
-              ...m,
-              content: nextContent,
-              isThinking: false,
-              isStreaming: true,
-            };
-          })
-        );
+        if (!gotFirstToken) {
+          gotFirstToken = true;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === thinkId
+                ? { ...m, isThinking: false, isStreaming: true, content: delta }
+                : m
+            )
+          );
+        } else {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === thinkId ? { ...m, content: m.content + delta } : m
+            )
+          );
+        }
       },
       onCitations: (citations) => {
         setMessages((prev) =>
-          prev.map((m) => (m.id === thinkId ? { ...m, citations } : m))
+          prev.map((m) =>
+            m.id === thinkId
+              ? {
+                  ...m,
+                  citations: citations.map((s, idx) => ({
+                    citation_id: s.citation_id || (s as any).id || `src-${idx}`,
+                    title: s.title || (s as any).origin || "مرجع تراثي",
+                    source_url: s.source_url || (s as any).url || "",
+                    source_name: s.source_name || (s as any).origin || "وزارة الثقافة",
+                  })),
+                }
+              : m
+          )
         );
       },
-      onArtifacts: (artifacts) => {
+      onArtifacts: (arts) => {
         setMessages((prev) =>
-          prev.map((m) => (m.id === thinkId ? { ...m, artifacts } : m))
+          prev.map((m) =>
+            m.id === thinkId
+              ? {
+                  ...m,
+                  artifacts: arts.map((a) => ({
+                    id: a.id || (a as any).artifact_id || `art-${Date.now()}`,
+                    title: a.title || "مخرج ثقافي",
+                    format: (a.format || (a as any).type || "unknown") as any,
+                    download_url: a.download_url ?? (a as any).url ?? null,
+                    filename: a.filename || "file",
+                    mime_type: a.mime_type || "application/octet-stream",
+                    size_bytes: a.size_bytes || 0,
+                    status: (a.status as any) || "created",
+                    preview: a.preview || (a as any).data,
+                    kind: (a.kind as any) || "document",
+                  })),
+                }
+              : m
+          )
         );
       },
       onDone: () => {
@@ -216,7 +290,13 @@ function ChatAppContent() {
     });
     // Ensure timeout cleared if stream exits via abort before done/error
     // (streamChat returns early on AbortError without calling onDone/onError)
-    if (controller.signal.aborted) clearTimeout(timeoutId);
+    clearTimeout(timeoutId);
+    setIsStreaming(false);
+    abortRef.current = null;
+    // P1-2: guarantee per-message streaming flags never stick true.
+    setMessages((prev) =>
+      prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false, isThinking: false } : m))
+    );
   }
 
   function handleComposerSend(text: string, currentAttachments?: Attachment[]) {
@@ -230,11 +310,7 @@ function ChatAppContent() {
     }
     setIsStreaming(false);
     setMessages((prev) =>
-      prev.map((m) =>
-        m.isStreaming
-          ? { ...m, isStreaming: false, isThinking: false }
-          : m
-      )
+      prev.map((m) => (m.isStreaming ? { ...m, isStreaming: false, isThinking: false } : m))
     );
   }
 

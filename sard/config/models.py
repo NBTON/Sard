@@ -29,10 +29,11 @@ from typing import Callable, Dict, Optional
 from dotenv import load_dotenv
 from langchain_core.language_models.chat_models import BaseChatModel
 
-load_dotenv()
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if (_PROJECT_ROOT / ".env").exists():
-    load_dotenv(_PROJECT_ROOT / ".env")
+if "PYTEST_CURRENT_TEST" not in os.environ:
+    load_dotenv()
+    _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    if (_PROJECT_ROOT / ".env").exists():
+        load_dotenv(_PROJECT_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +192,6 @@ def _build_nvidia(settings: ModelSettings) -> BaseChatModel:
     kwargs = {
         "model": settings.model_name,
         "temperature": settings.temperature,
-        "max_retries": 1,
     }
     if api_key:
         kwargs["api_key"] = api_key

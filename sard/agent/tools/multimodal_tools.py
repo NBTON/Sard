@@ -299,17 +299,17 @@ def qwen_vl_vision_analyze(
 
     core_info = inspect_image_core(p) if p.exists() else {}
 
-    # If no key is set or in offline mode, provide deterministic structured visual analysis
+    # If no key is set or in offline mode, provide truthful unavailable capability status
     if not key:
         return {
-            "source": "core_fallback",
-            "description": f"Visual artifact inspection for {p.name}. Image format: {core_info.get('format', 'JPEG')}, dimensions: {core_info.get('width', 800)}x{core_info.get('height', 600)}.",
+            "source": "capability_unavailable",
+            "description": f"[صورة: {p.name}] خدمة التحليل البصري (Vision) غير متوفرة لعدم تهيئة مزوّد المعالجة البصرية.",
             "visual_features": {
-                "format": core_info.get("format", "JPEG"),
-                "resolution": f"{core_info.get('width', 800)}x{core_info.get('height', 600)}",
-                "object_type": "cultural_artifact",
+                "format": core_info.get("format", "UNKNOWN"),
+                "resolution": f"{core_info.get('width', 0)}x{core_info.get('height', 0)}",
             },
-            "status": "offline_extracted",
+            "status": "capability_unavailable",
+            "error": "Vision provider not configured (missing DASHSCOPE_API_KEY).",
         }
 
     try:
@@ -356,10 +356,13 @@ def qwen_vl_vision_analyze(
     except Exception as exc:
         logger.warning("DashScope Qwen-VL request failed: %s", exc)
 
+    # P1-3: provider configured but call failed — truthful failure, not placeholder.
     return {
-        "source": "core_fallback",
-        "description": f"Visual artifact inspection for {p.name}.",
-        "error": "DashScope API call did not succeed; used local metadata.",
+        "source": "provider_error",
+        "description": f"[صورة: {p.name}] تعذر التحليل البصري بسبب خطأ المزود.",
+        "status": "failed",
+        "error": "Vision provider call failed.",
+        "error_category": "provider_error",
     }
 
 
@@ -373,30 +376,18 @@ def qwen_audio_transcribe(
     key = api_key or get_dashscope_api_key()
     core_info = probe_audio_core(p) if p.exists() else {}
 
-    # Offline / Test fallback
+    # Offline / Test fallback: Truthful status when provider is not configured
     if not key:
         return {
-            "source": "core_fallback",
-            "text": f"[تسجيل صوتي شفهي: {p.name}] تم استخراج المقطع الصوتي بنجاح.",
+            "source": "capability_unavailable",
+            "text": f"[تسجيل صوتي: {p.name}] خدمة التفريغ الصوتي (ASR) غير متوفرة لعدم تهيئة مزوّد المعالجة الصوتية.",
             "transcription": {
                 "language": language,
-                "duration_seconds": core_info.get("duration_seconds", 30.0),
-                "segments": [
-                    {
-                        "start": "00:00:01",
-                        "end": "00:00:15",
-                        "speaker": "Speaker 1 (الراوي)",
-                        "text": "في الماضي كان آباؤنا في واحة الأحساء يجتمعون عند عين الحارة بعد صلاة العصر لتبادل الأخبار.",
-                    },
-                    {
-                        "start": "00:00:16",
-                        "end": "00:00:30",
-                        "speaker": "Speaker 2 (المحاور)",
-                        "text": "وكيف كان توزيع مياه العيون على النخيل والبساتين؟",
-                    },
-                ],
+                "duration_seconds": core_info.get("duration_seconds", 0.0),
+                "segments": [],
             },
-            "status": "offline_extracted",
+            "status": "capability_unavailable",
+            "error": "ASR provider not configured (missing DASHSCOPE_API_KEY).",
         }
 
     try:
@@ -411,9 +402,12 @@ def qwen_audio_transcribe(
         logger.warning("DashScope ASR invocation failed: %s", exc)
 
     return {
-        "source": "core_fallback",
-        "text": f"[تسجيل صوتي: {p.name}]",
+        "source": "provider_error",
+        "text": f"[تسجيل صوتي: {p.name}] تعذر التفريغ بسبب خطأ المزود.",
         "transcription": {"segments": []},
+        "status": "failed",
+        "error": "ASR provider call failed.",
+        "error_category": "provider_error",
     }
 
 
@@ -443,10 +437,11 @@ def qwen_vl_ocr_extract(
     key = api_key or get_dashscope_api_key()
     if not key:
         return {
-            "source": "core_fallback",
+            "source": "capability_unavailable",
             "page_number": page_number,
-            "extracted_text": f"وثيقة تراثية ومخطوطة: {p.name} (الصفحة {page_number}) — تحتوي على سجلات تاريخية ووقفية موثقة.",
-            "status": "offline_extracted",
+            "extracted_text": f"تعذر استخراج النص من المستند {p.name} (الصفحة {page_number})؛ خدمة التعرف البصري (OCR) غير مهيأة.",
+            "status": "capability_unavailable",
+            "error": "OCR provider not configured (missing DASHSCOPE_API_KEY).",
         }
 
     return {

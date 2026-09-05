@@ -500,8 +500,89 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
         return self.get_bytes(id_or_filename) is not None
 
 
-# Default global store instance
-_DEFAULT_STORE: ArtifactStore = ConfigurableBlobArtifactStore()
+class VercelBlobArtifactStore(ArtifactStore):
+    """Durable store via official Vercel Blob SDK (ADR Decision 3, G3).
+
+    Uses ``vercel.blob.BlobClient.put`` when ``BLOB_READ_WRITE_TOKEN`` is set.
+    Falls back to :class:`ConfigurableBlobArtifactStore` (custom REST) and then
+    to local filesystem, so offline/tests never require credentials.
+    """
+
+    def __init__(self, fallback_local: Optional[ArtifactStore] = None):
+        self.fallback = fallback_local or FileSystemArtifactStore()
+        self.rest = ConfigurableBlobArtifactStore(fallback_local=self.fallback)
+        self.token = os.environ.get("SARD_BLOB_TOKEN") or os.environ.get("BLOB_READ_WRITE_TOKEN") or ""
+        self.blob_configured = bool(self.token)
+        self._client = None
+        if self.blob_configured:
+            try:
+                from vercel.blob import BlobClient
+
+                self._client = BlobClient(token=self.token)
+            except Exception:
+                self._client = None
+
+    def _sdk_available(self) -> bool:
+        return bool(self.blob_configured and self._client is not None)
+
+    def store_bytes(self, artifact_id, filename, data, mime_type, metadata=None):
+        if self._sdk_available():
+            try:
+                safe_name = FileSystemArtifactStore._stored_filename(artifact_id, filename)
+                key = f"artifacts/{artifact_id}/{safe_name}"
+                canonical = ARTIFACT_MIME_TYPES.get(Path(safe_name).suffix.lower().lstrip("."), mime_type)
+                # Official SDK: put(pathname, body, options)
+                res = self._client.put(key, bytes(data), {"access": "public", "contentType": canonical})
+                # SDK returns dict-like with downloadUrl/url; persist checksum locally for verification
+                checksum = hashlib.sha256(bytes(data)).hexdigest()
+                # Also mirror to local fallback for same-process verification (no durability claim)
+                try:
+                    self.fallback.store_bytes(artifact_id, filename, bytes(data), mime_type, metadata)
+                except Exception:
+                    pass
+                dl = ""
+                try:
+                    dl = res.get("downloadUrl") or res.get("url") or ""
+                except Exception:
+                    dl = ""
+                # Return canonical tuple; download URL resolution stays via get_download_url
+                _ = dl
+                return str(artifact_id), safe_name, len(data), checksum
+            except Exception as exc:
+                logger.warning("Vercel Blob SDK store failed (%s); falling back to REST/FS.", type(exc).__name__)
+        # REST (custom) or local fallback
+        return self.rest.store_bytes(artifact_id, filename, data, mime_type, metadata)
+
+    def get_bytes(self, id_or_filename):
+        if self._sdk_available():
+            try:
+                # Try REST index first (our own key scheme), then local mirror
+                got = self.rest.get_bytes(id_or_filename)
+                if got is not None:
+                    return got
+            except Exception:
+                pass
+        return self.rest.get_bytes(id_or_filename)
+
+    def get_file_path(self, id_or_filename):
+        # Blob has no local path; expose local mirror if present for verification
+        try:
+            p = self.fallback.get_file_path(id_or_filename)
+            if p is not None:
+                return p
+        except Exception:
+            pass
+        return self.rest.get_file_path(id_or_filename)
+
+    def get_download_url(self, artifact_id: str, filename: str) -> str:
+        return self.rest.get_download_url(artifact_id, filename)
+
+    def exists(self, id_or_filename: str) -> bool:
+        return self.rest.exists(id_or_filename)
+
+
+# Default global store instance (official SDK first, REST/FS fallback)
+_DEFAULT_STORE: ArtifactStore = VercelBlobArtifactStore()
 
 
 def get_artifact_store() -> ArtifactStore:
@@ -683,11 +764,16 @@ class ArtifactGeneratorRegistry:
         """Generates RFC 5545 .ics calendar data for heritage events and itineraries."""
         from sard.outputs.calendar_sync import HeritageCalendarSync
 
+        if not (req.topic or "").strip():
+            from sard.outputs.validation import ArtifactValidationError as _VE
+
+            raise _VE("missing_filters", "Calendar render requires a topic/query or filters.")
         sync = HeritageCalendarSync()
         events = sync.search_events(query=req.topic)
         if not events:
-            from sard.outputs.calendar_sync import HERITAGE_EVENTS_DATABASE
-            events = list(HERITAGE_EVENTS_DATABASE[:4])
+            # G7: no silent first-4 fallback at render layer; surface honest failure.
+            from sard.outputs.validation import ArtifactValidationError
+            raise ArtifactValidationError("no_match", "No heritage events match the requested topic/filters.")
 
         data = sync.generate_ics_data(events)
         preview_data = {
@@ -801,8 +887,18 @@ class ArtifactOrchestrator:
     def store(self) -> ArtifactStore:
         return self._store if self._store is not None else get_artifact_store()
 
-    def generate_artifact(self, request: ArtifactRequest) -> ArtifactResult:
-        """Executes rendering, verifies storage, and returns guaranteed ArtifactResult."""
+    def generate_artifact(self, request: ArtifactRequest, deadline_monotonic: float | None = None) -> ArtifactResult:
+        """Executes rendering, verifies storage, and returns guaranteed ArtifactResult.
+
+        G11: if ``deadline_monotonic`` is set and already exceeded, refuse to
+        store (discard late worker output) and return a timeout failure instead
+        of writing orphan files after the terminal SSE event.
+        """
+        import time as _time
+
+        def _expired() -> bool:
+            return deadline_monotonic is not None and _time.monotonic() > deadline_monotonic
+
         art_id = f"art-{uuid.uuid4().hex}"
         fmt = request.format.lower().strip()
         kind = request.kind.lower().strip() or "document"
@@ -847,8 +943,10 @@ class ArtifactOrchestrator:
             validate_artifact_bytes(fmt, raw_bytes)
             mime_type = ARTIFACT_MIME_TYPES[fmt]
 
-            # 3. Store and verify persistence
+            # 3. Store and verify persistence (G11: discard if deadline passed)
             stage = "store"
+            if _expired():
+                raise TimeoutError("Artifact deadline exceeded before store; discarding late output.")
             active_store = self.store
             _, stored_filename, size_bytes, checksum = active_store.store_bytes(
                 artifact_id=art_id,
@@ -890,6 +988,14 @@ class ArtifactOrchestrator:
                 filename=filename, mime_type=ARTIFACT_MIME_TYPES.get(fmt, "application/octet-stream"),
                 size_bytes=0, status="failed", download_url=None,
                 error="تعذر التحقق من الملف الناتج. الرجاء إعادة المحاولة لاحقاً.", error_category=category,
+            )
+        except TimeoutError as exc:
+            logger.warning("Artifact generation discarded after deadline (fmt=%s): %s", fmt, exc)
+            return ArtifactResult(
+                id=art_id, kind=kind, format=fmt, title=request.title or f"مخرج ثقافي: {request.topic}",
+                filename=filename, mime_type=ARTIFACT_MIME_TYPES.get(fmt, "application/octet-stream"),
+                size_bytes=0, status="failed", download_url=None,
+                error="تجاوز المهلة المحددة؛ تم إلغاء التوليد دون حفظ ملفات يتيمة.", error_category="timeout",
             )
         except Exception:
             logger.exception("Artifact generation or storage failed for format %s", fmt)

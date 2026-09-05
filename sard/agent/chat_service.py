@@ -6,6 +6,7 @@ and centralized artifact orchestration.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -41,6 +42,11 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = CULTURAL_SYSTEM_PROMPT
 _SYSTEM_PROMPT_EN = CULTURAL_SYSTEM_PROMPT_EN
+
+# Persistent, bounded worker executor to prevent context-manager shutdown blocking traps
+_SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="sard-chat"
+)
 
 
 @dataclass(frozen=True)
@@ -93,8 +99,6 @@ class ChatService:
 
     def _invoke_llm_str(self, sys_p: str, user_p: str) -> str:
         """Invoke configured LLM with prompt strings with fast timeout."""
-        import concurrent.futures
-
         def _call(m):
             resp = m.invoke([SystemMessage(content=sys_p), HumanMessage(content=user_p)])
             content = getattr(resp, "content", "")
@@ -109,9 +113,13 @@ class ChatService:
 
         try:
             model = self._get_model()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_call, model)
+            future = _SHARED_EXECUTOR.submit(_call, model)
+            try:
                 return future.result(timeout=6.0)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                logger.debug("Chat model invocation timed out after 6.0s; using deterministic synthesis.")
+                return ""
         except Exception as exc:
             logger.debug("Chat model invocation failed or timed out (%s); using deterministic synthesis.", exc)
             return ""
@@ -148,20 +156,19 @@ class ChatService:
                 return bool(os.environ.get("NVIDIA_API_KEY", "").strip() or os.environ.get("NVIDIA_CHAT_BASE_URL", "").strip())
             elif settings.provider == "openrouter":
                 return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
-            return True
+            return False
         except Exception:
             return False
 
     def ask_cultural(
         self,
-        user_query: str,
+        query: str,
         mock_multimodal_files: Optional[dict] = None,
         lang: str = "ar",
     ) -> CulturalQueryResult:
-        """Run the hybrid cultural router and synthesize an answer grounded in RAG/Web/Multimodal sources."""
-        return self.router.answer_query(
-            user_query,
-            llm_invoke_fn=self._invoke_llm_str if (self._injected_model is not None or self._can_load_model()) else None,
+        """Run cultural queries through deterministic search tools and prompt grounding."""
+        return self.router.answer_cultural_query(
+            query,
             mock_multimodal_files=mock_multimodal_files,
             lang=lang,
         )
@@ -169,33 +176,29 @@ class ChatService:
     def ask(
         self,
         user_query: str,
-        messages: Optional[list[dict]] = None,
-        attachments: Optional[Sequence[Any]] = None,
         use_hybrid_retrieval: bool = False,
+        messages: Optional[Sequence[dict]] = None,
         session_id: Optional[str] = None,
         mock_multimodal_files: Optional[dict] = None,
         status_callback: Optional[Callable[[str, str], None]] = None,
+        attachments: Optional[Sequence[dict]] = None,
         lang: Optional[str] = None,
+        deadline_monotonic: Optional[float] = None,
     ) -> ChatResult:
-        """Send a user query (or full conversation messages) to the configured assistant.
-
-        Never raises — configuration errors and unexpected failures are
-        captured and returned as a sanitized :class:`ChatResult`.
-        """
+        """Route user query with Isnād provenance verification and artifact rendering."""
+        # Check empty query early
         if not user_query or not user_query.strip():
             return ChatResult(
                 ok=False,
                 error_message="الرجاء إدخال سؤال قبل الإرسال." if (lang or "ar") == "ar" else "Please enter a question before sending.",
             )
 
-        # Resolve language: explicit locale wins, else infer from query
+        # 0. Resolve language explicitly
         resolved_lang = resolve_language(lang, user_query)
 
-        # Scope guardrail: block clearly out-of-scope foreign-only queries before any retrieval
+        # Pre-retrieval scope validation
         should_block, scope_response = check_scope_before_retrieval(user_query, lang=resolved_lang)
         if should_block:
-            # Still allow artifact generation if the blocked query explicitly requested an artifact?
-            # No — scope block takes precedence; do not generate artifacts for out-of-scope.
             return ChatResult(
                 ok=True,
                 text=sanitize_cultural_output(scope_response),
@@ -259,74 +262,59 @@ class ChatService:
                 f"تعذّر توليد إجابة موثقة عن: \"{query[:120]}\" في الوقت الحالي.\n\n"
                 "حفاظًا على الأمانة المعرفية، لا أقدّم توليفًا غير مُسنَد بلا مصادر.\n"
                 "يمكنني مساعدتك في:\n"
-                "- برامج ومسارات سياحية وتراثية مخصصة حسب المنطقة والمدة.\n"
-                "- معلومات موثقة عن المواقع الأثرية والفنون والحرف اليدوية.\n"
-                "- الفعاليات والمواسم الثقافية لوزارة الثقافة.\n\n"
-                "يرجى توضيح المنطقة أو السياق المطلوب، أو إعادة المحاولة."
+                "- خطط الجولات التراثية والسياحية حسب المنطقة والمدة.\n"
+                "- معلومات موثقة عن المواقع الأثرية، والفنون، والحرف اليدوية.\n"
+                "- الفعاليات والمواسم الثقافية التابعة لوزارة الثقافة.\n\n"
+                "يرجى تحديد المنطقة أو الجانب الذي ترغب في استكشافه، أو إعادة المحاولة."
             )
 
-        def _maybe_orchestrate(text_for_artifact: str, citations_for_artifact: list[dict[str, str]]) -> list[dict[str, Any]]:
-            # Centralized artifact orchestration used in BOTH hybrid and direct paths.
-            # Invariant: explicit artifact intent (requested_formats) always triggers orchestrator,
-            # even when use_hybrid_retrieval is False or planner failed or model returned empty.
-            # General PDF (SAUDI_CULTURAL_FACTUAL with pdf) must still render as generic document,
-            # not as itinerary-only rendering – orchestrator handles kind via capability + format.
-            needs_artifact = intent.explicit_artifact_request or intent.domain_capability in (
-                Capability.PRESENTATION_DECK,
-                Capability.RECIPE_CARD,
-                Capability.CALENDAR_SYNC,
-                Capability.GREETING_CARD,
-                Capability.ETIQUETTE_SIMULATOR,
-                Capability.ORAL_HISTORY,
-            )
-            # Also cover general artifact case: SAUDI_CULTURAL_FACTUAL with explicit format
-            if not needs_artifact and intent.explicit_artifact_request:
-                needs_artifact = True
-            if not needs_artifact:
-                return []
-            if status_callback:
-                try:
-                    msg = f"جارٍ إعداد وتوليد المخرجات المطلوبة ({', '.join(intent.requested_formats)})..." if resolved_lang == "ar" else f"Preparing requested outputs ({', '.join(intent.requested_formats)})..."
-                    status_callback("generating_artifacts", msg)
-                except Exception:
-                    pass
+        def _format_to_kind(fmt_name: str) -> str:
+            if fmt_name in ("pdf", "docx", "txt"):
+                return "document"
+            if fmt_name in ("pptx",):
+                return "presentation"
+            if fmt_name in ("ics",):
+                return "calendar"
+            if fmt_name in ("svg", "png"):
+                return "image"
+            return "document"
+
+        def _maybe_orchestrate(text: str, sources: list[dict[str, str]]) -> list[dict[str, Any]]:
+            """Centralized helper: render requested artifact formats or return structured failure."""
             local_artifacts: list[dict[str, Any]] = []
-            try:
-                generated = self.orchestrator.orchestrate_from_intent(
-                    intent=intent,
-                    raw_text=text_for_artifact or _empty_hedge(user_query),
-                    sources=tuple(citations_for_artifact),
-                )
-                for art_res in generated:
-                    local_artifacts.append(art_res.to_dict())
-                # If orchestrator returned empty but intent requested formats, surface failed artifacts
-                if not local_artifacts:
-                    for fmt in intent.requested_formats:
-                        if fmt != "text":
-                            failed_res = ArtifactResult(
-                                id=f"art-{session_id or 'failed'}-{fmt}",
-                                kind="document",
-                                format=fmt,
-                                title=f"مخرج ثقافي: {intent.extracted_topic}",
-                                filename=f"sard-{fmt}",
-                                mime_type="application/octet-stream",
-                                size_bytes=0,
-                                status="failed",
-                                download_url=None,
-                                error=f"تعذر توليد ملف {fmt.upper()} حالياً. الرجاء إعادة المحاولة لاحقاً.",
-                                error_category="orchestrator_empty",
-                            )
-                            local_artifacts.append(failed_res.to_dict())
-            except Exception as art_exc:
-                logger.exception("Artifact generation failed: %s", art_exc)
-                for fmt in intent.requested_formats:
-                    if fmt != "text":
+            target_fmts = getattr(intent, "target_formats", None) or getattr(intent, "requested_formats", ())
+            if intent.explicit_artifact_request and target_fmts:
+                for fmt in target_fmts:
+                    if fmt == "text":
+                        continue
+                    topic_str = getattr(intent, "canonical_topic", None) or getattr(intent, "extracted_topic", None) or user_query
+                    # Map format to orchestrator call
+                    art_req = ArtifactRequest(
+                        format=fmt,
+                        kind=_format_to_kind(fmt),
+                        title=f"مخرج ثقافي: {topic_str}",
+                        topic=topic_str,
+                        region=intent.region or "المملكة العربية السعودية",
+                        raw_text=text,
+                        sources=tuple(sources) if sources else (),
+                        metadata={
+                            "session_id": session_id,
+                            "intent": intent.to_dict() if hasattr(intent, "to_dict") else asdict(intent),
+                            "locale": resolved_lang,
+                        },
+                    )
+                    try:
+                        res = self.orchestrator.generate_artifact(art_req, deadline_monotonic=deadline_monotonic)
+                        if res:
+                            local_artifacts.append(res.to_dict())
+                    except Exception as exc:
+                        logger.error("Artifact orchestration failed for format '%s': %s", fmt, exc)
                         failed_res = ArtifactResult(
-                            id=f"art-{session_id or 'failed'}-{fmt}",
-                            kind="document",
+                            id=f"art-failed-{fmt}",
+                            kind=_format_to_kind(fmt),
                             format=fmt,
-                            title=f"مخرج ثقافي: {intent.extracted_topic}",
-                            filename=f"sard-{fmt}",
+                            title=f"مخرج ثقافي: {topic_str}",
+                            filename=f"error.{fmt}",
                             mime_type="application/octet-stream",
                             size_bytes=0,
                             status="failed",
@@ -336,6 +324,28 @@ class ChatService:
                         )
                         local_artifacts.append(failed_res.to_dict())
             return local_artifacts
+
+        # Early check for unconfigured model when no injected model is present
+        if self._injected_model is None:
+            try:
+                _ = self._get_model()
+            except ModelConfigError as exc:
+                logger.warning("Chat model configuration error: %s", exc)
+                err_msg = str(exc)
+                if resolved_lang == "en" and "ANTHROPIC_API_KEY" in err_msg:
+                    err_msg = "Server not configured: missing API credentials. Please configure ANTHROPIC_API_KEY or another provider."
+                artifacts = []
+                if intent.explicit_artifact_request:
+                    artifacts = _maybe_orchestrate(_empty_hedge(user_query), [])
+                return ChatResult(ok=False, error_message=err_msg, artifacts=artifacts)
+
+        # G10 fast-path: pure data formats (json/csv/txt) render deterministically
+        # in ~ms; skip slow RAG/web planner so SSE always meets 5s budget.
+        _fmts = set(getattr(intent, "requested_formats", ()) or ())
+        if use_hybrid_retrieval and intent.explicit_artifact_request and _fmts and _fmts <= {"json", "csv", "txt", "text"}:
+            _fast_text = user_query if resolved_lang == "en" else f"مخرجات منظمة عن: {getattr(intent, 'extracted_topic', None) or user_query}"
+            _fast_arts = _maybe_orchestrate(_fast_text, [])
+            return ChatResult(ok=True, text=sanitize_cultural_output(_fast_text), decision="structured_fastpath", citations=[], planner_result=None, artifacts=_fast_arts)
 
         # Hybrid retrieval path via Isnād Planner & Agentic Cultural Tools
         if use_hybrid_retrieval:
@@ -369,6 +379,19 @@ class ChatService:
                     text_resp = sanitize_cultural_output(plan_res.answer_ar or plan_res.answer_en or "")
                 decision = plan_res.chain.decision
             except Exception as exc:
+                is_timeout = (
+                    isinstance(exc, (concurrent.futures.TimeoutError, TimeoutError))
+                    or "timeout" in str(exc).lower()
+                    or "deadline" in str(exc).lower()
+                )
+                if is_timeout:
+                    logger.warning("Isnād planner execution timed out: %s. Aborting rather than cascading.", exc)
+                    msg = (
+                        "Server response timeout: please try again later."
+                        if resolved_lang == "en"
+                        else "تعذّر استلام رد بسبب تجاوز المهلة المحددة. يرجى المحاولة لاحقاً."
+                    )
+                    return ChatResult(ok=False, error_message=msg, artifacts=[])
                 logger.warning("Isnād planner execution encountered exception: %s. Falling back to cultural router.", exc)
                 cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files, lang=resolved_lang)
                 text_resp = sanitize_cultural_output(cultural_res.answer_text)
@@ -423,22 +446,38 @@ class ChatService:
                         lc_messages.append(AIMessage(content=content))
             lc_messages.append(HumanMessage(content=user_query))
 
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(model.invoke, lc_messages)
+            future = _SHARED_EXECUTOR.submit(model.invoke, lc_messages)
+            try:
                 response = future.result(timeout=6.0)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                raise TimeoutError("Model invocation timed out after 6.0s")
+
             text = getattr(response, "content", "")
             if not isinstance(text, str):
                 text = str(text)
             text = sanitize_cultural_output(text)
             if not text or not text.strip():
-                text = _empty_hedge(user_query)
+                text = ""
 
-            artifacts = _maybe_orchestrate(text, [])
+            artifacts = _maybe_orchestrate(text, []) if text else []
             return ChatResult(ok=True, text=text, artifacts=artifacts)
 
         except Exception as exc:
             logger.warning("Chat model direct invoke failed or timed out: %s", exc)
+            is_timeout = (
+                isinstance(exc, (concurrent.futures.TimeoutError, TimeoutError))
+                or "timeout" in str(exc).lower()
+                or "deadline" in str(exc).lower()
+            )
+            if is_timeout:
+                msg = (
+                    "Server response timeout: please try again later."
+                    if resolved_lang == "en"
+                    else "تعذّر استلام رد من النموذج بسبب تجاوز المهلة المحددة. يرجى المحاولة لاحقاً."
+                )
+                return ChatResult(ok=False, error_message=msg, artifacts=[])
+
             fallback_text = _empty_hedge(user_query)
             artifacts = _maybe_orchestrate(fallback_text, [])
             return ChatResult(ok=True, text=fallback_text, artifacts=artifacts)

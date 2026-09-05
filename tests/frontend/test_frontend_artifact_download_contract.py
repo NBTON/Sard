@@ -47,11 +47,13 @@ def test_all_nine_formats_download_contract(client_store):
     orchestrator = ArtifactOrchestrator(store)
 
     for fmt, expected_mime, expected_sig in FORMATS:
+        # G7 honesty: ICS requires a real matching topic (no silent first-4 canned fallback).
+        _topic = "سهيل" if fmt == "ics" else f"topic-{fmt}"
         req = ArtifactRequest(
             format=fmt,
             kind="document" if fmt not in ("pptx", "ics", "svg", "png") else {"pptx": "presentation", "ics": "calendar", "svg": "diagram", "png": "image"}[fmt],
             title=f"Test {fmt} artifact",
-            topic=f"topic-{fmt}",
+            topic=_topic,
             raw_text=f"محتوى تجريبي لاختبار تحويل {fmt} مع سرد. " * 3,
         )
         res = orchestrator.generate_artifact(req)
@@ -87,6 +89,19 @@ def test_all_nine_formats_download_contract(client_store):
             assert resp.content.startswith(expected_sig)
         # Parse check
         validate_artifact_bytes(fmt, resp.content)
+
+
+def test_ics_no_match_is_failed_not_canned(client_store):
+    """G7: unknown ICS topic must fail honestly, never emit canned first-4."""
+    from sard.outputs.orchestrator import ArtifactOrchestrator
+
+    _, store = client_store
+    orchestrator = ArtifactOrchestrator(store)
+    req = ArtifactRequest(format="ics", kind="calendar", title="no match", topic="topic-ics-unknown-xyz999", raw_text="")
+    res = orchestrator.generate_artifact(req)
+    assert res.status == "failed"
+    assert res.download_url is None
+    assert res.error_category in ("no_match", "missing_filters")
 
 
 def test_failed_artifact_has_no_download_and_error(client_store):
@@ -131,10 +146,11 @@ def test_multiple_artifacts_each_independently_downloadable(client_store):
 
     orchestrator = ArtifactOrchestrator(store)
     # Simulate SSE multiple artifacts: generate 3 in sequence
+    # G7: ICS needs real matching topic.
     reqs = [
         ArtifactRequest(format="pdf", kind="document", title="multi pdf", topic="t1", raw_text="pdf text"),
         ArtifactRequest(format="pptx", kind="presentation", title="multi pptx", topic="t1", raw_text="pptx text"),
-        ArtifactRequest(format="ics", kind="calendar", title="multi ics", topic="t1", raw_text=""),
+        ArtifactRequest(format="ics", kind="calendar", title="multi ics", topic="سهيل", raw_text=""),
     ]
     results = [orchestrator.generate_artifact(r) for r in reqs]
     for res in results:
