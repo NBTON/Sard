@@ -7,7 +7,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from sard.agent.capability_routing import classify_intent, is_format_question, Capability
 from sard.agent.lang_utils import resolve_language, detect_language
-from sard.agent.scope_guard import is_out_of_scope, scope_guard_response, check_scope_before_retrieval
+from sard.agent.scope_guard import is_out_of_scope, check_scope_before_retrieval
 from sard.agent.cultural_router import CulturalRouter
 from sard.agent.chat_service import ChatService
 from langchain_core.messages import AIMessage
@@ -107,7 +107,7 @@ def test_english_locale_produces_english():
     class FakeModel:
         def invoke(self, msgs):
             return AIMessage(content="fake")
-    def mock_plan(query, session_id=None, mock_multimodal_files=None, llm_invoke_fn=None, status_callback=None, lang="ar"):
+    def mock_plan(query, session_id=None, mock_multimodal_files=None, llm_invoke_fn=None, status_callback=None, lang="ar", uploaded_files=None):
         chain = IsnadChain(request_id="r", classification="other", region="unknown", evidence=[], atoms=[], conflicts=[], score="high", decision="generate")
         if lang == "en":
             return PlannerResult(chain=chain, answer_ar=None, answer_en="English verified answer", visible_sources=[])
@@ -123,7 +123,7 @@ def test_arabic_locale_produces_arabic():
     class FakeModel:
         def invoke(self, msgs):
             return AIMessage(content="fake")
-    def mock_plan(query, session_id=None, mock_multimodal_files=None, llm_invoke_fn=None, status_callback=None, lang="ar"):
+    def mock_plan(query, session_id=None, mock_multimodal_files=None, llm_invoke_fn=None, status_callback=None, lang="ar", uploaded_files=None):
         chain = IsnadChain(request_id="r", classification="other", region="unknown", evidence=[], atoms=[], conflicts=[], score="high", decision="generate")
         if lang == "en":
             return PlannerResult(chain=chain, answer_ar=None, answer_en="English", visible_sources=[])

@@ -183,7 +183,7 @@ class DocxGenerator:
             '<w:p>'
             '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="80"/></w:pPr>'
             '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="18"/><w:szCs w:val="18"/><w:color w:val="BE4A24"/></w:rPr>'
-            f'<w:t>المملكة العربية السعودية • وزارة الثقافة (سرد 2026)</w:t>'
+            f'<w:t xml:space="preserve">المملكة العربية السعودية • وزارة الثقافة (سرد 2026)</w:t>'
             '</w:r>'
             '</w:p>'
         )
@@ -193,7 +193,7 @@ class DocxGenerator:
             '<w:p>'
             '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:before="120" w:after="120"/></w:pPr>'
             '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="42"/><w:szCs w:val="42"/><w:color w:val="141210"/><w:rFonts w:cs="Noto Naskh Arabic"/></w:rPr>'
-            f'<w:t>{xml_escape(doc.title)}</w:t>'
+            f'<w:t xml:space="preserve">{xml_escape(doc.title)}</w:t>'
             '</w:r>'
             '</w:p>'
         )
@@ -203,7 +203,7 @@ class DocxGenerator:
             '<w:p>'
             '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="240"/><w:pBdr><w:bottom w:val="single" w:sz="12" w:space="8" w:color="C4A46A"/></w:pBdr></w:pPr>'
             '<w:r><w:rPr><w:rtl/><w:sz w:val="20"/><w:szCs w:val="20"/><w:color w:val="8A8178"/></w:rPr>'
-            f'<w:t>المنطقة: {xml_escape(doc.region)} | التوثيق والمعتمد: {xml_escape(doc.author)}</w:t>'
+            f'<w:t xml:space="preserve">المنطقة: {xml_escape(doc.region)} | التوثيق والمعتمد: {xml_escape(doc.author)}</w:t>'
             '</w:r>'
             '</w:p>'
         )
@@ -229,10 +229,10 @@ class DocxGenerator:
                 '<w:tc>'
                 '<w:p><w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="80"/></w:pPr>'
                 '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="BE4A24"/></w:rPr>'
-                '<w:t>ملخص التقرير والأصالة الثقافية</w:t></w:r></w:p>'
+                '<w:t xml:space="preserve">ملخص التقرير والأصالة الثقافية</w:t></w:r></w:p>'
                 '<w:p><w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="40"/></w:pPr>'
                 '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                f'<w:t>{xml_escape(summary_text)}</w:t></w:r></w:p>'
+                f'<w:t xml:space="preserve">{xml_escape(summary_text)}</w:t></w:r></w:p>'
                 '</w:tc>'
                 '</w:tr>'
                 '</w:tbl>'
@@ -247,7 +247,7 @@ class DocxGenerator:
                     '<w:p>'
                     '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="140"/></w:pPr>'
                     '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                    f'<w:t>{xml_escape(p.strip())}</w:t>'
+                    f'<w:t xml:space="preserve">{xml_escape(p.strip())}</w:t>'
                     '</w:r>'
                     '</w:p>'
                 )
@@ -259,7 +259,7 @@ class DocxGenerator:
                 '<w:p>'
                 '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:before="240" w:after="100"/><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="D4CBBD"/></w:pBdr></w:pPr>'
                 '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="6E1F1F"/><w:rFonts w:cs="Noto Naskh Arabic"/></w:rPr>'
-                f'<w:t>◆ {xml_escape(sec.title)}{xml_escape(badge_suffix)}</w:t>'
+                f'<w:t xml:space="preserve">◆ {xml_escape(sec.title)}{xml_escape(badge_suffix)}</w:t>'
                 '</w:r>'
                 '</w:p>'
             )
@@ -268,7 +268,7 @@ class DocxGenerator:
                     '<w:p>'
                     '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="120"/></w:pPr>'
                     '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                    f'<w:t>{xml_escape(sec.content)}</w:t>'
+                    f'<w:t xml:space="preserve">{xml_escape(sec.content)}</w:t>'
                     '</w:r>'
                     '</w:p>'
                 )
@@ -276,9 +276,9 @@ class DocxGenerator:
                 body_parts.append(
                     '<w:p>'
                     '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="80"/><w:ind w:right="360"/></w:pPr>'
-                    '<w:r><w:rPr><w:rtl/><w:b/><w:color w:val="BE4A24"/></w:rPr><w:t>• </w:t></w:r>'
+                    '<w:r><w:rPr><w:rtl/><w:b/><w:color w:val="BE4A24"/></w:rPr><w:t xml:space="preserve">• </w:t></w:r>'
                     '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                    f'<w:t>{xml_escape(b)}</w:t>'
+                    f'<w:t xml:space="preserve">{xml_escape(b)}</w:t>'
                     '</w:r>'
                     '</w:p>'
                 )
@@ -289,7 +289,7 @@ class DocxGenerator:
                 '<w:p>'
                 '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:before="240" w:after="100"/></w:pPr>'
                 '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="4A513C"/></w:rPr>'
-                '<w:t>الخلاصات المعرفية والأصالة التراثية:</w:t>'
+                '<w:t xml:space="preserve">الخلاصات المعرفية والأصالة التراثية:</w:t>'
                 '</w:r>'
                 '</w:p>'
             )
@@ -297,9 +297,9 @@ class DocxGenerator:
                 body_parts.append(
                     '<w:p>'
                     '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="80"/><w:ind w:right="360"/></w:pPr>'
-                    '<w:r><w:rPr><w:rtl/><w:b/><w:color w:val="4A513C"/></w:rPr><w:t>✔ </w:t></w:r>'
+                    '<w:r><w:rPr><w:rtl/><w:b/><w:color w:val="4A513C"/></w:rPr><w:t xml:space="preserve">✔ </w:t></w:r>'
                     '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                    f'<w:t>{xml_escape(kt)}</w:t>'
+                    f'<w:t xml:space="preserve">{xml_escape(kt)}</w:t>'
                     '</w:r>'
                     '</w:p>'
                 )
@@ -310,7 +310,7 @@ class DocxGenerator:
                 '<w:p>'
                 '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:before="280" w:after="100"/><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="D4CBBD"/></w:pBdr></w:pPr>'
                 '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="BE4A24"/></w:rPr>'
-                '<w:t>المراجع والتوثيق المعتمد:</w:t>'
+                '<w:t xml:space="preserve">المراجع والتوثيق المعتمد:</w:t>'
                 '</w:r>'
                 '</w:p>'
             )
@@ -321,9 +321,9 @@ class DocxGenerator:
                 body_parts.append(
                     '<w:p>'
                     '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="60"/><w:ind w:right="280"/></w:pPr>'
-                    '<w:r><w:rPr><w:rtl/><w:color w:val="8A8178"/></w:rPr><w:t>[مرجع] </w:t></w:r>'
+                    '<w:r><w:rPr><w:rtl/><w:color w:val="8A8178"/></w:rPr><w:t xml:space="preserve">[مرجع] </w:t></w:r>'
                     '<w:r><w:rPr><w:rtl/><w:sz w:val="18"/><w:szCs w:val="18"/><w:color w:val="8A8178"/></w:rPr>'
-                    f'<w:t>{xml_escape(ref_text)}</w:t>'
+                    f'<w:t xml:space="preserve">{xml_escape(ref_text)}</w:t>'
                     '</w:r>'
                     '</w:p>'
                 )

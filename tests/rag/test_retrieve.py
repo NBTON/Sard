@@ -6,7 +6,6 @@ import pytest
 
 from sard.config.rag import ModelRoute, RAGSettings
 from sard.rag.chunking import compute_chunk_id, compute_citation_id, compute_content_hash
-from sard.rag.embeddings import EmbeddingService
 from sard.rag.fallbacks import AllCandidatesFailedError
 from sard.rag.retrieve import RetrievalDependencies, RetrievalService, reciprocal_rank_fusion
 from sard.rag.schemas import Chunk, EmbeddedChunk, RetrievalMode, RewrittenQuery

@@ -8,15 +8,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Optional, Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from sard.agent.capability_routing import (
-    Capability,
-    StructuredIntent,
     classify_intent,
 )
 from sard.agent.cultural_router import (
@@ -24,7 +22,6 @@ from sard.agent.cultural_router import (
     CULTURAL_SYSTEM_PROMPT_EN,
     CulturalQueryResult,
     CulturalRouter,
-    RetrievalDecision,
 )
 from sard.agent.lang_utils import resolve_language
 from sard.agent.scope_guard import check_scope_before_retrieval
@@ -36,7 +33,7 @@ from sard.outputs.orchestrator import (
     ArtifactResult,
     get_artifact_orchestrator,
 )
-from sard.schemas.isnad import IsnadChain, PlannerResult
+from sard.schemas.isnad import PlannerResult
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +128,7 @@ class ChatService:
         mock_multimodal_files: Optional[dict] = None,
         status_callback: Optional[Callable[[str, str], None]] = None,
         lang: str = "ar",
+        uploaded_files: Optional[dict] = None,
     ) -> PlannerResult:
         """Run the isnād provenance planner to verify claims before generating."""
         return self.planner.plan_and_execute(
@@ -140,6 +138,7 @@ class ChatService:
             llm_invoke_fn=self._invoke_llm_str if (self._injected_model is not None or self._can_load_model()) else None,
             status_callback=status_callback,
             lang=lang,
+            uploaded_files=uploaded_files,
         )
 
     def _can_load_model(self) -> bool:
@@ -165,12 +164,14 @@ class ChatService:
         query: str,
         mock_multimodal_files: Optional[dict] = None,
         lang: str = "ar",
+        uploaded_files: Optional[dict] = None,
     ) -> CulturalQueryResult:
         """Run cultural queries through deterministic search tools and prompt grounding."""
-        return self.router.answer_cultural_query(
+        return self.router.answer_query(
             query,
             mock_multimodal_files=mock_multimodal_files,
             lang=lang,
+            uploaded_files=uploaded_files,
         )
 
     def ask(
@@ -184,6 +185,7 @@ class ChatService:
         attachments: Optional[Sequence[dict]] = None,
         lang: Optional[str] = None,
         deadline_monotonic: Optional[float] = None,
+        uploaded_files: Optional[dict] = None,
     ) -> ChatResult:
         """Route user query with Isnād provenance verification and artifact rendering."""
         # Check empty query early
@@ -362,6 +364,7 @@ class ChatService:
                     mock_multimodal_files=mock_multimodal_files,
                     status_callback=status_callback,
                     lang=resolved_lang,
+                    uploaded_files=uploaded_files,
                 )
                 for ev in plan_res.visible_sources:
                     citations.append({
@@ -370,6 +373,10 @@ class ChatService:
                         "url": ev.url_or_doc_id or "",
                         "origin": ev.origin,
                         "source_type": ev.source_type,
+                        "chunk_id": ev.source_id,
+                        "source_id": ev.source_id,
+                        "excerpt": (ev.excerpt or "")[:500],
+                        "region": ev.region,
                     })
 
                 # Choose answer language based on resolved locale
@@ -393,7 +400,7 @@ class ChatService:
                     )
                     return ChatResult(ok=False, error_message=msg, artifacts=[])
                 logger.warning("Isnād planner execution encountered exception: %s. Falling back to cultural router.", exc)
-                cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files, lang=resolved_lang)
+                cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files, lang=resolved_lang, uploaded_files=uploaded_files)
                 text_resp = sanitize_cultural_output(cultural_res.answer_text)
                 decision = cultural_res.decision
                 citations = cultural_res.citations

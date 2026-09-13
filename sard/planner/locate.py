@@ -7,8 +7,8 @@ and user stance (visitor, local, researcher, unknown) from query text.
 from __future__ import annotations
 
 import re
-from typing import Optional, Tuple
-from pydantic import BaseModel, Field
+from typing import Optional
+from pydantic import BaseModel
 
 from sard.schemas.isnad import Region, UserStance
 

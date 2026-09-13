@@ -17,7 +17,6 @@ from sard.outputs.schemas import (
     CitationSource,
     FieldSupport,
     Itinerary,
-    ItineraryDay,
     ItineraryStop,
     TextBlock,
     VerificationStatus,
@@ -382,7 +381,6 @@ def _filter_stop(stop: ItineraryStop, source_map: dict[str, CitationSource], acc
     label = f"{day_label}.stop{stop_index}"
     _validate_known_ids(stop.citation_ids, source_map, label)
     supports = _filter_supports(stop.field_support, source_map, accepted, label)
-    support_fields = {support.field_name for support in supports}
 
     def support_ids(field_name: str) -> tuple[str, ...]:
         support = next((item for item in supports if item.field_name == field_name), None)
@@ -492,6 +490,10 @@ def build_verified_render_input(
         status = VerificationStatus.EVIDENCE_LIMITED
     model_fallback_used = _fallback_used(state)
     retrieval_mode = str(state.get("retrieval_mode") or "")
+    # Degraded retrieval or fallback model can never stay VERIFIED: trustworthy
+    # behavior requires real retrieval + primary model for verified answers.
+    if retrieval_mode in DEGRADED_RETRIEVAL_MODES or model_fallback_used:
+        status = VerificationStatus.EVIDENCE_LIMITED
     answer_citations = tuple(dict.fromkeys(INLINE_CITATION_RE.findall(answer)))
     try:
         _validate_known_ids(

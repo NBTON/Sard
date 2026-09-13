@@ -26,7 +26,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from sard.runtime_paths import DEFAULT_VERCEL_BLOB_ENDPOINT, output_root
 from sard.outputs.validation import (
@@ -538,8 +538,8 @@ class VercelBlobArtifactStore(ArtifactStore):
                 # Also mirror to local fallback for same-process verification (no durability claim)
                 try:
                     self.fallback.store_bytes(artifact_id, filename, bytes(data), mime_type, metadata)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
                 dl = ""
                 try:
                     dl = res.get("downloadUrl") or res.get("url") or ""
@@ -560,8 +560,8 @@ class VercelBlobArtifactStore(ArtifactStore):
                 got = self.rest.get_bytes(id_or_filename)
                 if got is not None:
                     return got
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
         return self.rest.get_bytes(id_or_filename)
 
     def get_file_path(self, id_or_filename):
@@ -570,8 +570,8 @@ class VercelBlobArtifactStore(ArtifactStore):
             p = self.fallback.get_file_path(id_or_filename)
             if p is not None:
                 return p
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
         return self.rest.get_file_path(id_or_filename)
 
     def get_download_url(self, artifact_id: str, filename: str) -> str:
@@ -815,30 +815,129 @@ class ArtifactGeneratorRegistry:
 
     @staticmethod
     def _render_png(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:
-        """Build a dependency-free RGB PNG suitable for artifact previews."""
-        import struct
-        import zlib
+        """Render a meaningful card/diagram PNG (title + body + item cards).
+
+        Uses Pillow with bundled Noto fonts when available so the PNG contains
+        the requested visual content (not a header-only placeholder). Falls back
+        to a content-block pattern if Pillow is unavailable.
+        """
+        import io as _io
 
         width, height = 1200, 800
-        # Sard paper background with a clay header and gold accent line.  Text
-        # remains available in the accompanying preview metadata; keeping this
-        # renderer dependency-free makes PNG generation reliable in serverless.
-        paper = (243, 238, 228)
-        clay = (190, 74, 36)
-        gold = (196, 164, 106)
-        rows = []
-        for y in range(height):
-            color = clay if y < 120 else gold if 120 <= y < 132 else paper
-            rows.append(b"\x00" + bytes(color) * width)
+        title = (req.title or req.topic or "سرد").strip()[:120]
+        body_text = (req.raw_text or "").strip()
+        content = req.content_data or {}
+        items: list[str] = []
+        for key in ("items", "cards", "rows", "points", "bullets"):
+            val = content.get(key)
+            if isinstance(val, list):
+                for entry in val[:6]:
+                    if isinstance(entry, dict):
+                        label = str(entry.get("title") or entry.get("name") or entry.get("text") or "")[:80]
+                    else:
+                        label = str(entry)[:80]
+                    if label:
+                        items.append(label)
+                break
+        if not items and body_text:
+            # Derive up to 4 content lines from body text
+            for line in body_text.splitlines():
+                line = line.strip(" •-*#")
+                if len(line) >= 4:
+                    items.append(line[:80])
+                if len(items) >= 4:
+                    break
+        if not items and req.topic:
+            items = [req.topic[:80]]
 
-        def chunk(kind: bytes, payload: bytes) -> bytes:
-            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        try:
+            from PIL import Image, ImageDraw, ImageFont
 
-        data = b"\x89PNG\r\n\x1a\n"
-        data += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-        data += chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
-        data += chunk(b"IEND", b"")
-        return data, ARTIFACT_MIME_TYPES["png"], {"type": "image", "width": width, "height": height, "title": req.title}
+            assets = Path(__file__).parent / "assets"
+            paper = (243, 238, 228)
+            ink = (20, 18, 16)
+            clay = (110, 25, 70)
+            gold = (196, 164, 106)
+            card_bg = (255, 252, 245)
+            img = Image.new("RGB", (width, height), paper)
+            draw = ImageDraw.Draw(img)
+            # Header stripe
+            draw.rectangle([0, 0, width, 130], fill=(15, 40, 55))
+            draw.rectangle([0, 130, width, 138], fill=gold)
+
+            def _font(size: int) -> Any:
+                for candidate in (assets / "NotoNaskhArabic-Regular.ttf", assets / "NotoSans-Regular.ttf"):
+                    try:
+                        if candidate.exists():
+                            return ImageFont.truetype(str(candidate), size)
+                    except Exception as exc:
+                        logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+                        continue
+                return ImageFont.load_default()
+
+            title_font = _font(44)
+            body_font = _font(26)
+            small_font = _font(22)
+            draw.text((width - 60, 28), title, font=title_font, fill=(243, 238, 228), anchor="ra")
+            draw.text((width - 60, 84), (req.topic or "")[:100], font=small_font, fill=gold, anchor="ra")
+            y = 175
+            # Body excerpt
+            if body_text:
+                excerpt = body_text.replace("\n", " ")[:220]
+                draw.text((width - 60, y), excerpt, font=body_font, fill=ink, anchor="ra")
+                y += 55
+            # Item cards (2-column grid)
+            card_w, card_h = 520, 110
+            for idx, label in enumerate(items[:6]):
+                col = idx % 2
+                row = idx // 2
+                x1 = 60 + col * (card_w + 40) if col == 0 else 60 + card_w + 40
+                # RTL: mirror columns so first item is right-aligned
+                if col == 0:
+                    x1 = width - 60 - card_w
+                else:
+                    x1 = 60
+                y1 = y + row * (card_h + 20)
+                if y1 + card_h > height - 70:
+                    break
+                draw.rounded_rectangle([x1, y1, x1 + card_w, y1 + card_h], radius=18, fill=card_bg, outline=gold, width=2)
+                draw.ellipse([x1 + card_w - 44, y1 + 18, x1 + card_w - 20, y1 + 42], fill=clay)
+                draw.text((x1 + card_w - 60, y1 + 16), label, font=body_font, fill=ink, anchor="ra")
+            draw.text((width // 2, height - 32), "سرد • Sard Cultural Agent", font=small_font, fill=(109, 76, 65), anchor="mm")
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            data = buf.getvalue()
+            preview = {"type": "image", "width": width, "height": height, "title": title, "items": items, "text": body_text[:500]}
+            return data, ARTIFACT_MIME_TYPES["png"], preview
+        except Exception:
+            # Dependency-free fallback: content blocks (not header-only)
+            import struct
+            import zlib
+
+            paper = (243, 238, 228)
+            clay = (190, 74, 36)
+            gold = (196, 164, 106)
+            card = (255, 252, 245)
+            rows = []
+            for y in range(height):
+                if y < 120:
+                    color = clay
+                elif 120 <= y < 132:
+                    color = gold
+                else:
+                    # Draw 2-column card bands where items live
+                    in_card_row = any(170 + r * 130 <= y < 170 + r * 130 + 100 for r in range(3))
+                    color = card if in_card_row else paper
+                rows.append(b"\x00" + bytes(color) * width)
+
+            def chunk(kind: bytes, payload: bytes) -> bytes:
+                return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+            data = b"\x89PNG\r\n\x1a\n"
+            data += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            data += chunk(b"IDAT", zlib.compress(b"".join(rows), 9))
+            data += chunk(b"IEND", b"")
+            return data, ARTIFACT_MIME_TYPES["png"], {"type": "image", "width": width, "height": height, "title": title, "items": items}
 
     @staticmethod
     def render_json(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:

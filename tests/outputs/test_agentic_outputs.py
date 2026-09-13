@@ -7,30 +7,21 @@ greeting cards, and oral history memoirs.
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
-import pytest
 
 from sard.outputs.office import (
-    PresentationDeck,
-    SlideContent,
-    SlideCard,
-    TimelineItem,
     PresentationGenerator,
     create_cultural_briefing_deck,
 )
 from sard.outputs.diagrams import (
-    CulturalDiagram,
     DiagramRenderer,
     create_majlis_etiquette_diagram,
     create_business_etiquette_diagram,
 )
 from sard.outputs.calendar_sync import (
     HeritageCalendarSync,
-    HERITAGE_EVENTS_DATABASE,
 )
 from sard.outputs.recipe_card import (
-    RecipeOrCraftCard,
     RecipeCardRenderer,
     create_jareesh_recipe_card,
     create_sadu_craft_card,
@@ -40,8 +31,6 @@ from sard.outputs.greeting_cards import (
     compose_greeting_card,
 )
 from sard.outputs.memoir import (
-    FamilyMemoirBooklet,
-    MemoirChapter,
     MemoirCompiler,
     synthesize_memoir_from_notes,
 )

@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 from sard.config.rag import RAGSettings, get_rag_settings

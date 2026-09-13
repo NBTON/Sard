@@ -1,6 +1,5 @@
 """G11: expired deadline must discard store (no orphan files)."""
 import time
-from pathlib import Path
 from sard.outputs.orchestrator import ArtifactOrchestrator, ArtifactRequest, FileSystemArtifactStore
 
 def test_gap_g11_no_orphan_after_deadline(tmp_path):

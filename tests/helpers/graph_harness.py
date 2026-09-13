@@ -229,7 +229,6 @@ def offline_runner(deps: GraphDependencies) -> Callable:
     """Return a ``callable(request) -> final graph state dict`` using ``deps``."""
 
     def run(request) -> dict:
-        from tests.helpers.step7_contracts import UIRunRequest
 
         return run_pipeline(
             request.query,

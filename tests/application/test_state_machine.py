@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
-from pathlib import Path
 
 import pytest
 
@@ -29,7 +28,6 @@ from sard.agent.events import (
     EVENT_RETRIEVAL_MODE_CHANGED,
     EVENT_STARTED,
     EVENT_WAITING,
-    SAFE_EVENT_KINDS,
     FailureKind,
     make_error,
     make_event,
@@ -203,7 +201,7 @@ def test_unknown_event_kind_rejected_not_displayed():
 
 
 def test_unknown_node_rejected_not_displayed():
-    safe = make_event(EVENT_COMPLETED, "run-1", "not_a_stage", "completed", summary="x")
+    make_event(EVENT_COMPLETED, "run-1", "not_a_stage", "completed", summary="x")
     with pytest.raises(ValueError):
         ui_stage_for_node("not_a_stage", EVENT_COMPLETED)
 
@@ -477,7 +475,7 @@ def test_calendar_after_dates_never_calls_graph_and_is_idempotent(tmp_path):
         output_root=tmp_path,
     )
     request = UIRunRequest(query="خطة لرحلة إلى الرياض", run_id="run-cal", execution_mode=UIExecutionMode.CACHED_DEMO)
-    result = service.run(request)
+    service.run(request)
     assert service.graph_invocations == {}
 
     from tests.helpers.step7_contracts import CalendarAfterDateRequest

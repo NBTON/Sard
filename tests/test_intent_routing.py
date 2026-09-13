@@ -3,8 +3,6 @@
 from sard.agent.capability_routing import (
     Capability,
     classify_intent,
-    classify_capability,
-    extract_requested_formats,
     extract_input_modalities,
 )
 

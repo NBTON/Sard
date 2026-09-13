@@ -13,7 +13,7 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sard.rag.schemas import ScoreType
 
@@ -147,7 +147,6 @@ class BundledHybridRetriever:
             bonus = 0.0
             doc_title_lower = doc.get("title", "").lower()
             doc_topic_lower = doc.get("topic", "").lower()
-            doc_content_lower = doc.get("content", "").lower()
 
             for kw in doc.get("keywords", []):
                 if kw.lower() in q_lower:

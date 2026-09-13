@@ -13,14 +13,14 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.pdfgen.canvas import Canvas
 
 from sard.outputs.arabic import shape_rtl
-from sard.outputs.fonts import ensure_fonts_registered, require_arabic_font, require_latin_font
+from sard.outputs.fonts import ensure_fonts_registered
 
 logger = logging.getLogger("sard.outputs.greeting_cards")
 

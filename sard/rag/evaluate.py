@@ -29,7 +29,7 @@ from sard.rag.ingest import build_chunks_for_document, load_metadata_sidecar
 from sard.rag.loaders import load_document
 from sard.rag.normalize import normalize_arabic
 from sard.rag.query_rewriter import deterministic_query_variants
-from sard.rag.retrieve import RetrievalService, reciprocal_rank_fusion
+from sard.rag.retrieve import RetrievalService
 from sard.rag.schemas import RetrievedCandidate, RewrittenQuery
 
 DEFAULT_EVAL_K = 6

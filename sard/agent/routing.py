@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Optional
 
 from sard.agent.events import FailureKind, GraphNodeError
-from sard.agent.state import ClaimStatus, GraphState, RAGMode
+from sard.agent.state import ClaimStatus, RAGMode
 from sard.rag.fallbacks import FailureCategory, classify_exception
 
 

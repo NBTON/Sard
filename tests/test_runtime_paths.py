@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from sard.runtime_paths import output_root
 

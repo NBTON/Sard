@@ -85,7 +85,6 @@ class AgentModelService:
 
     def _candidates(self) -> list[ModelCandidate]:
         route = self._resolved_settings().chat_route
-        kwargs = {}
         base = self._resolved_settings().chat_base_url
         endpoint_type = "self_hosted" if base else "hosted"
         candidates = [

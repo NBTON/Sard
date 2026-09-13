@@ -8,11 +8,9 @@ and comparison matrices with Sard's cultural color palette and typography.
 from __future__ import annotations
 
 import html
-import io
-import json
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 logger = logging.getLogger("sard.outputs.diagrams")
 

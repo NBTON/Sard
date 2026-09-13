@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import io
 import logging
-import os
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -40,6 +39,37 @@ COLOR_MUTED = RGBColor(0x8A, 0x81, 0x78)
 FONT_HEADING = "Noto Naskh Arabic"
 FONT_BODY = "IBM Plex Sans Arabic"
 FONT_FALLBACK = "Arial"
+
+
+def _set_paragraph_rtl(paragraph) -> None:
+    """Set base direction RTL + complex-script typeface for Arabic paragraphs.
+
+    PowerPoint needs a:pPr rtl="1" (not just right alignment) for correct
+    bidi ordering of mixed Arabic/Latin runs.
+    """
+    try:
+        paragraph.alignment = PP_ALIGN.RIGHT
+        pPr = paragraph._p.get_or_add_pPr()
+        pPr.set("rtl", "1")
+        # Complex-script + east-asian typefaces fall back to Arabic fonts
+        for tag in ("a:cs", "a:ea"):
+            try:
+                el = pPr.find(f"{{http://schemas.openxmlformats.org/drawingml/2006/main}}{tag[2:]}")
+                if el is None:
+                    from pptx.oxml.ns import qn as _qn
+
+                    from lxml import etree as _etree
+
+                    el = _etree.SubElement(pPr, _qn("a:cs") if tag == "a:cs" else _qn("a:ea"))
+                el.set("typeface", FONT_BODY)
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in office.py: %s", type(exc).__name__)
+                continue
+    except Exception:
+        try:
+            paragraph.alignment = PP_ALIGN.RIGHT
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in office.py: %s", type(exc).__name__)
 
 
 @dataclass
@@ -112,9 +142,24 @@ class PresentationGenerator:
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
 
-        blank_slide_layout = prs.slide_layouts[6]  # Completely blank layout
+        try:
+            blank_slide_layout = prs.slide_layouts[6]  # Completely blank layout
+        except IndexError:
+            blank_slide_layout = prs.slide_layouts[-1]
 
-        for slide_data in deck.slides:
+        slides = list(deck.slides or [])
+        if not slides:
+            # Empty deck guard: always emit at least a title slide so the
+            # package contains ppt/slides/slide1.xml and validates.
+            slides = [
+                SlideContent(
+                    slide_type="title",
+                    title=getattr(deck, "title", "عرض ثقافي"),
+                    subtitle="",
+                )
+            ]
+
+        for slide_data in slides:
             slide = prs.slides.add_slide(blank_slide_layout)
             self._render_slide(prs, slide, slide_data, deck)
 
@@ -162,7 +207,7 @@ class PresentationGenerator:
         tf_badge = badge_box.text_frame
         tf_badge.word_wrap = True
         p_b = tf_badge.paragraphs[0]
-        p_b.alignment = PP_ALIGN.RIGHT
+        _set_paragraph_rtl(p_b)
         run_b = p_b.add_run()
         run_b.text = f"✦ {deck.region} • توثيق ثقافي معتمد"
         run_b.font.name = FONT_BODY
@@ -174,7 +219,7 @@ class PresentationGenerator:
         tf = title_box.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
-        p.alignment = PP_ALIGN.RIGHT
+        _set_paragraph_rtl(p)
         run = p.add_run()
         run.text = data.title
         run.font.name = FONT_HEADING
@@ -184,7 +229,7 @@ class PresentationGenerator:
 
         if data.subtitle:
             p2 = tf.add_paragraph()
-            p2.alignment = PP_ALIGN.RIGHT
+            _set_paragraph_rtl(p2)
             p2.space_before = Pt(14)
             run2 = p2.add_run()
             run2.text = data.subtitle
@@ -202,7 +247,7 @@ class PresentationGenerator:
         footer_box = slide.shapes.add_textbox(Inches(1.0), Inches(5.8), Inches(11.333), Inches(0.8))
         tf_foot = footer_box.text_frame
         p_f = tf_foot.paragraphs[0]
-        p_f.alignment = PP_ALIGN.RIGHT
+        _set_paragraph_rtl(p_f)
         r_f = p_f.add_run()
         r_f.text = f"إعداد: {deck.author} | مبادرة التوثيق الثقافي"
         r_f.font.name = FONT_BODY
@@ -229,7 +274,7 @@ class PresentationGenerator:
         for p_text in data.body_paragraphs:
             p = tf.paragraphs[0] if first else tf.add_paragraph()
             first = False
-            p.alignment = PP_ALIGN.RIGHT
+            _set_paragraph_rtl(p)
             p.space_after = Pt(12)
             run = p.add_run()
             run.text = p_text
@@ -239,7 +284,7 @@ class PresentationGenerator:
 
         for bullet in data.bullets:
             p = tf.add_paragraph()
-            p.alignment = PP_ALIGN.RIGHT
+            _set_paragraph_rtl(p)
             p.space_after = Pt(8)
             run_icon = p.add_run()
             run_icon.text = "✦  "
@@ -256,7 +301,7 @@ class PresentationGenerator:
 
         if data.quote:
             p_q = tf.add_paragraph()
-            p_q.alignment = PP_ALIGN.RIGHT
+            _set_paragraph_rtl(p_q)
             p_q.space_before = Pt(14)
             r_q = p_q.add_run()
             r_q.text = f"«{data.quote}»"
@@ -302,7 +347,7 @@ class PresentationGenerator:
             tf.word_wrap = True
 
             p_t = tf.paragraphs[0]
-            p_t.alignment = PP_ALIGN.RIGHT
+            _set_paragraph_rtl(p_t)
             r_t = p_t.add_run()
             r_t.text = card.title
             r_t.font.name = FONT_HEADING
@@ -312,7 +357,7 @@ class PresentationGenerator:
 
             if card.subtitle:
                 p_sub = tf.add_paragraph()
-                p_sub.alignment = PP_ALIGN.RIGHT
+                _set_paragraph_rtl(p_sub)
                 p_sub.space_after = Pt(8)
                 r_sub = p_sub.add_run()
                 r_sub.text = card.subtitle
@@ -322,7 +367,7 @@ class PresentationGenerator:
 
             for b in card.bullets:
                 p_b = tf.add_paragraph()
-                p_b.alignment = PP_ALIGN.RIGHT
+                _set_paragraph_rtl(p_b)
                 p_b.space_after = Pt(6)
                 r_dot = p_b.add_run()
                 r_dot.text = "• "
@@ -428,7 +473,7 @@ class PresentationGenerator:
         for b in data.bullets:
             p = tf.paragraphs[0] if first else tf.add_paragraph()
             first = False
-            p.alignment = PP_ALIGN.RIGHT
+            _set_paragraph_rtl(p)
             p.space_after = Pt(12)
             r_i = p.add_run()
             r_i.text = "✦  "
@@ -468,7 +513,7 @@ class PresentationGenerator:
         tf = h_box.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
-        p.alignment = PP_ALIGN.RIGHT
+        _set_paragraph_rtl(p)
         r = p.add_run()
         r.text = title
         r.font.name = FONT_HEADING
@@ -493,7 +538,7 @@ class PresentationGenerator:
         f_box = slide.shapes.add_textbox(Inches(0.8), Inches(6.8), Inches(11.733), Inches(0.4))
         tf = f_box.text_frame
         p = tf.paragraphs[0]
-        p.alignment = PP_ALIGN.RIGHT
+        _set_paragraph_rtl(p)
         r = p.add_run()
         r.text = footer_text
         r.font.name = FONT_BODY

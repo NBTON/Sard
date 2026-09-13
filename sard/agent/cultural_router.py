@@ -15,7 +15,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Optional
 
 from sard.agent.tools.cultural_tools import (
     _infer_cultural_metadata,
@@ -169,7 +169,6 @@ class CulturalRouter:
         decision.is_time_sensitive = is_fresh
 
         # Step A: Always run RAG first
-        t_rag = time.monotonic()
         raw_rag_results = self.rag_search(user_query, 5)
         decision.rag_executed = True
 
@@ -260,11 +259,10 @@ class CulturalRouter:
                         logger.warning("Parallel extract failed gracefully: %s", exc)
                         decision.web_unavailable_warning = True
 
-        # Return only verified valid RAG results (or empty list if out-of-corpus)
-        # Note: if caller specifically injected mock RAG with lower score for fallback test, preserve it if web failed
-        final_rag_results = valid_rag_results if valid_rag_results else (
-            raw_rag_results if (decision.web_unavailable_warning and raw_rag_results) else []
-        )
+        # Return only verified valid RAG results. Sub-threshold results are never
+        # resurrected, even when web is unavailable — unrelated retrieval must be
+        # rejected and the caller must abstain instead of citing weak matches.
+        final_rag_results = valid_rag_results
 
         return final_rag_results, web_results, extracted_results, decision
 
@@ -274,6 +272,7 @@ class CulturalRouter:
         llm_invoke_fn: Optional[Callable[[str, str], str]] = None,
         mock_multimodal_files: Optional[dict] = None,
         lang: Optional[str] = None,
+        uploaded_files: Optional[dict] = None,
     ) -> CulturalQueryResult:
         """Full retrieve-then-generate pipeline adhering to cultural answer quality."""
         t0 = time.monotonic()
@@ -301,15 +300,16 @@ class CulturalRouter:
                     citations=[],
                     latency_ms=latency_ms,
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in cultural_router.py: %s", type(exc).__name__)
 
         rag_res, web_res, ext_res, decision = self.route_and_retrieve(user_query)
 
-        # Extract multimodal files if referenced in query (@filename.ext)
+        # Extract multimodal files: real uploads (no @mention required) + @mentions.
         multimodal_items = self.multimodal_extract(
             user_query,
             mock_files=mock_multimodal_files,
+            uploaded_files=uploaded_files,
         )
         decision.multimodal_extracted_count = len(multimodal_items)
 
@@ -365,15 +365,24 @@ class CulturalRouter:
                         citations=[],
                         latency_ms=latency_ms,
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in cultural_router.py: %s", type(exc).__name__)
 
         # Build context for synthesis
         context_blocks = []
         citations_list = []
 
-        # Multimodal items — preserve all provenance fields
+        # Multimodal items — cite only real extracted content; provider-unavailable
+        # files are reported explicitly in prose, never as verified provenance.
         for mm in multimodal_items:
+            method = getattr(mm, "extraction_method", "core") or "core"
+            has_text = bool((mm.extracted_text or "").strip())
+            if method in ("capability_unavailable", "provider_error") and not has_text:
+                context_blocks.append(
+                    f"[Media: {mm.filename}] تعذر تحليل الملف {mm.filename}: "
+                    f"خدمة المعالجة الخارجية غير متوفرة — لم يُحتسب كمصدر موثق."
+                )
+                continue
             cit_label = f"Media: {mm.filename}"
             citations_list.append({
                 "type": "media",
@@ -404,9 +413,15 @@ class CulturalRouter:
                 f"[{cit_label}] (Multimodal File Analysis - {mm.file_type.upper()}):\n" + "\n".join(mm_text)
             )
 
-        # RAG items: include only if web_res is empty and RAG is relevant, or if explicitly in-corpus
-        # Preserve all provenance fields: id, title, url, snippet, topic, region, channel, score, score_type
-        rag_to_include = rag_res if not web_res else []
+        # RAG + Web fusion: verified local evidence is never discarded when web
+        # returns results. Both are cited; web does not silently replace RAG.
+        rag_to_include = list(rag_res or [])
+        seen_urls: set[str] = set()
+        for r in rag_to_include:
+            meta = r.get("metadata", {}) if isinstance(r.get("metadata"), dict) else {}
+            u = str(meta.get("source_url", "") or r.get("title", ""))
+            if u:
+                seen_urls.add(u)
         for r in rag_to_include:
             meta = r.get("metadata", {})
             source_file = meta.get("source_url", "").split("/")[-1] or r.get("title", "وثيقة تراثية")
@@ -650,7 +665,6 @@ class CulturalRouter:
         # If Web-grounded
         if web_res:
             top_web = web_res[0]
-            url = top_web.get("url", "")
             title = top_web.get("title", "")
             excerpts = " ".join(top_web.get("excerpts", []))[:500]
 

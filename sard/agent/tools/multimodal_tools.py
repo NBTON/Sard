@@ -16,16 +16,13 @@ Provides native support for images, video, PDFs/documents, audio, and 3D/NIfTI f
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import os
 import re
-import struct
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import httpx
 from dotenv import load_dotenv
@@ -183,8 +180,8 @@ def probe_audio_core(file_path: Union[str, Path]) -> Dict[str, Any]:
                 info["n_frames"] = wf.getnframes()
                 info["duration_seconds"] = round(wf.getnframes() / float(wf.getframerate()), 2)
                 return info
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in multimodal_tools.py: %s", type(exc).__name__)
 
     # Generic estimation or fallback
     info["estimated_duration_seconds"] = round(p.stat().st_size / 16000, 1)  # Rough byte heuristic
@@ -276,6 +273,135 @@ def inspect_nifti_file(file_path: Union[str, Path]) -> Dict[str, Any]:
         info["parse_error"] = str(exc)
 
     return info
+
+
+def _read_text_document(file_path: Union[str, Path], max_chars: int = 20000) -> Dict[str, Any]:
+    """Read real bytes from TXT/MD/CSV/JSON/DOCX documents (no mocks)."""
+    p = Path(file_path)
+    if not p.exists():
+        return {"error": f"Document not found: {p}", "text": ""}
+    ext = p.suffix.lower()
+    try:
+        if ext == ".docx":
+            try:
+                import docx  # python-docx
+
+                doc = docx.Document(str(p))
+                paragraphs = [para.text for para in doc.paragraphs if para.text and para.text.strip()]
+                # Include table cell text as well
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text and cell.text.strip():
+                                paragraphs.append(cell.text.strip())
+                text = "\n".join(paragraphs)[:max_chars]
+                return {"text": text, "engine": "python-docx", "paragraphs": len(paragraphs)}
+            except ImportError:
+                return {"error": "python-docx not installed; cannot read DOCX.", "text": ""}
+        # Plain-text family: read bytes directly
+        raw = p.read_bytes()[: max_chars * 4]
+        text = raw.decode("utf-8", errors="replace")[:max_chars]
+        if ext == ".json":
+            try:
+                parsed = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                text = json.dumps(parsed, ensure_ascii=False, indent=2)[:max_chars]
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in multimodal_tools.py: %s", type(exc).__name__)
+        return {"text": text.strip(), "engine": "core-text", "chars": len(text.strip())}
+    except Exception as exc:
+        return {"error": str(exc), "text": ""}
+
+
+def _extract_real_file(file_path: Union[str, Path], filename: Optional[str] = None) -> MultimodalExtractedItem:
+    """Run the real multimodal extractor against real uploaded bytes.
+
+    Never fabricates content. When an external modality provider is unavailable,
+    the item explicitly reports capability_unavailable without pretending the
+    file was analyzed.
+    """
+    p = Path(file_path)
+    name = filename or p.name
+    ext = Path(name).suffix.lower()
+    if name.lower().endswith(".nii.gz"):
+        ext = ".nii.gz"
+
+    if ext == ".pdf":
+        pdf_info = extract_pdf_pages(p) if p.exists() else {}
+        full_text = pdf_info.get("full_text", "") or ""
+        if full_text.strip():
+            return MultimodalExtractedItem(
+                filename=name, file_type="document", extracted_text=full_text.strip(),
+                metadata={"total_pages": pdf_info.get("total_pages", 1), "extension": ext, "engine": pdf_info.get("engine", "core")},
+                source_path=str(p), extraction_method="core", confidence=1.0,
+            )
+        # Scanned PDF with no extractable text: report explicitly
+        ocr_res = qwen_vl_ocr_extract(p, page_number=1)
+        return MultimodalExtractedItem(
+            filename=name, file_type="document", extracted_text="",
+            description=str(ocr_res.get("extracted_text", "")),
+            metadata={"total_pages": pdf_info.get("total_pages", 1), "extension": ext, "ocr_status": ocr_res.get("status", "capability_unavailable")},
+            source_path=str(p), extraction_method=ocr_res.get("source", "capability_unavailable"), confidence=0.0,
+        )
+    if ext in {".docx", ".txt", ".md", ".csv", ".json"}:
+        doc_res = _read_text_document(p)
+        text = doc_res.get("text", "") or ""
+        if text.strip():
+            return MultimodalExtractedItem(
+                filename=name, file_type="document", extracted_text=text.strip(),
+                metadata={"extension": ext, "engine": doc_res.get("engine", "core-text")},
+                source_path=str(p), extraction_method="core", confidence=1.0,
+            )
+        return MultimodalExtractedItem(
+            filename=name, file_type="document", extracted_text="",
+            description=f"تعذر استخراج نص من {name}: {doc_res.get('error', 'ملف فارغ')}",
+            metadata={"extension": ext, "status": "extraction_failed"},
+            source_path=str(p), extraction_method="capability_unavailable", confidence=0.0,
+        )
+    if ext in IMAGE_EXTENSIONS:
+        core_info = inspect_image_core(p) if p.exists() else {}
+        vis_res = qwen_vl_vision_analyze(p)
+        return MultimodalExtractedItem(
+            filename=name, file_type="image",
+            extracted_text="", description=str(vis_res.get("description", f"Image artifact: {name}")),
+            visual_features=vis_res.get("visual_features") or core_info, metadata=core_info,
+            source_path=str(p), extraction_method=str(vis_res.get("source", "core")),
+            confidence=1.0 if vis_res.get("status") == "success" else 0.0,
+        )
+    if ext in AUDIO_EXTENSIONS:
+        audio_info = probe_audio_core(p) if p.exists() else {}
+        asr_res = qwen_audio_transcribe(p)
+        extracted = asr_res.get("text", "") or ""
+        # Core probe alone is not a transcription; only real ASR text counts.
+        has_transcript = bool(extracted.strip()) and asr_res.get("status") == "success"
+        return MultimodalExtractedItem(
+            filename=name, file_type="audio",
+            extracted_text=extracted if has_transcript else "",
+            transcription=asr_res.get("transcription"), metadata=audio_info,
+            description="" if has_transcript else str(extracted or f"خدمة التفريغ الصوتي غير متوفرة لملف {name}."),
+            source_path=str(p), extraction_method=str(asr_res.get("source", "capability_unavailable")),
+            confidence=1.0 if has_transcript else 0.0,
+        )
+    if ext in THREE_D_EXTENSIONS or "nii" in ext:
+        if "nii" in ext:
+            nii_info = inspect_nifti_file(p) if p.exists() else {}
+            return MultimodalExtractedItem(
+                filename=name, file_type="nifti",
+                description=f"NIfTI volumetric scan: shape {nii_info.get('shape', 'unknown')}",
+                metadata=nii_info, source_path=str(p), extraction_method="core", confidence=1.0,
+            )
+        info_3d = inspect_3d_file(p) if p.exists() else {}
+        return MultimodalExtractedItem(
+            filename=name, file_type="3d",
+            description=f"3D mesh model ({ext}): {info_3d.get('vertices', 0)} vertices, {info_3d.get('faces', 0)} faces.",
+            metadata=info_3d, source_path=str(p), extraction_method="core", confidence=1.0,
+        )
+    # Fallback: try plain-text read for anything else
+    doc_res = _read_text_document(p)
+    return MultimodalExtractedItem(
+        filename=name, file_type="document", extracted_text=doc_res.get("text", "") or "",
+        metadata={"extension": ext}, source_path=str(p), extraction_method="core",
+        confidence=1.0 if (doc_res.get("text") or "").strip() else 0.0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -444,10 +570,14 @@ def qwen_vl_ocr_extract(
             "error": "OCR provider not configured (missing DASHSCOPE_API_KEY).",
         }
 
+    # Provider key present but no direct OCR HTTP call is implemented here:
+    # report explicitly instead of fabricating extracted text.
     return {
-        "source": "qwen_ocr",
+        "source": "capability_unavailable",
         "page_number": page_number,
-        "extracted_text": f"نص مستخرج من الصفحة {page_number} لملف {p.name}",
+        "extracted_text": "",
+        "status": "capability_unavailable",
+        "error": "OCR provider call not implemented; no text fabricated.",
     }
 
 
@@ -460,30 +590,141 @@ def extract_multimodal_context(
     query: str,
     base_dir: Optional[Union[str, Path]] = None,
     mock_files: Optional[Dict[str, Dict[str, Any]]] = None,
+    uploaded_files: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[MultimodalExtractedItem]:
-    """Finds all @file references in a user query and extracts their multimodal context.
+    """Extract multimodal context from @file mentions AND real uploaded files.
 
-    Parameters:
-        query: The user prompt string (e.g. '@artifact-photo.jpg Identify this object').
-        base_dir: Optional directory where relative file references might reside.
-        mock_files: Optional dictionary of predefined simulated files for tests.
-
-    Returns:
-        A list of ``MultimodalExtractedItem`` objects containing extracted evidence.
+    Real uploaded paths (via ``uploaded_files``, or ``mock_files`` entries that
+    carry an explicit ``file_path``/``path`` to an existing file WITHOUT a mock
+    marker) are always passed to the real multimodal extractor
+    (:func:`_extract_real_file`), never served from mock canned text. Entries
+    explicitly marked with a mock ``extraction_method`` (``mock*``) retain
+    legacy deterministic behavior for unit tests.
     """
+    extracted_items: List[MultimodalExtractedItem] = []
+    base_path = Path(base_dir) if base_dir else Path.cwd()
+    seen: set[str] = set()
+
+    def _is_explicit_mock(entry: Dict[str, Any]) -> bool:
+        method = str(entry.get("extraction_method", "") or "")
+        return method.strip().lower().startswith("mock")
+
+    def _explicit_real_path(entry: Dict[str, Any]) -> Optional[Path]:
+        # Only explicit file_path/path keys count (never source_path display
+        # fields, never blind filesystem search): server uploads always carry
+        # file_path/path, while test doubles carry canned text + mock markers.
+        for key in ("file_path", "path"):
+            candidate = entry.get(key)
+            if candidate:
+                p = Path(str(candidate))
+                try:
+                    if p.exists() and p.is_file():
+                        return p
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in multimodal_tools.py: %s", type(exc).__name__)
+        return None
+
+    def _search_real_path(fallback_name: str) -> Optional[Path]:
+        # Filesystem search applies ONLY to explicit uploaded_files (real
+        # uploads), never to mock_files (test doubles may name real files).
+        for candidate in (
+            base_path / fallback_name,
+            Path.cwd() / fallback_name,
+            Path.cwd() / "data" / fallback_name,
+        ):
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return candidate
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in multimodal_tools.py: %s", type(exc).__name__)
+                continue
+        try:
+            upload_dir = os.environ.get("SARD_UPLOAD_DIR", "").strip()
+            if upload_dir:
+                cand = Path(upload_dir) / fallback_name
+                if cand.exists() and cand.is_file():
+                    return cand
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in multimodal_tools.py: %s", type(exc).__name__)
+        return None
+
+    # 1. Real uploaded files first (no @mention required).
+    if uploaded_files:
+        for key, entry in uploaded_files.items():
+            if not isinstance(entry, dict):
+                continue
+            fname = Path(key).name if "." in Path(key).name else str(entry.get("filename") or key)
+            fname = Path(fname).name
+            real_path = _explicit_real_path(entry) or _search_real_path(fname)
+            if real_path is None:
+                continue
+            dedup = f"{real_path.resolve()}::{fname}"
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+            try:
+                extracted_items.append(_extract_real_file(real_path, filename=fname))
+            except Exception as exc:
+                logger.warning("Real extraction failed for %s: %s", fname, exc)
+    # Legacy bridge: real server uploads passed via mock_files WITHOUT a mock
+    # marker are still routed to the real extractor (not canned text).
+    if mock_files:
+        for key, entry in mock_files.items():
+            if not isinstance(entry, dict) or _is_explicit_mock(entry):
+                continue
+            fname = Path(key).name if "." in Path(key).name else str(entry.get("filename") or key)
+            fname = Path(fname).name
+            real_path = _explicit_real_path(entry)
+            if real_path is None:
+                continue
+            dedup = f"{real_path.resolve()}::{fname}"
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+            try:
+                extracted_items.append(_extract_real_file(real_path, filename=fname))
+            except Exception as exc:
+                logger.warning("Real extraction failed for %s: %s", fname, exc)
+
     if not query:
-        return []
+        return extracted_items
 
     found_matches = FILE_MENTION_PATTERN.findall(query)
     if not found_matches:
-        return []
-
-    extracted_items: List[MultimodalExtractedItem] = []
-    base_path = Path(base_dir) if base_dir else Path.cwd()
+        return extracted_items
 
     for match in found_matches:
         filename = Path(match).name
         ext = Path(match).suffix.lower()
+
+        # Real file wins over mock ONLY for explicit non-mock uploads: an entry
+        # with file_path/path to an existing file and no mock marker runs the
+        # real extractor. Explicit mock doubles (extraction_method mock*)
+        # always keep legacy canned behavior for deterministic tests.
+        real_candidate: Optional[Path] = None
+        for mapping in (uploaded_files, mock_files):
+            if not mapping:
+                continue
+            entry = mapping.get(filename) or mapping.get(match)
+            if isinstance(entry, dict) and not _is_explicit_mock(entry):
+                cand = _explicit_real_path(entry)
+                if cand is not None:
+                    real_candidate = cand
+                    break
+        # @mentions of explicit uploads resolve via upload search even when the
+        # query names a file the mapping keys differ on.
+        if real_candidate is None and uploaded_files:
+            real_candidate = _search_real_path(filename)
+        if real_candidate is not None:
+            dedup = f"{real_candidate.resolve()}::{filename}"
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+            try:
+                extracted_items.append(_extract_real_file(real_candidate, filename=filename))
+            except Exception as exc:
+                logger.warning("Real extraction failed for %s: %s", filename, exc)
+            continue
 
         # Check for mock injection (useful in deterministic testing)
         if mock_files and (filename in mock_files or match in mock_files):
@@ -552,6 +793,13 @@ def extract_multimodal_context(
             extracted_items.append(item)
 
         elif ext in DOCUMENT_EXTENSIONS:
+            # Real extractor handles PDF/DOCX/TXT/MD/CSV/JSON (no fabrication).
+            if resolved_path.exists():
+                try:
+                    extracted_items.append(_extract_real_file(resolved_path, filename=filename))
+                    continue
+                except Exception as exc:
+                    logger.warning("Real document extraction failed for %s: %s", filename, exc)
             ocr_res = qwen_vl_ocr_extract(resolved_path, page_number=1)
             pdf_info = extract_pdf_pages(resolved_path) if ext == ".pdf" and resolved_path.exists() else {}
             item = MultimodalExtractedItem(

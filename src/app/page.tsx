@@ -12,7 +12,8 @@ import { ArtifactModal } from "@/components/ArtifactModal";
 
 function ChatAppContent() {
   const { lang, toggleDirection } = useDirection();
-  const [view, setView] = useState<View>("landing");
+  // Chat-first workspace: composer visible immediately on first load.
+  const [view, setView] = useState<View>("chat");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<Attachment[]>([]);
@@ -64,7 +65,11 @@ function ChatAppContent() {
   }, [sessionId, messages]);
 
   function goHome() {
-    setView("landing");
+    setView("chat");
+  }
+
+  function goExplore() {
+    setView("explore");
   }
 
   function handleNewChat() {
@@ -219,9 +224,9 @@ function ChatAppContent() {
                   ...m,
                   citations: citations.map((s, idx) => ({
                     citation_id: s.citation_id || (s as any).id || `src-${idx}`,
-                    title: s.title || (s as any).origin || "مرجع تراثي",
+                    title: s.title || (s as any).origin || "",
                     source_url: s.source_url || (s as any).url || "",
-                    source_name: s.source_name || (s as any).origin || "وزارة الثقافة",
+                    source_name: s.source_name || (s as any).origin || "",
                   })),
                 }
               : m
@@ -315,11 +320,12 @@ function ChatAppContent() {
   }
 
   // Auto-scroll on update
+  const lastMessageContent = messages[messages.length - 1]?.content;
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, messages[messages.length - 1]?.content]);
+  }, [messages, lastMessageContent]);
 
   return (
     <StageTurnContainer
@@ -336,10 +342,11 @@ function ChatAppContent() {
         lang={lang}
         onToggleLang={() => toggleDirection()}
         onGoHome={goHome}
+        onGoExplore={goExplore}
         view={view}
       />
 
-      {view === "landing" ? (
+      {view === "explore" || view === "landing" ? (
         <Landing
           lang={lang}
           onStartChat={openChat}
@@ -381,6 +388,7 @@ function ChatAppContent() {
                 messages={messages}
                 lang={lang}
                 onSelectArtifact={(art) => setSelectedArtifact(art)}
+                onStarter={(p) => doSend(p)}
               />
             </div>
             <div

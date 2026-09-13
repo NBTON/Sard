@@ -10,7 +10,7 @@ Maps the isnād chain confidence score and conflict state to a concrete action d
 from __future__ import annotations
 
 from typing import Tuple
-from sard.schemas.isnad import Confidence, Decision, IsnadChain
+from sard.schemas.isnad import Decision, IsnadChain
 
 
 def decide_action(chain: IsnadChain, query_text: str = "") -> Tuple[Decision, str]:

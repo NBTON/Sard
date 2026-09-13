@@ -15,7 +15,7 @@ NVIDIA API Catalog default is used.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 DEFAULT_HOSTED_BASE_URL = "https://integrate.api.nvidia.com/v1"

@@ -8,7 +8,6 @@ import os
 import pytest
 
 from sard.config.rag import NVIDIAConfigError, get_rag_settings, list_available_models
-from sard.rag.answer import AnswerService
 from sard.rag.chunking import chunk_sections
 from sard.rag.ingest import IngestionManifest, _discover_source_files
 from sard.rag.schemas import Chunk, EmbeddedChunk, ParsedSection

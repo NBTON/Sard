@@ -143,13 +143,15 @@ def test_successful_multipage_pdf(monkeypatch, tmp_path):
     assert artifact.size_bytes == artifact.path.stat().st_size > 10_000
     assert artifact.warnings == ()
     with fitz.open(artifact.path) as document:
-        assert document.page_count >= 3
+        assert document.page_count >= 2
         assert all(page.rect.height > page.rect.width for page in document)
         assert all(page.get_pixmap(matrix=fitz.Matrix(0.25, 0.25)).width > 0 for page in document)
         extracted = "".join(page.get_text() for page in document)
         assert "CIT-DEMO-SPRING-001" in extracted
         assert "CIT-DEMO-MARKET-002" in extracted
         assert "https://example.org/arabic-springs?lang=ar&ref=PDF" in extracted
+        # No effectively-blank trailing page: the last page must carry content.
+        assert len(document[-1].get_text().strip()) > 200
 
 
 def test_very_long_body_splits_across_pages(monkeypatch, tmp_path):

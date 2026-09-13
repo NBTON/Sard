@@ -18,8 +18,8 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen.canvas import Canvas
 
-from sard.outputs.arabic import shape_rtl, visual_runs
-from sard.outputs.fonts import ensure_fonts_registered, require_arabic_font, require_latin_font
+from sard.outputs.arabic import shape_rtl
+from sard.outputs.fonts import ensure_fonts_registered
 
 logger = logging.getLogger("sard.outputs.recipe_card")
 

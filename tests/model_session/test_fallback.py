@@ -4,7 +4,6 @@ Run: uv run python -m pytest tests/model_session/test_fallback.py -v
 """
 from __future__ import annotations
 
-import pytest
 from langchain_core.messages import AIMessage
 
 from sard.agent.chat_service import ChatService

@@ -119,7 +119,7 @@ def test_ingestion_is_idempotent_on_rerun(tmp_path, repo):
 def test_changed_source_is_reingested_and_stale_chunks_removed(tmp_path, repo):
     corpus = tmp_path / "corpus"
     corpus.mkdir()
-    path = _write_source(corpus, "a.md", "نص النسخة الأولى عن الينابيع الحارة في الأحساء.", topic="springs")
+    _write_source(corpus, "a.md", "نص النسخة الأولى عن الينابيع الحارة في الأحساء.", topic="springs")
 
     first = ingest_directory(corpus, repo, _FakeEmbeddingService(), "test-embed")
     assert first.documents_ingested == 1

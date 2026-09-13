@@ -7,7 +7,6 @@ No secrets are logged or exposed to browser.
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 from typing import List, Optional
 

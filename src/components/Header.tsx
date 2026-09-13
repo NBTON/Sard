@@ -8,12 +8,14 @@ export function Header({
   lang,
   onToggleLang,
   onGoHome,
+  onGoExplore,
   view,
 }: {
   lang: Lang;
   onToggleLang: () => void;
   onGoHome: () => void;
-  view: "landing" | "chat";
+  onGoExplore?: () => void;
+  view: "landing" | "chat" | "explore";
 }) {
   return (
     <header
@@ -29,9 +31,11 @@ export function Header({
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        padding: "0 22px",
-        gap: 16,
+        padding: "0 16px",
+        gap: 12,
         flexShrink: 0,
+        flexWrap: "wrap",
+        minHeight: 68,
       }}
     >
       {/* Start: 13-thread mark + سرد + tagline */}
@@ -72,6 +76,9 @@ export function Header({
               color: "#8A8178",
               marginTop: 1,
               whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              maxWidth: "38vw",
             }}
           >
             {t("tagline", lang)}
@@ -136,7 +143,7 @@ export function Header({
           </button>
         </div>
 
-        {/* الواجهة / Home */}
+        {/* الواجهة / Home + Explore */}
         <button
           onClick={onGoHome}
           style={{
@@ -144,16 +151,35 @@ export function Header({
             borderRadius: 999,
             fontSize: 13.5,
             fontWeight: 600,
-            background: view === "landing" ? "#141210" : "#FAF7F1",
-            color: view === "landing" ? "#FAF7F1" : "#141210",
+            background: view === "chat" ? "#141210" : "#FAF7F1",
+            color: view === "chat" ? "#FAF7F1" : "#141210",
             border: "1px solid #D4CBBD",
             cursor: "pointer",
             transition: "all 0.22s ease",
           }}
           aria-label={t("home", lang)}
         >
-          {t("home", lang)}
+          {lang === "ar" ? "المحادثة" : "Chat"}
         </button>
+        {onGoExplore && (
+          <button
+            onClick={onGoExplore}
+            style={{
+              padding: "8px 16px",
+              borderRadius: 999,
+              fontSize: 13.5,
+              fontWeight: 600,
+              background: view === "explore" ? "#141210" : "#FAF7F1",
+              color: view === "explore" ? "#FAF7F1" : "#141210",
+              border: "1px solid #D4CBBD",
+              cursor: "pointer",
+              transition: "all 0.22s ease",
+            }}
+            aria-label={lang === "ar" ? "استكشف القدرات" : "Explore capabilities"}
+          >
+            {lang === "ar" ? "استكشف" : "Explore"}
+          </button>
+        )}
       </div>
     </header>
   );

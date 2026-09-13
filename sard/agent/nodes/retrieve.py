@@ -17,7 +17,6 @@ from sard.agent.events import (
     EVENT_MODEL_FALLBACK_ACTIVATED,
     EVENT_RETRIEVAL_MODE_CHANGED,
     EVENT_STARTED,
-    SafeFallbackEvent,
     adapt_fallback_events,
     make_event,
 )

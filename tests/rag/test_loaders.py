@@ -29,7 +29,6 @@ def _make_text_pdf(text: str, pages: int = 1) -> bytes:
     font_id = 3 + 2 * pages
     for i in range(pages):
         content_id = 4 + 2 * i
-        page_id = 3 + 2 * i
         objects.append(
             (
                 f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "

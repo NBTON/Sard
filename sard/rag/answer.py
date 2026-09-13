@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
 from typing import Optional
 
 from sard.config.rag import RAGSettings, build_chat_model, get_rag_settings

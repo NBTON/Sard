@@ -8,7 +8,6 @@ and verified heritage research citations.
 
 from __future__ import annotations
 
-import pytest
 from sard.agent.tools.cultural_agentic_tools import (
     tool_generate_presentation,
     tool_generate_recipe_or_craft_card,

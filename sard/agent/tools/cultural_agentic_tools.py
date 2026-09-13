@@ -15,39 +15,29 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import asdict
+from typing import Any, Dict, List, Optional
 
 from sard.outputs.calendar_sync import (
-    HERITAGE_EVENTS_DATABASE,
-    HeritageCalendarEvent,
     HeritageCalendarSync,
 )
 from sard.outputs.diagrams import (
     CulturalDiagram,
     DiagramRenderer,
-    FlowNode,
     TimelineMilestone,
     create_business_etiquette_diagram,
     create_majlis_etiquette_diagram,
 )
 from sard.outputs.greeting_cards import (
-    GreetingCard,
     GreetingCardStudio,
     compose_greeting_card,
 )
 from sard.outputs.memoir import (
-    FamilyMemoirBooklet,
-    MemoirChapter,
     MemoirCompiler,
     synthesize_memoir_from_notes,
 )
 from sard.outputs.office import (
-    PresentationDeck,
     PresentationGenerator,
-    SlideCard,
-    SlideContent,
-    TimelineItem,
     create_cultural_briefing_deck,
 )
 from sard.outputs.recipe_card import (
@@ -133,6 +123,19 @@ def tool_generate_recipe_or_craft_card(
 ) -> Dict[str, Any]:
     """Generates a printable PDF recipe card or craft guide (G5: no empty sections)."""
     renderer = RecipeCardRenderer(OUTPUT_DIR)
+
+    # Typed validation: missing subject must ask, never silently substitute jareesh.
+    if not (item_name or "").strip():
+        return {
+            "success": False,
+            "artifact_type": "recipe_craft_card",
+            "title": None,
+            "filename": None,
+            "download_url": None,
+            "card_data": None,
+            "error_category": "missing_input",
+            "message_ar": "الرجاء تحديد اسم الطبق أو الحرفة (item_name) قبل إنشاء البطاقة.",
+        }
 
     # G5: unknown item with no inputs must not emit empty sections — explicit clarification.
     _known_markers = ("جريش", "jareesh", "سدو", "sadu", "نسيج", "craft")
@@ -270,6 +273,20 @@ def tool_simulate_etiquette_protocol(
     """Provides scenario-based cultural protocol guidance with an interactive flowchart."""
     renderer = DiagramRenderer()
 
+    # Typed validation: missing scenario must ask, never silently substitute majlis.
+    if not (scenario_type or "").strip():
+        return {
+            "success": False,
+            "artifact_type": "etiquette_simulation",
+            "scenario_type": scenario_type,
+            "title": None,
+            "guidance_markdown": "",
+            "diagram_svg": "",
+            "diagram_data": None,
+            "error_category": "missing_input",
+            "message_ar": "الرجاء تحديد نوع سيناريو الإتيكيت (scenario_type: majlis أو business_negotiation).",
+        }
+
     if scenario_type == "business_negotiation" or "عمل" in situation or "مفاوضات" in situation:
         diagram = create_business_etiquette_diagram()
         narrative_guidance = (
@@ -388,6 +405,19 @@ def tool_decode_dialect_or_proverb(
     dialect_region: str = "najdi",  # najdi, hijazi, sharqawi, janoubi, all
 ) -> Dict[str, Any]:
     """Translates regional dialects, explains proverb lore, and provides situational usage."""
+    if not (phrase_or_proverb or "").strip():
+        return {
+            "success": False,
+            "artifact_type": "dialect_lore_card",
+            "region_name": "",
+            "input_phrase": phrase_or_proverb,
+            "proverb_title": None,
+            "meaning_ar": "",
+            "lore_story_ar": "",
+            "situational_context_ar": "",
+            "error_category": "missing_input",
+            "message_ar": "الرجاء إدخال العبارة أو المثل (phrase_or_proverb) قبل المتابعة.",
+        }
     region_key = dialect_region.lower() if dialect_region.lower() in DIALECT_LEXICON_DATABASE else "najdi"
     lexicon = DIALECT_LEXICON_DATABASE[region_key]
 

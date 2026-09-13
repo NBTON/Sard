@@ -11,7 +11,6 @@ from tests.agent.test_core_graph import (
     _evidence_answer,
     _scripts_for_success,
     FakeRAGService,
-    FakeChatModel,
 )
 
 

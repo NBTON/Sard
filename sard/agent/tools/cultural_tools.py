@@ -14,14 +14,13 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Optional, Sequence
 
 import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from sard.config.rag import get_rag_settings
 from sard.rag.schemas import ScoreType
 from sard.url_policy import is_safe_external_url, safe_external_url
 
@@ -371,8 +370,8 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
             if sidecar.exists():
                 try:
                     meta_json = json.loads(sidecar.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in cultural_tools.py: %s", type(exc).__name__)
 
             title = meta_json.get("title") or md_file.stem.replace("-", " ")
             source_name = meta_json.get("source_name") or "دليل التراث السعودي"
@@ -676,7 +675,6 @@ def _bias_queries_for_cultural_sources(queries: list[str], objective: str) -> li
             seen.add(clean)
 
     # If Arabic query, add an English variant if helpful; if English, add Arabic keyword
-    obj_lower = objective.lower()
     has_arabic = bool(re.search(r"[\u0600-\u06FF]", objective))
 
     if has_arabic and len(out_queries) < 4:

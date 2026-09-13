@@ -151,11 +151,11 @@ class Itinerary:
     sources: tuple[CitationSource, ...]
     generated_at: datetime
     notes: tuple[TextBlock, ...] = ()
-    # Step 6 metadata.
+    # Step 6 metadata (fail-closed: new itineraries start as limited until verified).
     run_id: str = ""
     timezone: str = "Asia/Riyadh"
     explicit_dates: tuple[date, ...] = ()
-    verification_status: VerificationStatus = VerificationStatus.VERIFIED
+    verification_status: VerificationStatus = VerificationStatus.EVIDENCE_LIMITED
     retrieval_mode: str = ""
     model_fallback_used: bool = False
     warnings: tuple[str, ...] = ()

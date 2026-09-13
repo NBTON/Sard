@@ -1,7 +1,6 @@
 """G3: official Vercel Blob SDK wrapper exists; storage truth surfaced."""
-from sard.outputs.orchestrator import VercelBlobArtifactStore, ConfigurableBlobArtifactStore, FileSystemArtifactStore
+from sard.outputs.orchestrator import VercelBlobArtifactStore, FileSystemArtifactStore
 from sard.runtime_paths import durable_storage_configured
-import os
 
 def test_gap_g3_vercel_blob_store_exists_and_falls_back(tmp_path, monkeypatch):
     # Unconfigured -> falls back to local FS, stores verifiably

@@ -9,27 +9,15 @@ Verifies:
 6. Grounding: ensures answers cite [Media: ...] and do not hallucinate from filename alone.
 """
 
-import os
-import pytest
-from pathlib import Path
 
 from sard.agent.capability_routing import Capability, classify_capability
-from sard.agent.chat_service import ChatService
 from sard.agent.cultural_router import CulturalRouter
 from sard.agent.nodes.understand import understand
-from sard.agent.state import GraphState, initial_state
+from sard.agent.state import initial_state
 from sard.agent.tools.multimodal_tools import (
     FILE_MENTION_PATTERN,
-    MultimodalExtractedItem,
     extract_multimodal_context,
-    extract_pdf_pages,
     inspect_3d_file,
-    inspect_image_core,
-    inspect_nifti_file,
-    probe_audio_core,
-    qwen_audio_transcribe,
-    qwen_vl_ocr_extract,
-    qwen_vl_vision_analyze,
 )
 
 

@@ -8,7 +8,7 @@ Decision: adopt only if benchmark supports it; otherwise preserve current provid
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Dict, Callable
+from typing import List, Callable
 import time
 import statistics
 

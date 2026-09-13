@@ -1,11 +1,86 @@
 "use client";
-import React from "react";
+import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Artifact, Citation, Lang, Message } from "@/types";
 import { SardMiniMark, ThinkingWeave } from "./SardMark";
 import { t } from "@/lib/copy";
 import { getUniqueDisplayNames } from "@/lib/api";
+
+function isValidHttpUrl(url: string | undefined | null): boolean {
+  if (!url || typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (!trimmed || /\s/.test(trimmed)) return false;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function humanCitationTitle(c: Citation): string {
+  const raw = (c.title || c.source_name || "").trim();
+  // Never expose internal routing tags or bare citation IDs as titles.
+  if (!raw || /^(src-\d+|CIT-[A-Za-z0-9_-]+|RAG:|Web:|Media:)/i.test(raw)) {
+    if (c.source_name && !/^(src-\d+|CIT-)/i.test(c.source_name)) return c.source_name.slice(0, 60);
+    try {
+      const u = new URL(c.source_url);
+      return u.hostname.replace(/^www\./, "").slice(0, 60);
+    } catch {
+      return "مصدر موثق";
+    }
+  }
+  return raw.slice(0, 60);
+}
+
+function CitationList({ citations, lang }: { citations: Citation[]; lang: Lang }) {
+  const [open, setOpen] = useState(false);
+  const valid = (citations || []).filter((c) => isValidHttpUrl(c.source_url));
+  const invalidCount = (citations || []).length - valid.length;
+  const shown = open ? valid : valid.slice(0, 3);
+  if (valid.length === 0) return null;
+  return (
+    <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid #E8E0D2" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        data-testid="citations-toggle"
+        style={{
+          fontSize: 12, fontWeight: 700, color: "#8A8178", background: "none",
+          border: "none", cursor: "pointer", padding: 0, marginBottom: 8,
+        }}
+      >
+        {t("sources", lang)} • {valid.length}
+        {invalidCount > 0 ? ` (${invalidCount} غير صالح)` : ""} {open ? "▾" : "▸"}
+      </button>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {shown.map((c: Citation, idx: number) => (
+          <a
+            key={`${c.citation_id || c.source_url || "cit"}-${idx}`}
+            href={c.source_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`${humanCitationTitle(c)}${c.source_name ? ` — ${c.source_name}` : ""}`}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              background: "#F3EEE4", border: "1px solid #D4CBBD", color: "#4A513C",
+              borderRadius: 999, padding: "6px 12px", fontSize: 12, textDecoration: "none",
+            }}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: 999, background: "#4A513C", display: "inline-block" }} />
+            {humanCitationTitle(c)}
+          </a>
+        ))}
+      </div>
+      {!open && valid.length > 3 && (
+        <div style={{ fontSize: 11.5, color: "#8A8178", marginTop: 6 }}>
+          +{valid.length - 3} {lang === "ar" ? "مصادر أخرى — اضغط للعرض" : "more sources — click to expand"}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function cleanContent(text: string): string {
   if (!text) return "";
@@ -58,6 +133,7 @@ function UserBubble({ m, lang }: { m: Message; lang: Lang }) {
                 }}
               >
                 {isImage && att.preview_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- blob: object-URL thumbnail, next/image cannot optimize it
                   <img
                     src={att.preview_url}
                     alt={att.filename}
@@ -329,20 +405,25 @@ function AgentCard({
                   {children}
                 </blockquote>
               ),
-              a: ({ children, href }) => (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{
-                    color: "#BE4A24",
-                    textDecoration: "underline",
-                    textUnderlineOffset: 3,
-                  }}
-                >
-                  {children}
-                </a>
-              ),
+              a: ({ children, href }) => {
+                if (!isValidHttpUrl(href)) {
+                  return <span style={{ color: "#3A342E" }}>{children}</span>;
+                }
+                return (
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      color: "#BE4A24",
+                      textDecoration: "underline",
+                      textUnderlineOffset: 3,
+                    }}
+                  >
+                    {children}
+                  </a>
+                );
+              },
               code: ({ children }) => (
                 <code
                   style={{
@@ -453,55 +534,8 @@ function AgentCard({
             {formattedContent}
           </ReactMarkdown>
 
-          {/* Source Pills */}
-          {citations.length > 0 && (
-            <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid #E8E0D2" }}>
-              <div
-                style={{
-                  fontSize: 11.5,
-                  fontWeight: 700,
-                  color: "#8A8178",
-                  marginBottom: 8,
-                }}
-              >
-                {t("sources", lang)} • {citations.length}
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {citations.map((c: Citation, idx: number) => (
-                  <a
-                    key={`${c.citation_id || c.source_url || "cit"}-${idx}`}
-                    href={c.source_url || "#"}
-                    target={c.source_url ? "_blank" : undefined}
-                    rel="noreferrer"
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 6,
-                      background: "#F3EEE4",
-                      border: "1px solid #D4CBBD",
-                      color: "#4A513C",
-                      borderRadius: 999,
-                      padding: "6px 12px",
-                      fontSize: 12,
-                      textDecoration: "none",
-                      transition: "border-color 0.15s ease",
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: 999,
-                        background: "#4A513C",
-                        display: "inline-block",
-                      }}
-                    />
-                    {c.title ? c.title.slice(0, 48) : c.source_name || c.citation_id}
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
+          {/* Source Pills (collapsible, validated HTTPS only) */}
+          {citations.length > 0 && <CitationList citations={citations} lang={lang} />}
 
           {/* Attachments / Artifacts */}
           {m.artifacts && m.artifacts.length > 0 && (
@@ -822,12 +856,28 @@ export function ChatMessages({
   messages,
   lang,
   onSelectArtifact,
+  onStarter,
 }: {
   messages: Message[];
   lang: Lang;
   onSelectArtifact?: (artifact: Artifact) => void;
+  onStarter?: (prompt: string) => void;
 }) {
   if (messages.length === 0) {
+    const starters =
+      lang === "ar"
+        ? [
+            "ما قصة السدو؟",
+            "خطط لي يومًا في الدرعية",
+            "الخط العربي وأنواعه",
+            "مواقع اليونسكو السعودية",
+          ]
+        : [
+            "What is the story of Sadu?",
+            "Plan a day in Diriyah",
+            "Arabic calligraphy styles",
+            "Saudi UNESCO sites",
+          ];
     return (
       <div
         style={{
@@ -836,12 +886,31 @@ export function ChatMessages({
           alignItems: "center",
           justifyContent: "center",
           padding: 32,
-          color: "#8A8178",
-          fontSize: 14,
-          textAlign: "center",
         }}
       >
-        {t("chatEmptyHint", lang)}
+        <div style={{ maxWidth: 560, width: "100%", textAlign: "center" }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#141210", marginBottom: 8 }}>
+            {t("chatEmptyTitle", lang)}
+          </div>
+          <div style={{ color: "#8A8178", fontSize: 13.5, marginBottom: 16 }}>
+            {t("chatEmptyHint", lang)}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
+            {starters.map((s) => (
+              <button
+                key={s}
+                onClick={() => onStarter && onStarter(s)}
+                style={{
+                  background: "#FAF7F1", border: "1px solid #D4CBBD", borderRadius: 999,
+                  padding: "8px 14px", fontSize: 13, fontWeight: 600, color: "#3A342E",
+                  cursor: "pointer",
+                }}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
     );
   }

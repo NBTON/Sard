@@ -10,7 +10,7 @@ Constructs an inspectable IsnadChain by:
 from __future__ import annotations
 
 import re
-from typing import List, Tuple
+from typing import List
 
 from sard.memory.l1_atoms import L1AtomStore
 from sard.schemas.isnad import ClaimAtom, Confidence, Evidence, IsnadChain, Region

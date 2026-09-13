@@ -30,7 +30,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from sard.rag.chunking import CHUNKING_VERSION
 from sard.rag.fallbacks import FailureCategory, FallbackClassifiedError
@@ -413,8 +413,8 @@ class ZvecRepository:
                     try:
                         m = json.loads(p.read_text(encoding="utf-8"))
                         found_models.append(m.get("embedding_model"))
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Suppressed boundary exception in zvec_store.py: %s", type(exc).__name__)
                 return {
                     "status": "model_mismatch",
                     "compatible": False,

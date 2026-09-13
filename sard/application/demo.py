@@ -53,7 +53,6 @@ from sard.outputs.pdf import render_pdf
 from sard.outputs.pdf_environment import locked_pdf_output_root
 from sard.outputs.raw import render_raw_text
 from sard.outputs.schemas import (
-    CITATION_ID_RE,
     CitationSource,
     FieldSupport,
     Itinerary,

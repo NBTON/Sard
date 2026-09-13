@@ -116,8 +116,8 @@ class L0EvidenceStore:
                             ),
                         )
                         conn.commit()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in l0_evidence.py: %s", type(exc).__name__)
 
         return evidence
 
@@ -148,8 +148,8 @@ class L0EvidenceStore:
                             )
                             self._in_memory_docs[source_id] = ev
                             return ev
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in l0_evidence.py: %s", type(exc).__name__)
             return None
 
     def get_raw_ref(self, raw_ref: str) -> Optional[Dict[str, Any]]:

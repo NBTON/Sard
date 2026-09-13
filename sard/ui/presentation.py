@@ -39,13 +39,7 @@ from typing import TYPE_CHECKING, Optional
 from sard.url_policy import is_safe_external_url as _shared_is_safe_external_url
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
-    from sard.application.contracts import (
-        UIArtifactView,
-        UIModelRoute,
-        UIModeStatus,
-        UIProgressEvent,
-        UISourceView,
-    )
+    pass
 
 # ---------------------------------------------------------------------------
 # Label maps (frozen contract value strings -> concise Arabic labels)

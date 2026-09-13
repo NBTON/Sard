@@ -25,6 +25,17 @@ from sard.schemas.isnad import Evidence, Region, SourceType
 
 logger = logging.getLogger("sard.planner.retrieve")
 
+_FRESHNESS_RE = re.compile(
+    r"(2025|2026|2027|اليوم|الآن|الان|حالي|جديد|مواعيد|تذاكر|مهرجان|فعاليات|"
+    r"today|now|current|latest|upcoming|schedule|tickets|festival|events)",
+    re.IGNORECASE,
+)
+
+
+def is_time_sensitive_query(query: str) -> bool:
+    """Freshness-aware router: current-event questions need live sources."""
+    return bool(_FRESHNESS_RE.search(query or ""))
+
 
 def _classify_source_type(url_or_name: str, origin: str) -> SourceType:
     """Classify the source type based on domain, title, or authority name."""
@@ -85,17 +96,28 @@ class GroundedRetriever:
         target_region: Optional[Region] = None,
         mock_multimodal_files: Optional[Dict[str, Any]] = None,
         allow_web_search: bool = True,
+        uploaded_files: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[Evidence], List[str]]:
         """Retrieve evidence across RAG, Web, and Multimodal extractors."""
         evidence_list: List[Evidence] = []
         retrieval_logs: List[str] = []
 
-        # 1. Multimodal media inspection
+        # 1. Multimodal media inspection (real uploaded paths go to the real
+        # extractor, never served from mock canned text).
         media_items = self.multimodal_extract(
             query,
             mock_files=mock_multimodal_files,
+            uploaded_files=uploaded_files,
         )
         for m in media_items:
+            method = getattr(m, "extraction_method", "core") or "core"
+            unavailable = method in ("capability_unavailable", "provider_error") and not (m.extracted_text or "").strip()
+            if unavailable:
+                # Explicit provider-unavailable diagnostic: never cite as verified provenance.
+                retrieval_logs.append(
+                    f"المرفق {m.filename} تعذر تحليله: مزود المعالجة ({method}) غير متوفر — لم يُحتسب كمصدر موثق."
+                )
+                continue
             origin = f"المرفق البصري/المعرف ({m.filename})"
             excerpt = m.description or m.extracted_text or f"ملف مرئي من نوع {m.file_type}: {m.filename}"
             ev = self.l0.store_evidence(
@@ -137,8 +159,11 @@ class GroundedRetriever:
             evidence_list.append(ev)
             retrieval_logs.append(f"تم استرجاع وثيقة RAG: {origin} [{region}] -> {ev.source_id}")
 
-        # 3. Parallel Search (Web) - invoked only if RAG hits are completely empty
-        if allow_web_search and len(rag_hits) == 0:
+        # 3. Parallel Search (Web) — freshness-aware: current-event queries go
+        # through the research router even when RAG hits exist; otherwise web
+        # is invoked only if RAG hits are completely empty.
+        needs_fresh = is_time_sensitive_query(query)
+        if allow_web_search and (len(rag_hits) == 0 or needs_fresh):
             try:
                 web_hits = self.parallel_search(
                     objective=query,

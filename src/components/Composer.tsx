@@ -48,6 +48,19 @@ export function Composer({
     }
   }, [value]);
 
+  // Autofocus composer on desktop on mount (chat-first workspace).
+  useEffect(() => {
+    try {
+      const isDesktop = typeof window !== "undefined" && window.matchMedia("(min-width: 861px)").matches;
+      const coarse = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
+      if (isDesktop && !coarse) {
+        ref.current?.focus({ preventScroll: true } as any);
+      }
+    } catch {
+      // noop
+    }
+  }, []);
+
   const handleFilesSelected = async (files: FileList | File[]) => {
     setUploadError(null);
     const fileArray = Array.from(files);
@@ -265,6 +278,7 @@ export function Composer({
                   }}
                 >
                   {isImage && att.preview_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element -- blob: object-URL thumbnail, next/image cannot optimize it
                     <img
                       src={att.preview_url}
                       alt={att.filename}
@@ -388,6 +402,8 @@ export function Composer({
             onKeyDown={handleKeyDown}
             dir={isAr ? "rtl" : "ltr"}
             rows={1}
+            data-testid="composer-input"
+            autoFocus={false}
             placeholder={
               localAttachments.length > 0
                 ? isAr

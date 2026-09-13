@@ -58,6 +58,77 @@ _USER_TEXT_RE = re.compile(r"(أود|أريد|أخطط|أفضّل|نفَضّل|�
 _UNCERTAIN_RE = re.compile(r"(غير مؤكد|غير معروف|لا أعلم|قد|ربما|غير متأكد|لا تتوفر معلومات|معلومات محدودة|تحتاج إلى تأكيد)")
 
 
+def _is_valid_http_url(url: str) -> bool:
+    """Validate that a source URL is a real HTTP(S) URL (no bare IDs or empty)."""
+    if not url or not isinstance(url, str):
+        return False
+    url = url.strip()
+    if " " in url or "\n" in url:
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc) and "." in parsed.netloc
+    except Exception:
+        return False
+
+
+_AR_DIACRITICS_RE = re.compile(r"[\u064B-\u0652\u0670\u0640]")
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Normalize Arabic/Latin text into content tokens for overlap checks."""
+    if not text:
+        return set()
+    cleaned = _AR_DIACRITICS_RE.sub("", text)
+    cleaned = re.sub(r"[^\w\u0600-\u06FF]+", " ", cleaned.lower())
+    stop = {
+        "في", "من", "على", "إلى", "إلي", "عن", "مع", "هذا", "هذه", "ذلك", "التي", "الذي",
+        "و", "أو", "أن", "إن", "قد", "لا", "ما", "هو", "هي", "تم", "يتم", "بين", "بعد",
+        "قبل", "خلال", "the", "and", "for", "with", "from",
+    }
+    tokens = {t for t in cleaned.split() if len(t) >= 2 and t not in stop}
+    return tokens
+
+
+def _excerpt_supports_claim(claim_text: str, evidence_contents: list[str]) -> bool:
+    """Require lexical grounding: claim shares content tokens with cited excerpts.
+
+    A claim is only SUPPORTED when at least one cited excerpt contains
+    overlapping substantive tokens (or the claim is near-verbatim contained).
+    This prevents marking answers verified merely because citation IDs exist.
+    """
+    claim_norm = (claim_text or "").strip()
+    if not claim_norm:
+        return False
+    claim_tokens = _content_tokens(claim_norm)
+    if not claim_tokens:
+        return False
+    for excerpt in evidence_contents:
+        if not excerpt:
+            continue
+        excerpt_norm = excerpt.strip()
+        # Near-verbatim containment (either direction, length-guarded)
+        if len(claim_norm) >= 12 and claim_norm in excerpt_norm:
+            return True
+        if len(excerpt_norm) >= 12 and excerpt_norm in claim_norm:
+            return True
+        excerpt_tokens = _content_tokens(excerpt_norm)
+        if not excerpt_tokens:
+            continue
+        shared = claim_tokens & excerpt_tokens
+        if len(shared) >= 2:
+            return True
+        # Single strong token + length overlap for very short claims
+        smaller = min(len(claim_tokens), len(excerpt_tokens))
+        if smaller and (len(shared) / smaller) >= 0.5 and len(shared) >= 1 and len(claim_tokens) <= 4:
+            return True
+        if smaller and (len(shared) / smaller) >= 0.34 and len(shared) >= 2:
+            return True
+    return False
+
+
 def _split_claims(draft: str) -> list[str]:
     segments = [segment.strip() for segment in re.split(r"(?<=[.!؟؟\u2026])\s+|\n+", draft) if segment.strip()]
     return segments
@@ -88,18 +159,21 @@ def verify(state: dict, deps) -> dict:
     fallback_events = []
 
     if not draft or not draft.strip() or not evidence:
+        from sard.agent.routing import assemble_partial_answer as _assemble_partial
+
         coverage = CoverageReport(
             total_claims=0,
             external_claims=0,
             covered_claims=0,
-            coverage_ratio=1.0,
-            note="لا ادعاءات واردة؛ لا توجد تغطية خارجية مطلوبة.",
+            coverage_ratio=0.0,
+            note="لا توجد أدلة موثقة؛ لا يمكن منح صفة التحقق.",
         )
+        feedback = "لا توجد أدلة مسترجعة لدعم الإجابة — يلزم الامتناع أو طلب التوضيح."
         result = VerificationResult(
-            passed=True,
+            passed=False,
             verified_claim_ids=(),
             unsupported_claim_ids=(),
-            feedback="",
+            feedback=feedback,
         )
         events.append(
             make_event(
@@ -107,20 +181,35 @@ def verify(state: dict, deps) -> dict:
                 run,
                 "verify",
                 "completed",
-                summary="لا ادعاءات — تغطية فارغة قبِلَت",
-                coverage=1.0,
+                summary="لا أدلة — لا يمكن التحقق",
+                coverage=0.0,
             )
         )
+        # Terminal (no retry): recomposing without evidence cannot ground new
+        # claims, so mark exhaustion now. The router then goes to render
+        # instead of looping compose↔verify forever.
+        max_retries = int(state.get("compose_max_retries", 0))
+        exhausted_count = max_retries + 1
         events.append(
-            make_event(EVENT_COMPLETED, run, "verify", "completed", summary="اكتمل التحقق", duration_ms=(time.monotonic() - start) * 1000)
+            make_event(EVENT_COMPLETED, run, "verify", "failed", summary="تعذر التحقق: لا أدلة موثقة — إجابة جزئية صريحة", duration_ms=(time.monotonic() - start) * 1000)
         )
+        partial_state = {**state, "atomic_claims": []}
+        # Preserve an honest compose abstention verbatim when one exists;
+        # otherwise fall back to the explicit partial template.
+        existing_draft = (draft or "").strip()
+        final_text = existing_draft or _assemble_partial(partial_state)
         return {
             "atomic_claims": [],
             "claim_citation_mapping": {},
             "unsupported_claims": [],
             "coverage": coverage,
             "verification_result": result,
-            "verification_history": [VerificationRound(round_index, True, (), ())],
+            "verification_feedback": [feedback],
+            "verification_history": [VerificationRound(round_index, False, (), ())],
+            "verification_exhausted": True,
+            "compose_retry_count": exhausted_count,
+            "final_answer": final_text,
+            "graph_outcome": "partial",
             "model_routes": {"verify": semantic_model_used},
             "fallback_events": fallback_events,
             "timings": {"verify_ms": (time.monotonic() - start) * 1000},
@@ -166,12 +255,32 @@ def verify(state: dict, deps) -> dict:
             deterministic_status = ClaimStatus.UNSUPPORTED
             explanation = "سجل استشهاد مكرر في الأدلة لهذا الادعاء."
         else:
+            has_provenance_problem = False
+            cited_contents: list[str] = []
             for cid in citation_ids:
                 item = item_by_cit.get(cid)
-                if item is None or not (item.title or "").strip() or not (item.source_url or "").strip():
+                if item is None or not (item.title or "").strip() or not _is_valid_http_url(item.source_url or ""):
                     deterministic_status = ClaimStatus.UNSUPPORTED
-                    explanation = "بيانات مصدر ناقصة (عنوان أو رابط) لهذا الاستشهاد."
+                    explanation = "بيانات مصدر ناقصة (عنوان أو رابط HTTP(S) صالح) لهذا الاستشهاد."
+                    has_provenance_problem = True
                     break
+                if not (item.chunk_id or "").strip():
+                    deterministic_status = ClaimStatus.UNSUPPORTED
+                    explanation = "معرّف مقطع (chunk) مفقود لهذا الاستشهاد — لا يمكن ربط الادعاء بالمصدر."
+                    has_provenance_problem = True
+                    break
+                if not (item.content or "").strip() or len((item.content or "").strip()) < 20:
+                    deterministic_status = ClaimStatus.UNSUPPORTED
+                    explanation = "المقتطف المصدر فارغ أو قصير جدًا — لا يمكن التحقق من دعم الادعاء."
+                    has_provenance_problem = True
+                    break
+                cited_contents.append(item.content or "")
+            if not has_provenance_problem:
+                # Trustworthy behavior: citation existence alone is never enough.
+                # Require relevant captured excerpts to lexically support the claim.
+                if not _excerpt_supports_claim(text, cited_contents):
+                    deterministic_status = ClaimStatus.UNSUPPORTED
+                    explanation = "الاستشهادات موجودة لكن مقتطفات المصادر لا تدعم نص هذا الادعاء."
 
         supporting_chunks = tuple(
             dict.fromkeys(chunk_by_cit[cid] for cid in citation_ids if cid in chunk_by_cit)

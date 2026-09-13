@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
-from pathlib import Path
 
 import fitz
 import pytest
 
 from sard.outputs.orchestrator import (
-    ArtifactGeneratorRegistry,
     ArtifactOrchestrator,
     ArtifactRequest,
     ConfigurableBlobArtifactStore,

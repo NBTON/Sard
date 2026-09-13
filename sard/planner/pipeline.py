@@ -10,12 +10,10 @@ for UI status progression (waving 13-region strips).
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from sard.memory import IsnadMemory
-from sard.memory.canvas import IsnadCanvas
 from sard.planner.assemble_isnad import IsnadAssembler
 from sard.planner.classify import classify_request
 from sard.planner.decide import decide_action
@@ -23,7 +21,7 @@ from sard.planner.generate import generate_isnad_response
 from sard.planner.locate import locate_cultural_context
 from sard.planner.retrieve import GroundedRetriever
 from sard.planner.score_chain import score_isnad_chain
-from sard.schemas.isnad import IsnadChain, PlannerResult
+from sard.schemas.isnad import PlannerResult
 
 logger = logging.getLogger("sard.planner.pipeline")
 
@@ -48,6 +46,7 @@ class IsnadPlanner:
         llm_invoke_fn: Optional[Callable[[str, str], str]] = None,
         status_callback: Optional[Callable[[str, str], None]] = None,
         lang: str = "ar",
+        uploaded_files: Optional[Dict[str, Any]] = None,
     ) -> PlannerResult:
         """Synchronous execution of the Isnād planning loop."""
         # Scope guardrail first (do not let retrieval override confident out-of-scope)
@@ -57,15 +56,14 @@ class IsnadPlanner:
             if should_block:
                 from sard.schemas.isnad import IsnadChain
                 chain = IsnadChain(request_id=f"req-{uuid.uuid4().hex[:8]}", classification="other", region="unknown", evidence=[], atoms=[], conflicts=[], score="low", decision="refuse", missing=["out_of_scope"])
-                from sard.schemas.isnad import Evidence
                 # Return a PlannerResult that surfaces the scope message directly
                 # Use language-appropriate field
                 if lang == "en":
                     return __import__("sard.schemas.isnad", fromlist=["PlannerResult"]).PlannerResult(chain=chain, answer_ar=scope_text, answer_en=scope_text, visible_sources=[], follow_up="Please add a Saudi heritage angle if you wish.")
                 else:
                     return __import__("sard.schemas.isnad", fromlist=["PlannerResult"]).PlannerResult(chain=chain, answer_ar=scope_text, answer_en=scope_text, visible_sources=[], follow_up="هل تود إضافة جانب سعودي للمقارنة؟")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in pipeline.py: %s", type(exc).__name__)
 
         req_id = f"req-{uuid.uuid4().hex[:8]}"
         canvas = self.memory.create_canvas(req_id)
@@ -90,7 +88,7 @@ class IsnadPlanner:
         # Stage 1: Classify
         canvas.set_stage_status("classify", "running")
         _notify("classify", "جارٍ تصنيف الاستفسار وفحص المرفقات والوسائط...")
-        classification, cls_conf = classify_request(query, has_media=bool(mock_multimodal_files))
+        classification, cls_conf = classify_request(query, has_media=bool(mock_multimodal_files or uploaded_files))
         canvas.set_stage_status(
             "classify",
             "completed",
@@ -121,6 +119,7 @@ class IsnadPlanner:
             query=query,
             target_region=location.region,
             mock_multimodal_files=mock_multimodal_files,
+            uploaded_files=uploaded_files,
         )
         # Dialect/proverb weak-evidence filter: require lexical overlap, otherwise treat as no evidence to force clarification
         if classification == "dialect":
@@ -141,6 +140,30 @@ class IsnadPlanner:
                     logs.append("تضارب معجمي للمثل: لا تطابق لفظي في الشواهد المسترجعة — تم تصفية الأدلة وطلب توضيح.")
                     evidence = []
         ev_ids = [e.source_id for e in evidence]
+        # Freshness-aware guard: current-event questions must cite current valid
+        # sources or explicitly abstain — stale RAG alone never verifies.
+        try:
+            from sard.planner.retrieve import is_time_sensitive_query
+
+            if is_time_sensitive_query(query):
+                from urllib.parse import urlparse as _urlparse
+
+                def _valid_web(ev: Any) -> bool:
+                    try:
+                        if getattr(ev, "source_type", "") != "web":
+                            return False
+                        u = str(getattr(ev, "url_or_doc_id", "") or "")
+                        p = _urlparse(u)
+                        return p.scheme in ("http", "https") and bool(p.netloc)
+                    except Exception:
+                        return False
+
+                if not any(_valid_web(e) for e in evidence):
+                    logs.append("استفسار زمني بلا مصادر ويب صالحة — الامتناع عن التوليد الموثق.")
+                    evidence = [e for e in evidence if getattr(e, "source_type", "") == "user_upload"]
+                    ev_ids = [e.source_id for e in evidence]
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in pipeline.py: %s", type(exc).__name__)
         canvas.set_stage_status(
             "retrieve",
             "completed",
@@ -211,6 +234,7 @@ class IsnadPlanner:
         mock_multimodal_files: Optional[Dict[str, Any]] = None,
         llm_invoke_fn: Optional[Callable[[str, str], str]] = None,
         lang: str = "ar",
+        uploaded_files: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Asynchronous streaming generator yielding status events and final PlannerResult."""
         events: List[Dict[str, Any]] = []
@@ -226,6 +250,7 @@ class IsnadPlanner:
             llm_invoke_fn=llm_invoke_fn,
             status_callback=_collector,
             lang=lang,
+            uploaded_files=uploaded_files,
         )
 
         for ev in events:

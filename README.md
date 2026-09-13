@@ -1,7 +1,7 @@
 # Sard (سرد) — Arabic-First Saudi Cultural & Travel Assistant
 
 <p align="center">
-  <img src="web/public/sard-logo.svg" alt="Sard — سرد Logo: 13 threads for the 13 Saudi regions" width="112" height="112" />
+  <img src="public/sard-logo.svg" alt="Sard — سرد Logo: 13 threads for the 13 Saudi regions" width="112" height="112" />
 </p>
 
 <p align="center">
@@ -13,10 +13,10 @@
   <img src="https://img.shields.io/badge/Python-3.11%2B-blue.svg" alt="Python 3.11+"/>
   <img src="https://img.shields.io/badge/LangGraph-Stateful%20Agent-orange.svg" alt="LangGraph"/>
   <img src="https://img.shields.io/badge/FastAPI-SSE%20Streaming-green.svg" alt="FastAPI"/>
-  <img src="https://img.shields.io/badge/Next.js-14%20(MOC%20Theme)-black.svg" alt="Next.js 14"/>
+  <img src="https://img.shields.io/badge/Next.js-15%20(MOC%20Theme)-black.svg" alt="Next.js 15"/>
   <img src="https://img.shields.io/badge/Vector%20Store-Zvec%20(Local)-purple.svg" alt="Zvec"/>
   <img src="https://img.shields.io/badge/ReportLab-RTL%20Arabic%20PDF-red.svg" alt="ReportLab"/>
-  <img src="https://img.shields.io/badge/Tests-426%20Passed-brightgreen.svg" alt="Tests"/>
+  <img src="https://img.shields.io/badge/Tests-649%20Passed-brightgreen.svg" alt="Tests"/>
 </p>
 
 ---
@@ -52,7 +52,7 @@
 * **Respectful Cultural Grounding:** Distinguishes between religious obligations, regional customs (Najd, Hejaz, Eastern Province, Asir, etc.), and modern urban practices. Never generalizes or trivializes traditions.
 * **Deterministic Artifact Generation:** Produces verified, pixel-perfect Arabic RTL PDFs (`ReportLab` + `NotoNaskhArabic`), RFC 5545 iCalendar files (`.ics` with `Asia/Riyadh` timezone), and raw text summaries.
 * **Resilient Multi-Tier Fallbacks:** Centralized model routing supporting NVIDIA NIM, Anthropic Claude, OpenAI, and OpenRouter with automatic graceful degradation to extractive summaries if external APIs fail.
-* **Ministry of Culture (MOC) Brand Identity:** Production Next.js 14 interface matching the official Saudi Ministry of Culture guidelines (Dark Navy `#0F2837`, Plum `#6E1946`, Coral `#EB5A3C`, Sage `#91B9B4`, Peach `#FAC39B`).
+* **Ministry of Culture (MOC) Brand Identity:** Production Next.js 15 interface matching the official Saudi Ministry of Culture guidelines (Dark Navy `#0F2837`, Plum `#6E1946`, Coral `#EB5A3C`, Sage `#91B9B4`, Peach `#FAC39B`).
 
 ---
 
@@ -143,7 +143,7 @@ flowchart TB
 
     subgraph FE ["Presentation Layer — Bilingual RTL / LTR"]
         direction TB
-        NextJS["Next.js 14 Web App<br/>MOC theme · SSE streaming<br/>Chat history · Citations drawer"]
+        NextJS["Next.js 15 Web App<br/>MOC theme · SSE streaming<br/>Chat history · Citations drawer"]
         StreamlitApp["Streamlit Demo UI<br/>Investor dashboard · Offline mode"]
     end
 
@@ -222,9 +222,9 @@ flowchart TB
 | **📅 RFC 5545 iCalendar (`.ics`)** | Generates importable travel calendars with accurate date/time arithmetic in the `Asia/Riyadh` timezone. |
 | **🔍 Always-On Hybrid RAG (Zvec)** | Local embedded vector storage combining dense embeddings (Nemotron-3 / NV-Embed) with BM25 full-text search and cross-encoder reranking. |
 | **🌐 Dynamic Cultural Router** | Automatically detects time-sensitive queries ("2026 events", "current schedule") or out-of-corpus topics and triggers capped web search while prioritizing regional Gulf sources. |
-| **🎨 Saudi Ministry of Culture UI** | Beautiful Next.js 14 web application styled to official MOC March 2019 guidelines, featuring real-time SSE streaming, collapsible citation cards, and one-click artifact downloads. |
+| **🎨 Saudi Ministry of Culture UI** | Beautiful Next.js 15 web application styled to official MOC March 2019 guidelines, featuring real-time SSE streaming, collapsible citation cards, and one-click artifact downloads. |
 | **🔌 Provider-Neutral Multi-LLM** | Seamlessly toggle between NVIDIA NIM, Anthropic Claude 3.5, OpenAI GPT-4o, and OpenRouter without changing business logic. |
-| **🧪 420+ Automated Tests** | Comprehensive test coverage across agent nodes, RAG retrieval, PDF formatting, calendar parsing, API endpoints, and failure redaction. |
+| **🧪 640+ Automated Tests** | Comprehensive test coverage across agent nodes, RAG retrieval, PDF formatting, calendar parsing, API endpoints, attachments (real-file nonce extraction), production contracts, itinerary deadlines, and failure redaction. |
 
 ---
 
@@ -281,18 +281,19 @@ Sard_Agent/
 │   │   ├── rerank.py               # Cross-encoder reranking & RRF rank fusion
 │   │   ├── evaluate.py             # Retrieval evaluation suite (Recall@K, MRR, nDCG)
 │   │   └── service.py              # Public, provider-independent RAGService boundary
-│   └── ui/                         # Streamlit User Interface
-│       ├── app.py                  # Streamlit web application with live & cached demo modes
-│       └── presentation.py         # Arabic typography & presentation helpers
-├── web/                            # Next.js 14 Frontend Web Application
-│   ├── src/
-│   │   ├── app/                    # Next.js App Router (layout.tsx, page.tsx, globals.css)
-│   │   ├── components/             # React Components (Header, Sidebar, ChatMessages, Composer, Landing)
-│   │   ├── lib/                    # Storage, sectors, and Arabic text utilities
-│   │   └── types/                  # TypeScript interface contracts for chat, citations, and artifacts
-│   ├── public/                     # Static assets and MOC brand images
-│   ├── tailwind.config.js          # Tailwind configuration with official MOC brand palette
-│   └── package.json                # Frontend dependencies (React, Lucide, Tailwind)
+│   └── ui/                         # Streamlit User Interface (legacy demo harness)
+│       ├── app.py                  # Legacy Streamlit demo (not part of supported deployment)
+│       ├── presentation.py         # Arabic typography & presentation helpers
+│       └── session_state.py        # Production session-state helpers (tested)
+├── src/                            # Next.js 15 Frontend Web Application (root)
+│   ├── app/                        # Next.js App Router (layout.tsx, page.tsx, globals.css)
+│   ├── components/                 # React Components (Header, Sidebar, ChatMessages, Composer, Landing)
+│   ├── lib/                        # Storage, sectors, API client, and Arabic text utilities
+│   └── types/                      # TypeScript interface contracts for chat, citations, and artifacts
+├── public/                         # Static assets and MOC brand images
+├── tailwind.config.js              # Tailwind configuration with official MOC brand palette
+├── eslint.config.mjs               # Committed ESLint configuration (CI: npm run lint)
+└── package.json                    # Frontend dependencies (React, Lucide, Tailwind)
 ├── data/                           # Data Directories
 │   ├── corpus/                     # Verified Saudi cultural documents & sidecar JSON metadata
 │   │   ├── MANIFEST.md             # Corpus catalog and verified source registry
@@ -305,7 +306,7 @@ Sard_Agent/
 │   ├── demo-runbook.md             # Presenter steps, backup procedures & deployment guide
 │   ├── demo-script.md              # Investor demo narrative & prompt scripts
 │   └── final-evaluation.md         # Benchmark results & corpus coverage audit
-├── tests/                          # 420+ Unit and Integration Tests
+├── tests/                          # 640+ Unit and Integration Tests
 ├── pyproject.toml                  # Python package configuration & dependencies
 ├── Dockerfile                      # Production Docker container definition
 └── README.md                       # Master Documentation (this file)
@@ -387,8 +388,8 @@ Sard implements strict cultural grounding rules to ensure respect and factual au
 
 ## 🎨 Web & UI Interfaces
 
-### Next.js 14 Web Application
-The production web application is located in `web/` and features:
+### Next.js 15 Web Application
+The production web application is located in `src/` (root-level Next.js app) and features:
 * **MOC Brand Palette:** Built using the official Saudi Ministry of Culture colors:
   * **Primary Dark Navy:** `#0F2837`
   * **Accent Plum:** `#6E1946`
@@ -400,8 +401,11 @@ The production web application is located in `web/` and features:
 * **One-Click Downloads:** Download generated PDF itineraries and `.ics` calendars directly from chat messages.
 * **Session Persistence:** Persistent chat history stored in local storage with search and session management.
 
-### Streamlit Investor Demo
-The Streamlit application in `sard/ui/app.py` provides:
+### Legacy Streamlit Demo (not part of supported deployment)
+The legacy Streamlit application in `sard/ui/app.py` is retained for reference only.
+It is not installed by default, not covered by Docker, and not part of CI.
+The supported deployment is the FastAPI backend (`sard.api.server:app`, see
+`Dockerfile` and `vercel.json`) plus the Next.js frontend (`npm run build`):
 * **Live Mode:** Connects to live NVIDIA NIM endpoints for real-time generation and retrieval.
 * **Precached Demo Mode:** Deterministic, offline investor demonstration using verified golden fixtures.
 * **Diagnostic Panel:** Inspects dense vs. FTS candidate scores, reranking weights, and node execution latencies.
@@ -465,12 +469,13 @@ The Streamlit application in `sard/ui/app.py` provides:
 
 ---
 
-### Option 2: Streamlit Investor Demo UI
+### Option 2: Production Build (same-origin API)
 
 ```bash
-uv run streamlit run sard/ui/app.py
+npm run build
+npm run start
 ```
-*Open `http://localhost:8501` to test both Live execution and Precached offline demonstration.*
+*Serves the production Next.js build with the same-origin `/api` functions (see `vercel.json`). Set `NEXT_PUBLIC_API_BASE` or `SARD_BACKEND_ORIGIN` to point at an external FastAPI origin when the API is hosted separately.*
 
 ---
 
@@ -537,8 +542,15 @@ Sard includes a robust diagnostic and evaluation harness to objectively grade re
 
 ### Running Unit & Integration Tests
 ```bash
-# Run the complete test suite (426+ offline tests)
+# Run the complete test suite (640+ offline tests)
 uv run pytest -q
+
+# Lint (Ruff: unused imports/variables + swallowed exceptions)
+uv run ruff check sard/ tests/
+
+# Frontend: lint, type-check, production build, and browser/contract tests
+npm run lint && npm run typecheck && npm run build
+node --test tests/test_sse_parser.mjs tests/frontend/test_artifact_download_matrix.mjs tests/frontend/test_browser_scenarios_mock.mjs tests/frontend/test_sse_parser_frontend.mjs
 
 # Run live network smoke tests (requires active API credentials)
 $env:RAG_LIVE_SMOKE="true"; uv run pytest -q -m live   # PowerShell
@@ -579,20 +591,42 @@ OPENAI_API_KEY=sk-...
 # NVIDIA_RERANK_BASE_URL=http://rerank-nim:8000/v1
 
 # --- Vector Database & Corpus Paths ---
-ZVEC_COLLECTION_PATH=data/zvec/sard-default
+ZVEC_COLLECTION_PATH=data/zvec/sard
 CORPUS_ROOT=data/corpus
 SARD_PDF_OUTPUT_ROOT=output/runs
 
 # --- Agent Settings ---
 AGENT_COMPOSE_MAX_RETRIES=2
 AGENT_RENDER_ARTIFACTS=true
+
+# --- Frontend / API origin ---
+# Same-origin by default. Set when the API is hosted separately:
+# NEXT_PUBLIC_API_BASE=https://api.example.com
+# SARD_BACKEND_ORIGIN=http://127.0.0.1:8000
+
+# --- Health probes (bounded, non-interactive) ---
+# SARD_HEALTH_PROBE_NETWORK=1      # live discovery reachability probe
+# SARD_HEALTH_PROBE_INFERENCE=1    # minimal live inference probe (spend)
+
+# --- Itinerary deadline (clamped to 30-45s) ---
+# SARD_ITINERARY_TIMEOUT=40
 ```
+
+---
+
+## ⚠️ Known Limitations
+
+* **Vercel functions:** `/api` routes are bounded by `maxDuration: 60` (`vercel.json`); itinerary generation is additionally bounded by a 30–45s in-endpoint deadline with typed partial/timeout responses.
+* **Vision/audio providers:** image vision and audio transcription require `DASHSCOPE_API_KEY`. Without it, uploads are probed locally and the assistant reports `capability_unavailable` explicitly instead of pretending analysis.
+* **Ruff rollout:** CI enforces unused imports/variables (`F401`/`F841`) and swallowed exceptions (`S110`/`S112`). Broad-except (`BLE001`), `TRY`/`B`, and pyupgrade/isort cleanups are tracked follow-ups.
+* **No separate LICENSE file** is currently committed; the codebase is described as MIT-licensed (see above).
+* **Corpus coverage:** the bundled corpus is a curated subset; `/api/status` reports `source_count` and `corpus_coverage` separately so gaps are visible instead of hidden behind a single "ready" flag.
 
 ---
 
 ## 📜 License & Font Notices
 
-* **Codebase License:** MIT License. See [LICENSE](LICENSE) for details.
+* **Codebase License:** MIT License (see repository root; no separate LICENSE file is currently committed).
 * **Typography:** Bundles `Noto Naskh Arabic` and `Noto Sans` distributed under the **SIL Open Font License 1.1** ([OFL.txt](sard/outputs/assets/OFL.txt)).
 * **Brand Identity:** Styled in reverence to the official brand guidelines of the **Ministry of Culture, Kingdom of Saudi Arabia**.
 

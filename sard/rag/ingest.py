@@ -46,7 +46,7 @@ from sard.rag.embeddings import EmbeddingService
 from sard.rag.fallbacks import AllCandidatesFailedError
 from sard.rag.loaders import load_document
 from sard.rag.normalize import clean_document_text
-from sard.rag.schemas import Chunk, DocumentMetadata, EmbeddedChunk, SourceFileType
+from sard.rag.schemas import Chunk, DocumentMetadata, EmbeddedChunk
 from sard.rag.zvec_store import ZvecRepository, SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,24 @@ class QuarantinedPage:
 
 
 @dataclass
+class QuarantinedRecord:
+    source_path: str
+    reason: str
+    source_url: str = ""
+
+
+def is_valid_source_url(url: str) -> bool:
+    """Validate that a bundled source URL is a real HTTP(S) URL."""
+    if not url or not isinstance(url, str):
+        return False
+    url = url.strip()
+    if " " in url or "\n" in url:
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and "." in parsed.netloc
+
+
+@dataclass
 class IngestionReport:
     documents_seen: int = 0
     documents_ingested: int = 0
@@ -76,6 +94,7 @@ class IngestionReport:
     chunks_inserted: int = 0
     chunks_deduplicated: int = 0
     scanned_pages_quarantined: list[QuarantinedPage] = field(default_factory=list)
+    quarantined_records: list[QuarantinedRecord] = field(default_factory=list)
     embedding_model_used: str = ""
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -96,6 +115,10 @@ class IngestionReport:
                     "vlm_models_tried": p.vlm_models_tried,
                 }
                 for p in self.scanned_pages_quarantined
+            ],
+            "quarantined_records": [
+                {"source_path": r.source_path, "reason": r.reason, "source_url": r.source_url}
+                for r in self.quarantined_records
             ],
             "embedding_model_used": self.embedding_model_used,
             "warnings": self.warnings,
@@ -301,6 +324,19 @@ def ingest_directory(
         except MissingMetadataError as exc:
             report.documents_failed += 1
             report.errors.append(str(exc))
+            continue
+
+        # Quarantine broken bundled records: invalid source URLs never enter the index.
+        if not is_valid_source_url(metadata.source_url):
+            report.quarantined_records.append(
+                QuarantinedRecord(
+                    source_path=str(source_path),
+                    reason=f"Invalid source_url quarantined: {metadata.source_url!r}",
+                    source_url=str(metadata.source_url or ""),
+                )
+            )
+            report.documents_failed += 1
+            report.errors.append(f"Quarantined {source_path}: invalid source_url {metadata.source_url!r}")
             continue
 
         try:

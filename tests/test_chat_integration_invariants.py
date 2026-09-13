@@ -14,7 +14,6 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
-from sard.agent.capability_routing import classify_intent
 from sard.agent.chat_service import ChatService
 from sard.api.server import app, _generate_cultural_fallback_answer
 from sard.config.rag import get_rag_settings
@@ -349,7 +348,6 @@ def test_query_rewriter_cache_stateless_not_session_leak():
     # QueryRewriteService cache must be stateless, key is (normalized_query, model_id) not session
     from sard.rag.query_rewriter import QueryRewriteService
     svc = QueryRewriteService(settings=get_rag_settings(), circuit_breaker=__import__("sard.rag.fallbacks", fromlist=["CircuitBreaker"]).CircuitBreaker())
-    q = "ما هي عاصمة قطر؟"
     # rewrite twice, same query, different session ids should hit same cache key behavior
     # Directly test cache key does not include session
     assert hasattr(svc, "_cache")

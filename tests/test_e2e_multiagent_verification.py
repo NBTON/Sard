@@ -60,9 +60,16 @@ def test_status_endpoint_returns_rag_available_and_verified(client):
     response = test_client.get("/api/status")
     assert response.status_code == 200
     data = response.json()
-    assert data.get("verified") is True
+    # Truthful health: per-field reporting; system-level "verified" is never
+    # granted by RAG availability alone, and overall status is never "ready"
+    # when the model is unconfigured or retrieval fails.
     assert data.get("rag", {}).get("available") is True
-    assert data.get("sources", {}).get("verified") is True
+    for field in ("model_configured", "discovery", "inference", "retrieval_mode", "source_count", "corpus_coverage"):
+        assert field in data, f"missing truthful status field: {field}"
+    assert data.get("verified") is False
+    assert data.get("sources", {}).get("verified") is False
+    if not data.get("model_configured"):
+        assert data.get("status") in ("degraded", "unavailable")
 
 
 def test_health_endpoint_returns_verified(client):
@@ -70,8 +77,10 @@ def test_health_endpoint_returns_verified(client):
     response = test_client.get("/api/health")
     assert response.status_code == 200
     data = response.json()
-    assert data.get("status") == "ok"
-    assert data.get("verified") is True
+    assert data.get("status") in ("ok", "degraded", "unavailable")
+    for field in ("model_configured", "discovery", "inference", "retrieval"):
+        assert field in data, f"missing truthful health field: {field}"
+    assert data.get("verified") is False
     assert data.get("rag", {}).get("available") is True
 
 
@@ -104,7 +113,6 @@ def test_chat_sadu_cultural_query_grounded_citations(client):
     assert "done" in event_types
 
     # Must contain citations or verified text with Sadu narrative
-    citations_events = [e for e in events if e["event"] == "citations"]
     deltas = [e["data"].get("text", "") for e in events if e["event"] == "delta" and isinstance(e["data"], dict)]
     full_text = "".join(deltas)
 

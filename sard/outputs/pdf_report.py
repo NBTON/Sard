@@ -8,32 +8,27 @@ guaranteed Arabic right-to-left layout and typographic shaping.
 from __future__ import annotations
 
 import io
-import os
-import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     Flowable,
     HRFlowable,
     KeepTogether,
-    PageBreak,
-    Paragraph,
     SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
 )
 
-from sard.outputs.arabic import contains_arabic, shape_rtl, visual_runs
-from sard.outputs.fonts import ensure_fonts_registered, require_arabic_font, require_latin_font
+from sard.outputs.arabic import shape_rtl, visual_runs
+from sard.outputs.fonts import ensure_fonts_registered
 
 # ---------------------------------------------------------------------------
 # Color Palette
@@ -118,7 +113,6 @@ class _ArabicTextFlowable(Flowable):
 
         lines: List[str] = []
         cur_line = ""
-        bullet_prefix = "• " if self.bullet else ""
         max_w = avail_width - (14 if self.bullet else 0)
 
         for w in words:

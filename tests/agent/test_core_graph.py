@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import pytest
 
 from sard.agent.events import FailureKind
 from sard.agent.graph import GraphDependencies, build_graph, run_pipeline

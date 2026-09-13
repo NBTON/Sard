@@ -17,7 +17,6 @@ import re
 import subprocess
 import sys
 from datetime import date, datetime
-from pathlib import Path
 
 import pytest
 from icalendar import Calendar

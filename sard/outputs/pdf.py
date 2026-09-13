@@ -14,7 +14,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
-from reportlab.platypus import Flowable, PageBreak, SimpleDocTemplate, Spacer
+from reportlab.platypus import CondPageBreak, Flowable, KeepTogether, SimpleDocTemplate, Spacer
 
 from sard.outputs.arabic import append_citations, contains_arabic, shape_rtl, visual_runs
 from sard.outputs.fonts import require_arabic_font, require_latin_font
@@ -38,6 +38,61 @@ class RenderedArtifact:
     mime_type: str
     size_bytes: int
     warnings: tuple[str, ...] = ()
+
+
+_INTERNAL_TAG_RE = re.compile(
+    r"\[(?:RAG:[^\]]*|Web:[^\]]*|Media:[^\]]*|"
+    r"NATIONAL[^\]]*|NAJD[^\]]*|ministry[^\]]*)\]|【[^】]*】|\[__[^\]]*__\]"
+)
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_MARKDOWN_LINK_BARE_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)|_([^_\n]+)_")
+_MD_CODE_RE = re.compile(r"`([^`\n]+)`")
+_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE)
+_MD_HR_RE = re.compile(r"^\s{0,3}(?:---|\*\*\*|___)\s*$", re.MULTILINE)
+_MD_LIST_RE = re.compile(r"^\s{0,3}[-*+]\s+", re.MULTILINE)
+_MD_BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?", re.MULTILINE)
+_REGION_SLUG_RE = re.compile(r"\b(najd|najdi|hijaz|hijazi|asir|asiri|qassim|hail|tabuk|jazan|najran|bahah|jouf|sharqiyah|eastern|riyadh)\b", re.IGNORECASE)
+_REGION_AR = {
+    "najd": "نجد", "najdi": "نجد", "hijaz": "الحجاز", "hijazi": "الحجاز",
+    "asir": "عسير", "asiri": "عسير", "qassim": "القصيم", "hail": "حائل",
+    "tabuk": "تبوك", "jazan": "جازان", "najran": "نجران", "bahah": "الباحة",
+    "jouf": "الجوف", "sharqiyah": "الشرقية", "eastern": "الشرقية", "riyadh": "الرياض",
+}
+
+
+def clean_pdf_text(text: str) -> str:
+    """Strip Markdown markers and internal routing tags for user-facing PDF.
+
+    Keeps human-readable words and URLs; removes **, #, `, [CIT-...],
+    [RAG:...], [Web:...], [Media:...], 【...】, and pipe-metadata tags so
+    generated PDFs contain no raw markers or internal tokens.
+    """
+    if not text:
+        return text
+    cleaned = text
+    # Preserve link text, drop URL wrapper (URL is rendered separately in sources)
+    cleaned = _MARKDOWN_IMAGE_RE.sub(r"\1", cleaned)
+    cleaned = _MARKDOWN_LINK_RE.sub(r"\1", cleaned)
+    cleaned = _MARKDOWN_LINK_BARE_RE.sub(r"\1", cleaned)
+    cleaned = _INTERNAL_TAG_RE.sub("", cleaned)
+    cleaned = _MD_CODE_RE.sub(r"\1", cleaned)
+    cleaned = _MD_BOLD_RE.sub(lambda m: m.group(1) or m.group(2) or "", cleaned)
+    cleaned = _MD_ITALIC_RE.sub(lambda m: m.group(1) or m.group(2) or "", cleaned)
+    cleaned = _MD_HEADING_RE.sub("", cleaned)
+    cleaned = re.sub(r"(?m)^\s*#+\s*", "", cleaned)
+    cleaned = re.sub(r"#(?=\s)", "", cleaned)
+    cleaned = _MD_HR_RE.sub("", cleaned)
+    cleaned = _MD_LIST_RE.sub("• ", cleaned)
+    cleaned = _MD_BLOCKQUOTE_RE.sub("", cleaned)
+    cleaned = _REGION_SLUG_RE.sub(lambda m: _REGION_AR.get(m.group(1).lower(), m.group(1)), cleaned)
+    # Collapse leftover markdown runs and whitespace
+    cleaned = re.sub(r"\*{2,}", "", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def safe_pdf_filename(value: str) -> str:
@@ -152,7 +207,7 @@ class _TextFlowable(Flowable):
         logical_lines: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
-        self.text = text
+        self.text = clean_pdf_text(text)
         self.font = font
         self.latin_font = latin_font
         self.size = size
@@ -401,7 +456,9 @@ def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowa
 
     for day_index, day in enumerate(itinerary.days, 1):
         if day_index > 1:
-            story.append(PageBreak())
+            # Conditional break: start a new page only if little space remains,
+            # avoiding half-empty pages while keeping days readable.
+            story.append(CondPageBreak(320))
         relative_number = day.relative_day_number or day_index
         day_date = (
             itinerary.explicit_dates[relative_number - 1]
@@ -436,31 +493,32 @@ def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowa
             display_time = stop.time
             if stop.start_time is not None and stop.end_time is not None:
                 display_time = f"{_format_time(stop.start_time)} - {_format_time(stop.end_time)}"
-            story.extend(
-                [
+            # Keep stop header + location together to avoid widowed titles.
+            header_parts: list = [
+                _TextFlowable(
+                    append_citations(f"{display_time} | {stop.title}" if display_time else stop.title, stop_citations),
+                    font=font,
+                    latin_font=latin_font,
+                    size=14,
+                    leading=21,
+                    color=colors.HexColor("#37474F"),
+                    top_padding=5,
+                ),
+            ]
+            if stop.effective_location_name:
+                header_parts.append(
                     _TextFlowable(
-                        append_citations(f"{display_time} | {stop.title}" if display_time else stop.title, stop_citations),
+                        append_citations(f"الموقع: {stop.effective_location_name}", stop_citations),
                         font=font,
                         latin_font=latin_font,
-                        size=14,
-                        leading=21,
-                        color=colors.HexColor("#37474F"),
-                        top_padding=5,
-                    ),
-                    *([
-                        _TextFlowable(
-                            append_citations(f"الموقع: {stop.effective_location_name}", stop_citations),
-                            font=font,
-                            latin_font=latin_font,
-                            size=10,
-                            leading=16,
-                            color=colors.HexColor("#607D8B"),
-                            bottom_padding=5,
-                            citation_ids=stop_citations,
-                        )
-                    ] if stop.effective_location_name else []),
-                ]
-            )
+                        size=10,
+                        leading=16,
+                        color=colors.HexColor("#607D8B"),
+                        bottom_padding=5,
+                        citation_ids=stop_citations,
+                    )
+                )
+            story.append(KeepTogether(header_parts))
             if stop.address:
                 story.append(_TextFlowable(f"العنوان: {stop.address}", font=font, latin_font=latin_font, size=9, leading=14, color=colors.HexColor("#607D8B"), bottom_padding=4, citation_ids=stop_citations))
             if stop.coordinates:
@@ -487,9 +545,12 @@ def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowa
             for block in day.notes
         )
 
-    story.extend(
-        [
-            PageBreak(),
+    # Sources flow onto the current page (no forced blank trailing page).
+    # Only break if the remaining space cannot fit the header + first source.
+    if itinerary.sources:
+        story.append(Spacer(1, 12))
+        story.append(CondPageBreak(180))
+        story.append(
             _TextFlowable(
                 "المصادر",
                 font=font,
@@ -499,8 +560,7 @@ def _build_story(itinerary: Itinerary, font: str, latin_font: str) -> list[Flowa
                 color=colors.HexColor("#7A3E20"),
                 bottom_padding=10,
             ),
-        ]
-    )
+        )
     for source in itinerary.sources:
         story.append(
             _TextFlowable(

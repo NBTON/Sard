@@ -17,7 +17,6 @@ from pypdf import PdfReader
 
 from sard.application.contracts import UIExecutionMode, UIRunRequest
 from sard.application.demo import (
-    DEMO_CACHE_ROOT,
     HERO_QUERY,
     build_demo_result,
     load_precached_artifacts,

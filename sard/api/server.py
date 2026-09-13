@@ -21,7 +21,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
 
@@ -33,21 +33,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 load_dotenv(_PROJECT_ROOT / ".env")
 
 from sard.agent.capability_routing import Capability, StructuredIntent, classify_intent
-from sard.agent.chat_service import ChatService, current_status_label
-from sard.agent.graph import GraphDependencies, default_dependencies, run_pipeline
+from sard.agent.chat_service import ChatService
+from sard.agent.graph import default_dependencies, run_pipeline
 from sard.agent.util import sanitize_cultural_output
-from sard.config.models import ModelConfigError, get_model_settings
-from sard.config.rag import RAGSettings, get_rag_settings
+from sard.config.models import get_model_settings
+from sard.config.rag import get_rag_settings
 from sard.outputs.orchestrator import (
-    ArtifactOrchestrator,
-    ArtifactRequest,
-    ArtifactResult,
-    ArtifactStore,
     get_artifact_orchestrator,
     get_artifact_store,
 )
-from sard.rag.schemas import Citation, RAGAnswer
-from sard.rag.service import RAGService, RAGServiceUnavailableError
 from sard.runtime_paths import output_root
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -101,8 +95,8 @@ def _load_attachment_index() -> None:
             for k, v in data.items():
                 if isinstance(v, dict) and v.get("path") and Path(v["path"]).exists():
                     _ATTACHMENTS.setdefault(k, v)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
 
 
 def _persist_attachment_index() -> None:
@@ -113,8 +107,8 @@ def _persist_attachment_index() -> None:
         tmp = idx_path.with_name(f".{idx_path.name}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(_json.dumps(_ATTACHMENTS, ensure_ascii=False), encoding="utf-8")
         tmp.replace(idx_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
 
 
 def _resolve_attachment_meta(att_id: str) -> Optional[Dict[str, Any]]:
@@ -135,8 +129,8 @@ def _resolve_attachment_meta(att_id: str) -> Optional[Dict[str, Any]]:
         matches = list(UPLOAD_DIR.glob(f"{safe}*"))
         if matches and matches[0].is_file():
             return {"attachment_id": safe, "filename": matches[0].name, "path": str(matches[0]), "mime_type": "application/octet-stream", "size_bytes": matches[0].stat().st_size}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
     return None
 
 
@@ -153,8 +147,8 @@ def _evict_expired_attachments() -> None:
                 p = Path(meta["path"])
                 if p.exists():
                     p.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
     # Size cap (LRU by created_at)
     if len(_ATTACHMENTS) > _MAX_ATTACHMENTS:
         sorted_items = sorted(_ATTACHMENTS.items(), key=lambda kv: kv[1].get("created_at", 0))
@@ -166,8 +160,8 @@ def _evict_expired_attachments() -> None:
                     p = Path(meta["path"])
                     if p.exists():
                         p.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
     _persist_attachment_index()
 
 ALLOWED_EXTENSIONS = {
@@ -319,6 +313,120 @@ def _check_rag_readiness() -> dict:
     }
 
 
+def _probe_corpus_detail() -> dict:
+    """Report retrieval mode, source count, and corpus coverage separately."""
+    t0 = time.monotonic()
+    corpus_dir = _PROJECT_ROOT / "data" / "corpus"
+    topics: list[str] = []
+    meta_count = 0
+    try:
+        if corpus_dir.exists():
+            topics = sorted([p.name for p in corpus_dir.iterdir() if p.is_dir()])
+            meta_count = sum(1 for _ in corpus_dir.rglob("*.meta.json"))
+    except Exception as exc:
+        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
+    # Coverage: share of expected cultural regions with at least one topic dir.
+    # Expected: at least the 13-region layout or legacy 3-topic fallback.
+    expected_min = 3
+    coverage = round(min(1.0, len(topics) / expected_min), 3) if topics else 0.0
+    rag_info = _check_rag_readiness()
+    mode = str(rag_info.get("engine", "unavailable"))
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    return {
+        "retrieval_mode": mode,
+        "source_count": meta_count,
+        "topic_count": len(topics),
+        "topics": topics,
+        "corpus_coverage": coverage,
+        "available": bool(rag_info.get("available", False)) and meta_count > 0,
+        "latency_ms": latency_ms,
+    }
+
+
+def _check_discovery_reachability(provider: str = "", timeout_s: float = 2.0) -> dict:
+    """Report model discovery reachability without leaking credentials.
+
+    Returns {reachable: bool|None, latency_ms, detail}. None = unknown/skipped
+    (no provider configured). Never raises.
+    """
+    t0 = time.monotonic()
+    try:
+        prov = (provider or os.environ.get("MODEL_PROVIDER", "")).strip().lower()
+        if not prov or prov == "auto":
+            # Auto-detect: pick first configured provider for discovery probe
+            for cand, envs in (
+                ("gemini", ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+                ("openai", ("OPENAI_API_KEY",)),
+                ("anthropic", ("ANTHROPIC_API_KEY",)),
+                ("openrouter", ("OPENROUTER_API_KEY",)),
+                ("nvidia", ("NVIDIA_API_KEY", "NVIDIA_CHAT_BASE_URL")),
+            ):
+                if any(os.environ.get(e, "").strip() for e in envs):
+                    prov = cand
+                    break
+        if not prov or prov == "auto":
+            return {"reachable": None, "latency_ms": 0.0, "detail": "no provider configured"}
+        # Discovery = provider SDK importable + settings resolvable (no network by default).
+        # Live reachability only when SARD_HEALTH_PROBE_NETWORK=1 (bounded).
+        try:
+            _ms = get_model_settings()
+            _ = getattr(_ms, "provider", prov)
+        except Exception as exc:
+            return {"reachable": False, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": f"settings error: {type(exc).__name__}"}
+        if os.environ.get("SARD_HEALTH_PROBE_NETWORK", "").lower() not in ("1", "true", "yes"):
+            return {"reachable": None, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": "network probe skipped (set SARD_HEALTH_PROBE_NETWORK=1 to enable)"}
+        # Bounded live probe (never blocks health beyond budget)
+        try:
+            import urllib.request as _ureq
+
+            base_urls = {
+                "openai": "https://api.openai.com/v1/models",
+                "anthropic": "https://api.anthropic.com/v1/models",
+                "openrouter": "https://openrouter.ai/api/v1/models",
+                "gemini": "https://generativelanguage.googleapis.com/v1beta/models",
+                "nvidia": os.environ.get("NVIDIA_CHAT_BASE_URL", "").strip() or "https://integrate.api.nvidia.com/v1/models",
+            }
+            url = base_urls.get(prov, "")
+            if not url:
+                return {"reachable": None, "latency_ms": 0.0, "detail": "unknown provider"}
+            req = _ureq.Request(url, method="HEAD")
+            with _ureq.urlopen(req, timeout=timeout_s):
+                pass
+            return {"reachable": True, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": "discovery reachable"}
+        except Exception as exc:
+            return {"reachable": False, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": f"{type(exc).__name__}"}
+    except Exception as exc:
+        return {"reachable": False, "latency_ms": 0.0, "detail": f"{type(exc).__name__}"}
+
+
+def _probe_inference(provider: str = "", timeout_s: float = 5.0) -> dict:
+    """Report recent inference success separately (bounded, never raises).
+
+    Default is a config-only check (success=None/unknown) to avoid spend.
+    Set SARD_HEALTH_PROBE_INFERENCE=1 to attempt a minimal live invocation.
+    """
+    t0 = time.monotonic()
+    if not _is_model_configured(provider):
+        return {"success": False, "latency_ms": 0.0, "detail": "model not configured"}
+    if os.environ.get("SARD_HEALTH_PROBE_INFERENCE", "").lower() not in ("1", "true", "yes"):
+        return {"success": None, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": "live inference probe skipped"}
+    try:
+        from sard.config.models import get_chat_model
+
+        model = get_chat_model()
+        # Minimal invocation with strict timeout; any failure => success False.
+        import concurrent.futures as _cf
+
+        from langchain_core.messages import HumanMessage as _HM
+
+        with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(model.invoke, [_HM(content="اختبار اتصال")])
+            fut.result(timeout=timeout_s)
+        return {"success": True, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": "inference ok"}
+    except Exception as exc:
+        return {"success": False, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": f"{type(exc).__name__}"}
+
+
 # --- Endpoints ---
 
 @app.get("/")
@@ -356,15 +464,36 @@ async def root_endpoint():
 @app.get("/api/health")
 @app.get("/health")
 async def health_check():
-    """Health check endpoint - public contract only."""
+    """Health check endpoint - public contract only (truthful, never always-ok)."""
     rag_info = _check_rag_readiness()
+    corpus = _probe_corpus_detail()
+    try:
+        _ms = get_model_settings()
+        _prov = getattr(_ms, "provider", "")
+    except Exception:
+        _prov = os.environ.get("MODEL_PROVIDER", "")
+    model_configured = _is_model_configured(_prov)
+    discovery = _check_discovery_reachability(_prov)
+    inference = _probe_inference(_prov)
+    retrieval_ok = bool(corpus.get("available", False))
+    inference_failed = inference.get("success") is False
+    # Overall is ok ONLY when retrieval works and inference has not failed.
+    # Unknown inference (skipped) does not grant ok when retrieval fails.
+    overall_ok = bool(retrieval_ok and not inference_failed and (model_configured or retrieval_ok))
+    # Strict: ok requires retrieval + (explicit inference success when probed)
+    if inference.get("success") is None:
+        overall_ok = bool(retrieval_ok and model_configured)
     return {
-        "status": "ok",
+        "status": "ok" if overall_ok else "degraded",
         "service": "sard-agent",
         "timestamp": time.time(),
-        "verified": rag_info.get("available", False),
-        "sources": {"verified": rag_info.get("available", False)},
+        "verified": False,
+        "sources": {"verified": False},
         "rag": rag_info,
+        "model_configured": model_configured,
+        "discovery": discovery,
+        "inference": inference,
+        "retrieval": corpus,
     }
 
 
@@ -373,6 +502,7 @@ async def health_check():
 async def system_status():
     """Returns public system status without exposing internal model/provider IDs."""
     rag_info = _check_rag_readiness()
+    corpus = _probe_corpus_detail()
     enable_dev = os.environ.get("SARD_ENABLE_DEV_OBSERVABILITY", "").lower() in ("1", "true", "yes")
 
     try:
@@ -382,12 +512,17 @@ async def system_status():
         _prov = os.environ.get("MODEL_PROVIDER", "")
     model_configured = _is_model_configured(_prov)
     storage_info = _check_storage_readiness()
+    discovery = _check_discovery_reachability(_prov)
+    inference = _probe_inference(_prov)
 
-    rag_avail = bool(rag_info.get("available", False))
+    rag_avail = bool(corpus.get("available", False))
+    inference_failed = inference.get("success") is False
+    # Truthful overall: never "ready" when representative inference or
+    # retrieval fails within its latency budget.
     if not model_configured and not rag_avail:
         system_state = "unavailable"
         status_label_ar = "غير متوفر"
-    elif not model_configured or not rag_avail:
+    elif not model_configured or not rag_avail or inference_failed:
         system_state = "degraded"
         status_label_ar = "محدود"
     else:
@@ -397,10 +532,16 @@ async def system_status():
     base = {
         "status": system_state,
         "status_label": status_label_ar,
-        "verified": rag_avail,
-        "sources": {"verified": rag_avail},
+        "verified": False,
+        "sources": {"verified": False, "count": corpus.get("source_count", 0)},
         "rag": rag_info,
+        "retrieval": corpus,
+        "retrieval_mode": corpus.get("retrieval_mode", ""),
+        "source_count": corpus.get("source_count", 0),
+        "corpus_coverage": corpus.get("corpus_coverage", 0.0),
         "model_configured": model_configured,
+        "discovery": discovery,
+        "inference": inference,
         "storage": storage_info,
         "model": {"mode": "auto", "preference": "auto"},
         "moc_branding": "Saudi Ministry of Culture (MOC) 2026",
@@ -594,10 +735,29 @@ async def get_artifact_file(filename: str):
 
 @app.post("/api/itinerary")
 @app.post("/itinerary")
-async def generate_full_itinerary(req: ItineraryRequest):
-    """Executes the full LangGraph agent pipeline and generates real PDF / ICS artifacts."""
+async def generate_full_itinerary(req: ItineraryRequest, request: Request):
+    """Executes the full LangGraph agent pipeline and generates real PDF / ICS artifacts.
+
+    Bounded by a 30–45s overall deadline with client-disconnect propagation.
+    Returns a typed partial/timeout response and never writes background
+    artifacts after cancellation.
+    """
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="الرجاء تقديم استفسار للرحلة")
+
+    try:
+        deadline_s = float(os.environ.get("SARD_ITINERARY_TIMEOUT", "40"))
+        deadline_s = max(30.0, min(45.0, deadline_s))
+    except ValueError:
+        deadline_s = 40.0
+    t_start = time.monotonic()
+    cancelled = False
+
+    async def _is_disconnected() -> bool:
+        try:
+            return await asyncio.wait_for(request.is_disconnected(), timeout=0.2)
+        except Exception:
+            return False
 
     try:
         run_id = f"itin-{uuid.uuid4().hex[:10]}"
@@ -607,20 +767,103 @@ async def generate_full_itinerary(req: ItineraryRequest):
         deps.caller_dates = tuple(req.dates or [])
         deps.preview_calendar = req.preview_calendar
 
-        # Run pipeline
-        loop = asyncio.get_event_loop()
-        state = await loop.run_in_executor(
-            None,
-            lambda: run_pipeline(
-                req.query,
-                dependencies=deps,
-                run_id=run_id,
-                caller_dates=req.dates,
-                preview_calendar=req.preview_calendar,
-            ),
-        )
+        # Run pipeline with deadline + disconnect checks (no orphan execution).
+        # The worker runs in a DETACHED daemon thread (not loop.run_in_executor):
+        # the event loop only polls a threading.Event, so a timeout/cancel
+        # response is never held back by the worker thread. The worker checks
+        # the cancelled flag and writes no artifacts after cancellation.
+        import threading as _threading
 
-        # Extract and verify artifacts
+        pipeline_box: dict[str, Any] = {}
+        pipeline_done = _threading.Event()
+        cancel_flag = _threading.Event()
+
+        def _worker() -> None:
+            try:
+                pipeline_box["state"] = run_pipeline(
+                    req.query,
+                    dependencies=deps,
+                    run_id=run_id,
+                    caller_dates=req.dates,
+                    preview_calendar=req.preview_calendar,
+                )
+            except Exception as exc:  # worker errors surface as typed 500, never leak
+                pipeline_box["error"] = exc
+            finally:
+                pipeline_done.set()
+
+        _thread = _threading.Thread(target=_worker, name=f"sard-itin-{run_id}", daemon=True)
+        _thread.start()
+
+        async def _run_with_deadline() -> Any:
+            while not pipeline_done.is_set():
+                if await _is_disconnected():
+                    cancel_flag.set()
+                    raise asyncio.CancelledError("client disconnected")
+                remaining = deadline_s - (time.monotonic() - t_start)
+                if remaining <= 0:
+                    cancel_flag.set()
+                    raise asyncio.TimeoutError(f"itinerary deadline exceeded ({deadline_s:.0f}s)")
+                await asyncio.sleep(0.25)
+            if "error" in pipeline_box:
+                raise pipeline_box["error"]
+            return pipeline_box.get("state")
+
+        try:
+            state = await _run_with_deadline()
+        except asyncio.TimeoutError:
+            elapsed_ms = round((time.monotonic() - t_start) * 1000, 1)
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "ok": False,
+                    "error": "timeout",
+                    "error_category": "timeout",
+                    "message": f"تجاوز إنشاء البرنامج المهلة ({deadline_s:.0f} ثانية). حاول تبسيط الطلب أو إعادة المحاولة.",
+                    "run_id": run_id if "run_id" in locals() else "",
+                    "query": req.query,
+                    "partial": True,
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
+        except asyncio.CancelledError:
+            cancelled = True
+            elapsed_ms = round((time.monotonic() - t_start) * 1000, 1)
+            return JSONResponse(
+                status_code=499,
+                content={
+                    "ok": False,
+                    "error": "cancelled",
+                    "error_category": "cancelled",
+                    "message": "تم إلغاء الطلب من قبل العميل.",
+                    "run_id": run_id if "run_id" in locals() else "",
+                    "query": req.query,
+                    "partial": True,
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
+
+        if await _is_disconnected():
+            # Client already gone: do not write artifacts.
+            return JSONResponse(
+                status_code=499,
+                content={
+                    "ok": False, "error": "cancelled", "error_category": "cancelled",
+                    "message": "تم إلغاء الطلب من قبل العميل.", "run_id": run_id,
+                    "query": req.query, "partial": True,
+                },
+            )
+
+        # Extract and verify artifacts (skipped entirely after cancellation).
+        if cancelled or cancel_flag.is_set() or await _is_disconnected():
+            return JSONResponse(
+                status_code=499,
+                content={
+                    "ok": False, "error": "cancelled", "error_category": "cancelled",
+                    "message": "تم إلغاء الطلب من قبل العميل.", "run_id": run_id,
+                    "query": req.query, "partial": True,
+                },
+            )
         orchestrator = get_artifact_orchestrator()
         artifacts_list = []
 
@@ -643,7 +886,25 @@ async def generate_full_itinerary(req: ItineraryRequest):
                 })
 
         # Fallback: if no artifacts rendered yet, generate via orchestrator
+        # (only if deadline budget remains; otherwise return typed partial).
         if not artifacts_list:
+            remaining = deadline_s - (time.monotonic() - t_start)
+            if remaining <= 1.0 or await _is_disconnected():
+                elapsed_ms = round((time.monotonic() - t_start) * 1000, 1)
+                return JSONResponse(
+                    status_code=504 if remaining <= 1.0 else 499,
+                    content={
+                        "ok": True, "partial": True,
+                        "error": "timeout" if remaining <= 1.0 else "cancelled",
+                        "error_category": "timeout" if remaining <= 1.0 else "cancelled",
+                        "message": "اكتمل النص دون مخرجات ملفات ضمن المهلة.",
+                        "run_id": run_id, "query": req.query,
+                        "final_text": state.get("final_itinerary_text") or state.get("final_response") or "",
+                        "sources": state.get("sources", []),
+                        "artifacts": [],
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
             itin_text = state.get("final_itinerary_text") or state.get("final_response") or req.query
             intent = StructuredIntent(
                 domain_capability=Capability.ITINERARY_PLANNING,
@@ -746,8 +1007,8 @@ async def chat_endpoint(req: ChatRequest):
                 def _sync_status_callback(stage: str, message: str):
                     try:
                         loop.call_soon_threadsafe(status_queue.put_nowait, (stage, message))
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
 
                 resolved_files = {}
                 for att in all_attachments:
@@ -776,13 +1037,14 @@ async def chat_endpoint(req: ChatRequest):
                     # Overall deadline shared with orchestrator for orphan discard (G11).
                     deadline = t_start + overall_timeout
                     # Launch chat_service.ask in executor with bounded timeout (pass resolved language & resolved attachments)
+                    # Real uploaded paths go to the real extractor via uploaded_files (not mocks).
                     future = loop.run_in_executor(
                         None,
                         lambda _dl=deadline: chat_service.ask(
                             effective_query,
                             messages=history_dicts,
                             attachments=all_attachments,
-                            mock_multimodal_files=resolved_files if resolved_files else None,
+                            uploaded_files=resolved_files if resolved_files else None,
                             use_hybrid_retrieval=True,
                             session_id=req.session_id,
                             status_callback=_sync_status_callback,
@@ -843,18 +1105,47 @@ async def chat_endpoint(req: ChatRequest):
                             hybrid_chat_res = None
 
                     if hybrid_chat_res is not None:
+                        # Trustworthy behavior: verified ONLY when the planner decided
+                        # "generate" AND at least one citation carries a real HTTP(S)
+                        # source URL. Hedge/template answers are never verified.
                         # Preserve artifacts even if hybrid had fallback text or empty model — invariant 1,8
                         if hybrid_chat_res.citations or hybrid_chat_res.text:
-                            verified = bool(hybrid_chat_res.decision in ("generate", "hedge") or len(hybrid_chat_res.citations) > 0)
-                        # Extract citations (only if present)
+                            from urllib.parse import urlparse as _urlparse
+
+                            def _has_valid_url(cits: Any) -> bool:
+                                try:
+                                    for c in (cits or []):
+                                        u = str((c or {}).get("url", "") or "")
+                                        p = _urlparse(u)
+                                        if p.scheme in ("http", "https") and p.netloc:
+                                            return True
+                                except Exception:
+                                    return False
+                                return False
+
+                            verified = bool(
+                                hybrid_chat_res.decision == "generate"
+                                and _has_valid_url(hybrid_chat_res.citations)
+                            )
+                        # Extract citations (only validated HTTP(S); drop bare IDs)
                         for cit in (hybrid_chat_res.citations or []):
+                            raw_url = str(cit.get("url", "") or "")
+                            try:
+                                from urllib.parse import urlparse as _urlparse2
+
+                                _p = _urlparse2(raw_url)
+                                valid = _p.scheme in ("http", "https") and bool(_p.netloc)
+                            except Exception:
+                                valid = False
+                            if not valid:
+                                continue
                             citations_sent.append({
                                 "citation_id": cit.get("id", ""),
                                 "title": cit.get("title", ""),
                                 "source_name": cit.get("origin") or cit.get("id", ""),
-                                "source_url": cit.get("url", ""),
-                                "chunk_id": "",
-                                "snippet": cit.get("title", ""),
+                                "source_url": raw_url,
+                                "chunk_id": cit.get("chunk_id", "") or cit.get("source_id", "") or "",
+                                "snippet": cit.get("excerpt", "") or cit.get("title", ""),
                             })
                         if citations_sent:
                             yield {
@@ -1048,8 +1339,8 @@ async def chat_endpoint(req: ChatRequest):
                     "event": "error",
                     "data": json.dumps({"run_id": run_id, "error": "تم إلغاء الطلب.", "cancelled": True}, ensure_ascii=False)
                 }
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
             raise
         except Exception as exc:
             logger.exception("Unexpected SSE error (run_id=%s): %s", run_id, type(exc).__name__)
@@ -1059,8 +1350,8 @@ async def chat_endpoint(req: ChatRequest):
                     "event": "error",
                     "data": json.dumps({"run_id": run_id, "error": "حدث خطأ غير متوقع أثناء المعالجة. الرجاء المحاولة لاحقاً."}, ensure_ascii=False)
                 }
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
         finally:
             # 5. Final Done Event — always emitted even on empty/error (contract). Includes run_id, no secrets.
             total_time_ms = (time.monotonic() - t_start) * 1000
@@ -1079,8 +1370,8 @@ async def chat_endpoint(req: ChatRequest):
                         "run_id": run_id,
                     }, ensure_ascii=False)
                 }
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
             logger.info("SSE done (run_id=%s, session_id=%s, verified=%s, artifacts=%d, sources=%d, total_ms=%.1f)",
                         run_id, session_id_out[:8] if len(session_id_out) > 8 else session_id_out, verified, len(artifacts_sent), len(citations_sent), total_time_ms)
 
@@ -1194,7 +1485,9 @@ class PresentationRequest(BaseModel):
     def normalize_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
             if "topic" not in data:
-                data["topic"] = data.get("title") or data.get("query") or data.get("prompt") or "التراث السعودي"
+                data["topic"] = data.get("title") or data.get("query") or data.get("prompt") or ""
+            if not str(data.get("topic", "") or "").strip():
+                raise ValueError("الرجاء تحديد موضوع العرض (topic) قبل المتابعة.")
             if "region" not in data or not data["region"]:
                 data["region"] = "المملكة العربية السعودية"
         return data
@@ -1211,7 +1504,9 @@ class RecipeCardRequest(BaseModel):
     def normalize_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
             if "item_name" not in data:
-                data["item_name"] = data.get("dish_name") or data.get("name") or data.get("craft_name") or "الجريش"
+                data["item_name"] = data.get("dish_name") or data.get("name") or data.get("craft_name") or ""
+            if not str(data.get("item_name", "") or "").strip():
+                raise ValueError("الرجاء تحديد اسم الطبق أو الحرفة (item_name) — لا يمكن التخمين تلقائيًا.")
             if "card_type" not in data or not data["card_type"]:
                 data["card_type"] = "craft" if "سدو" in str(data.get("item_name", "")) else "culinary"
         return data
@@ -1238,7 +1533,7 @@ class GreetingCardRequest(BaseModel):
 
 
 class EtiquetteRequest(BaseModel):
-    scenario_type: Optional[str] = Field("majlis", description="majlis or business_negotiation")
+    scenario_type: Optional[str] = Field(None, description="majlis or business_negotiation")
     situation: Optional[str] = Field("", description="Context details")
 
     @model_validator(mode="before")
@@ -1246,7 +1541,9 @@ class EtiquetteRequest(BaseModel):
     def normalize_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
             if "scenario_type" not in data:
-                data["scenario_type"] = data.get("scenario") or data.get("type") or "majlis"
+                data["scenario_type"] = data.get("scenario") or data.get("type") or ""
+            if not str(data.get("scenario_type", "") or "").strip():
+                raise ValueError("الرجاء تحديد نوع سيناريو الإتيكيت (scenario_type: majlis أو business_negotiation).")
         return data
 
 
@@ -1260,22 +1557,26 @@ class DialectRequest(BaseModel):
         if isinstance(data, dict):
             if "phrase_or_proverb" not in data:
                 data["phrase_or_proverb"] = (
-                    data.get("proverb_or_phrase") or data.get("phrase") or data.get("proverb") or data.get("text") or "أبشر بسعدك"
+                    data.get("proverb_or_phrase") or data.get("phrase") or data.get("proverb") or data.get("text") or ""
                 )
+            if not str(data.get("phrase_or_proverb", "") or "").strip():
+                raise ValueError("الرجاء إدخال العبارة أو المثل (phrase_or_proverb) قبل المتابعة.")
             if "dialect_region" not in data or not data["dialect_region"]:
                 data["dialect_region"] = data.get("region") or "najdi"
         return data
 
 
 class ArtisanRequest(BaseModel):
-    craft_name: Optional[str] = Field("sadu", description="Craft name (sadu, hasawi_bisht, taif_rose, aseeri_qatt)")
+    craft_name: Optional[str] = Field(None, description="Craft name (sadu, hasawi_bisht, taif_rose, aseeri_qatt)")
 
     @model_validator(mode="before")
     @classmethod
     def normalize_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
             if "craft_name" not in data:
-                data["craft_name"] = data.get("craft") or data.get("item_name") or data.get("name") or "sadu"
+                data["craft_name"] = data.get("craft") or data.get("item_name") or data.get("name") or ""
+            if not str(data.get("craft_name", "") or "").strip():
+                raise ValueError("الرجاء تحديد اسم الحرفة (craft_name: sadu أو hasawi_bisht أو taif_rose أو aseeri_qatt).")
         return data
 
 
@@ -1291,8 +1592,10 @@ class MemoirRequest(BaseModel):
         if isinstance(data, dict):
             if "family_name" not in data:
                 data["family_name"] = (
-                    data.get("family_or_narrator") or data.get("family") or data.get("narrator_name") or data.get("name") or "سيرة عائلية"
+                    data.get("family_or_narrator") or data.get("family") or data.get("narrator_name") or data.get("name") or ""
                 )
+            if not str(data.get("family_name", "") or "").strip():
+                raise ValueError("الرجاء تحديد اسم العائلة أو الراوي (family_name).")
             raw = data.get("raw_notes")
             if isinstance(raw, str):
                 data["raw_notes"] = [{"topic": "ذكريات وسيرة", "content": raw, "era": "الزمن الجميل"}]
@@ -1309,7 +1612,7 @@ class MemoirRequest(BaseModel):
                         })
                 data["raw_notes"] = norm_list
             elif not raw:
-                data["raw_notes"] = [{"topic": "المستهل والذكريات", "content": "توثيق شفهي مبارك", "era": "الزمن الجميل"}]
+                raise ValueError("الرجاء تقديم الملاحظات الشفهية (raw_notes) — لا يمكن توليد مذكرات من فراغ.")
         return data
 
 
@@ -1322,7 +1625,9 @@ class ResearchRequest(BaseModel):
     def normalize_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
             if "topic" not in data:
-                data["topic"] = data.get("title") or data.get("query") or "التراث الوطني السعودي"
+                data["topic"] = data.get("title") or data.get("query") or ""
+            if not str(data.get("topic", "") or "").strip():
+                raise ValueError("الرجاء تحديد موضوع البحث التراثي (topic).")
         return data
 
 

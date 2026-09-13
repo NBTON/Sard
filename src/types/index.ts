@@ -76,7 +76,7 @@ export interface SystemStatus {
 }
 
 export type Lang = "ar" | "en";
-export type View = "landing" | "chat";
+export type View = "landing" | "chat" | "explore";
 
 export interface Sector {
   id: string;

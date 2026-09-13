@@ -1,12 +1,61 @@
 import { Citation, Artifact, Attachment, SystemStatus } from "@/types";
 import { PersistentSSEParser, SSEEvent } from "./sseParser";
 
-const API_BASE = "";
+const API_BASE =
+  (typeof process !== "undefined" &&
+    (process.env.NEXT_PUBLIC_API_BASE || process.env.SARD_BACKEND_ORIGIN || "")) ||
+  "";
+
+export type SardErrorCode =
+  | "http_error"
+  | "timeout"
+  | "aborted"
+  | "no_body"
+  | "stream_interrupted"
+  | "validation"
+  | "partial"
+  | "unknown";
+
+export class SardApiError extends Error {
+  code: SardErrorCode;
+  status?: number;
+  category?: string;
+  constructor(message: string, opts?: { code?: SardErrorCode; status?: number; category?: string }) {
+    super(message);
+    this.name = "SardApiError";
+    this.code = opts?.code || "http_error";
+    this.status = opts?.status;
+    this.category = opts?.category;
+  }
+}
+
+/** Read an error response body exactly once (text), then try JSON parse. */
+async function readErrorDetail(response: Response, fallback: string): Promise<{ detail: string; category?: string }> {
+  let raw = "";
+  try {
+    raw = await response.text();
+  } catch {
+    return { detail: fallback };
+  }
+  if (!raw) return { detail: fallback };
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.detail === "string" && parsed.detail) {
+      return { detail: parsed.detail, category: parsed?.error_category };
+    }
+    if (typeof parsed?.error === "string" && parsed.error) {
+      return { detail: parsed.error, category: parsed?.error_category };
+    }
+  } catch {
+    // raw is plain text
+  }
+  return { detail: raw.slice(0, 500) || fallback };
+}
 
 export async function fetchSystemStatus(): Promise<SystemStatus | null> {
   try {
     const res = await fetch(`${API_BASE}/api/status`);
-    if (!res.ok) throw new Error(`Status HTTP ${res.status}`);
+    if (!res.ok) throw new SardApiError(`Status HTTP ${res.status}`, { code: "http_error", status: res.status });
     return await res.json();
   } catch (err) {
     console.warn("Could not fetch backend system status:", err);
@@ -24,15 +73,8 @@ export async function uploadAttachment(file: File): Promise<Attachment> {
   });
 
   if (!response.ok) {
-    let errorDetail = `Upload failed (${response.status})`;
-    try {
-      const errJson = await response.json();
-      if (errJson.detail) errorDetail = errJson.detail;
-    } catch {
-      const errText = await response.text();
-      if (errText) errorDetail = errText;
-    }
-    throw new Error(errorDetail);
+    const { detail, category } = await readErrorDetail(response, `Upload failed (${response.status})`);
+    throw new SardApiError(detail, { code: "http_error", status: response.status, category });
   }
 
   const data = await response.json();
@@ -228,19 +270,12 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
         await new Promise((r) => setTimeout(r, 900));
         const retryResp = await fetchWithRetry(1);
         if (!retryResp.ok) {
-          let errDetail = `Server error (${retryResp.status})`;
-          try {
-            const errJson = await retryResp.json();
-            if (errJson.detail) errDetail = errJson.detail;
-          } catch {
-            const errText = await retryResp.text();
-            if (errText) errDetail = errText;
-          }
-          throw new Error(errDetail);
+          const { detail, category } = await readErrorDetail(retryResp, `Server error (${retryResp.status})`);
+          throw new SardApiError(detail, { code: "http_error", status: retryResp.status, category });
         }
         // Use retry response if successful (fallthrough by reassigning)
         // We need to handle retryResp stream instead
-        if (!retryResp.body) throw new Error("No response body received from server");
+        if (!retryResp.body) throw new SardApiError("No response body received from server", { code: "no_body" });
         // Continue to streaming with retryResp (duplicate code path handled below via goto-like)
         // To avoid duplication, throw to outer catch if retry needed more logic; instead we handle streaming from retryResp
         // We do streaming for retryResp here
@@ -293,19 +328,12 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
         if (!ordCheck.valid) console.warn(`[SSE] Order violation: ${ordCheck.violation}`, eventOrder);
         return;
       }
-      let errDetail = `Server error (${response.status})`;
-      try {
-        const errJson = await response.json();
-        if (errJson.detail) errDetail = errJson.detail;
-      } catch {
-        const errText = await response.text();
-        if (errText) errDetail = errText;
-      }
-      throw new Error(errDetail);
+      const { detail, category } = await readErrorDetail(response, `Server error (${response.status})`);
+      throw new SardApiError(detail, { code: "http_error", status: response.status, category });
     }
 
     if (!response.body) {
-      throw new Error("No response body received from server");
+      throw new SardApiError("No response body received from server", { code: "no_body" });
     }
 
     const reader = response.body.getReader();

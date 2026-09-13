@@ -25,7 +25,6 @@ def test_normalizes_alef_variants():
 
 
 def test_normalizes_yeh_and_kaf_variants():
-    text = "علي كتاب"  # already standard form baseline
     alt = "علٮ كتاب"  # not a real variant char, just ensure no crash
     assert normalize_arabic(alt)
 

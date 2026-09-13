@@ -400,9 +400,11 @@ export function Landing({
         @media (max-width: 860px) {
           .landing-grid { grid-template-columns: 1fr !important; gap: 24px !important; }
           .sectors-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+          .agentic-tools-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
         }
         @media (max-width: 520px) {
           .sectors-grid { grid-template-columns: 1fr !important; }
+          .agentic-tools-grid { grid-template-columns: 1fr !important; }
         }
       `}</style>
     </div>

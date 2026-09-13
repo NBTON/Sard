@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import time
 from datetime import date
-from pathlib import Path
 
 from sard.agent.events import (
     EVENT_COMPLETED,
@@ -23,7 +22,6 @@ from sard.agent.events import (
 from sard.agent.routing import collect_verified_claims
 from sard.agent.state import GraphOutcome, RenderedArtifactInfo
 from sard.outputs.artifacts import (
-    ArtifactError,
     ArtifactManager,
     ArtifactWriteResult,
     failed_artifact,
@@ -186,7 +184,7 @@ def render(state: dict, deps) -> dict:
             run,
             checksums=bool(getattr(deps, "render_checksums", False) or state.get("render_checksums", False)),
         )
-    except Exception as exc:
+    except Exception:
         warnings.append("تعذر فتح مجلد المخرجات الآمن.")
         errors.append(make_error(run, "render", FailureKind.RENDERING_VALIDATION, "تعذر فتح مجلد المخرجات الآمن.", retryable=False))
         duration_ms = (time.monotonic() - start) * 1000

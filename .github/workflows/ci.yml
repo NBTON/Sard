@@ -1,0 +1,46 @@
+name: Sard CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - name: Install dependencies
+        run: uv sync --extra nvidia --extra anthropic --extra openai --extra dev
+      - name: Ruff (unused imports/variables + swallowed exceptions)
+        run: uv run ruff check sard/ tests/
+      - name: Python tests (offline, non-interactive)
+        run: uv run pytest -q
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: ESLint (committed config, non-interactive)
+        run: npm run lint
+      - name: Type-check
+        run: npm run typecheck
+      - name: Production build (same-origin API contract)
+        run: npm run build
+      - name: Browser/contract tests (node, non-interactive)
+        run: node --test tests/test_sse_parser.mjs tests/frontend/test_artifact_download_matrix.mjs tests/frontend/test_browser_scenarios_mock.mjs tests/frontend/test_sse_parser_frontend.mjs

@@ -8,10 +8,8 @@ RFC 5545 (.ics) file generation, and direct 1-click Google Calendar sync links.
 from __future__ import annotations
 
 import datetime
-import io
 import logging
 import urllib.parse
-import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -289,8 +287,8 @@ class HeritageCalendarSync:
                     e_m = int(ev.end_date.split("-")[1])
                     if not (s_m <= month <= e_m or (s_m > e_m and (month >= s_m or month <= e_m))):
                         continue
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in calendar_sync.py: %s", type(exc).__name__)
             if q_norm:
                 match_str = f"{ev.title_ar} {ev.title_en} {ev.description_ar} {ev.region} {ev.location_name}".lower()
                 if q_norm not in match_str:
@@ -311,6 +309,8 @@ class HeritageCalendarSync:
             ical_ev = Event()
             ical_ev.add("uid", f"{ev.id}@sard.culture.sa")
             ical_ev.add("summary", ev.title_ar)
+            # RFC 5545 §3.6.1: DTSTAMP is REQUIRED in every VEVENT.
+            ical_ev.add("dtstamp", datetime.datetime.now(datetime.timezone.utc))
             
             s_date = datetime.date.fromisoformat(ev.start_date)
             e_date = datetime.date.fromisoformat(ev.end_date) + datetime.timedelta(days=1)

@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from sard.config.rag import RAGSettings, build_rerank_model, get_rag_settings
-from sard.rag.chunking import approx_token_count
 from sard.rag.fallbacks import (
     AllCandidatesFailedError,
     CircuitBreaker,
