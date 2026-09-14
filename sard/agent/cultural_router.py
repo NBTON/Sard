@@ -28,6 +28,7 @@ from sard.agent.tools.multimodal_tools import (
     extract_multimodal_context,
 )
 from sard.agent.util import sanitize_cultural_output
+from sard.rag.relevance import filter_relevant_evidence, requires_medical_qualification
 from sard.rag.schemas import ScoreType
 
 logger = logging.getLogger("sard.agent.cultural_router")
@@ -169,7 +170,7 @@ class CulturalRouter:
         decision.is_time_sensitive = is_fresh
 
         # Step A: Always run RAG first
-        raw_rag_results = self.rag_search(user_query, 5)
+        raw_rag_results = filter_relevant_evidence(user_query, self.rag_search(user_query, 5) or [])
         decision.rag_executed = True
 
         # Derive corpus coverage from indexed calibrated evidence (not a static list)
@@ -222,7 +223,8 @@ class CulturalRouter:
                             decision.web_unavailable_warning = True
                             continue
                         if item.get("url") and not any(w.get("url") == item.get("url") for w in web_results):
-                            web_results.append(item)
+                            if filter_relevant_evidence(user_query, [item]):
+                                web_results.append(item)
                     if len(web_results) >= 3:
                         break
                 except Exception as exc:
@@ -561,6 +563,17 @@ class CulturalRouter:
         else:
             answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res, multimodal_items, lang=resolved_lang)
 
+        if requires_medical_qualification(user_query):
+            qualification_note = (
+                "\n\n> Note: references to healing or therapeutic benefits describe reported local beliefs or uses, "
+                "not medical evidence or a treatment claim."
+                if resolved_lang == "en"
+                else "\n\n> تنبيه: ما يرد عن الاستشفاء أو الفوائد العلاجية يصف معتقدات أو استخدامات محلية محتملة، "
+                "وليس دليلاً طبياً على علاج مرض."
+            )
+            if not any(marker in answer_text for marker in ("دليلاً طبياً", "medical evidence")):
+                answer_text = f"{answer_text.rstrip()}{qualification_note}"
+
         latency_ms = (time.monotonic() - t0) * 1000
         return CulturalQueryResult(
             answer_text=sanitize_cultural_output(answer_text),
@@ -617,6 +630,14 @@ class CulturalRouter:
         else:
             is_arabic = bool(re.search(r"[\u0600-\u06FF]", query))
 
+        medical_note = (
+            "\n\n> تنبيه: ما يرد عن الاستشفاء أو الفوائد العلاجية هنا يصف معتقدات/استخدامات محلية محتملة، وليس دليلاً طبياً على علاج مرض. لا تُستبدل الاستشارة الطبية بمعلومة تراثية."
+            if requires_medical_qualification(query) and is_arabic
+            else "\n\n> Note: references to healing or therapeutic benefits describe reported local beliefs or uses, not medical evidence or a treatment claim."
+            if requires_medical_qualification(query)
+            else ""
+        )
+
         # Check multimodal items first if present
         if multimodal_items:
             mm = multimodal_items[0]
@@ -656,10 +677,19 @@ class CulturalRouter:
             top = rag_res[0]
             meta = top.get("metadata", {})
             source_title = top.get("title") or top.get("source") or "سجلات التراث الوطني"
+            chunk = (top.get("chunk") or top.get("text") or "")[:800]
+            if is_arabic:
+                return (
+                    f"استناداً إلى وثائق التراث المعتمدة في {meta.get('region', 'المملكة العربية السعودية')}:\n\n"
+                    f"{chunk}\n\n"
+                    f"**المصدر المعتمد:** {source_title} ({meta.get('culture', 'التراث السعودي')})."
+                    f"{medical_note}"
+                )
             return (
-                f"استناداً إلى وثائق التراث المعتمدة في {meta.get('region', 'المملكة العربية السعودية')}:\n\n"
-                f"{top.get('chunk')[:800]}\n\n"
-                f"**المصدر المعتمد:** {source_title} ({meta.get('culture', 'التراث السعودي')})."
+                f"Based on documented cultural records for {meta.get('region', 'Saudi Arabia')}:\n\n"
+                f"{chunk}\n\n"
+                f"**Documented source:** {source_title} ({meta.get('culture', 'Saudi heritage')})."
+                f"{medical_note}"
             )
 
         # If Web-grounded
@@ -672,14 +702,14 @@ class CulturalRouter:
                 return (
                     f"بناءً على المصادر الميدانية الموثقة:\n\n"
                     f"{excerpts}\n\n"
-                    f"**المصدر الرسمي:** {title}"
+                    f"**المصدر الرسمي:** {title}{medical_note}"
                 )
             else:
                 return (
                     f"Based on verified live sources:\n\n"
                     f"{excerpts}\n\n"
-                    f"**Verified Source:** {title}"
+                    f"**Verified Source:** {title}{medical_note}"
                 )
 
 
-        return "تعذّر تكوين إجابة محددة لعدم كفاية الأدلة المسترجعة."
+        return "تعذّر تكوين إجابة محددة لعدم كفاية الأدلة المسترجعة." + medical_note

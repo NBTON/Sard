@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from sard.agent.capability_routing import (
     classify_intent,
@@ -34,6 +34,11 @@ from sard.outputs.orchestrator import (
     get_artifact_orchestrator,
 )
 from sard.schemas.isnad import PlannerResult
+from sard.rag.relevance import (
+    relevance_details,
+    requires_medical_qualification,
+    strong_product_grounding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +179,95 @@ class ChatService:
             uploaded_files=uploaded_files,
         )
 
+    def _filter_planner_result(self, query: str, result: PlannerResult) -> PlannerResult:
+        """Remove planner evidence that does not match the current entity/mandate.
+
+        The planner owns the classification and provenance stages, but its
+        legacy retriever can be replaced by a test or external boundary.  A
+        final agent-side check keeps an unrelated Fashion/Crafts or regional
+        record from becoming a citation or a generated answer in that case.
+        """
+
+        evidence = list(result.chain.evidence or [])
+        if not evidence:
+            return result
+
+        candidates: list[dict[str, Any]] = []
+        for ev in evidence:
+            raw: dict[str, Any] = {}
+            memory = getattr(self.planner, "memory", None)
+            l0 = getattr(memory, "l0", None)
+            try:
+                raw = l0.get_raw_ref(ev.raw_ref) or {} if l0 is not None else {}
+            except Exception as exc:
+                logger.debug("Planner raw evidence lookup skipped: %s", type(exc).__name__)
+            raw_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            candidates.append(
+                {
+                    "title": raw.get("title") or ev.origin,
+                    "source": ev.origin,
+                    "chunk": ev.excerpt,
+                    "metadata": {
+                        "source_name": ev.origin,
+                        "source_url": raw_meta.get("source_url") or raw.get("source_url") or "",
+                        "citation_id": raw_meta.get("citation_id") or raw.get("citation_id") or ev.source_id,
+                        "chunk_id": raw_meta.get("chunk_id") or raw.get("chunk_id") or ev.source_id,
+                        "topic": raw_meta.get("topic") or raw.get("topic") or "",
+                        "sector": raw_meta.get("sector") or raw.get("sector") or "",
+                        "region": ev.region,
+                        "region_code": raw_meta.get("region_code") or raw.get("region_code") or "",
+                    },
+                }
+            )
+
+        keep = [
+            ev
+            for ev, candidate in zip(evidence, candidates)
+            if relevance_details(query, candidate)["accepted"]
+        ]
+        if len(keep) == len(evidence):
+            return result
+
+        if not keep:
+            chain = result.chain.model_copy(
+                update={
+                    "evidence": [],
+                    "atoms": [],
+                    "score": "low",
+                    "decision": "ask",
+                    "missing": ["No entity- and mandate-matched evidence was found for the current query."],
+                }
+            )
+            return result.model_copy(
+                update={"chain": chain, "answer_ar": None, "answer_en": None, "visible_sources": []}
+            )
+
+        kept_ids = {ev.source_id for ev in keep}
+        chain = result.chain.model_copy(
+            update={
+                "evidence": keep,
+                "atoms": [atom for atom in result.chain.atoms if set(atom.source_ids) & kept_ids],
+            }
+        )
+        return result.model_copy(
+            update={
+                "chain": chain,
+                "visible_sources": [ev for ev in result.visible_sources if ev.source_id in kept_ids],
+            }
+        )
+
+    @staticmethod
+    def _medical_note(lang: str) -> str:
+        if lang == "en":
+            return (
+                "\n\n> Note: references to healing or therapeutic benefits describe reported local beliefs or uses, "
+                "not medical evidence or a treatment claim."
+            )
+        return (
+            "\n\n> تنبيه: ما يرد عن الاستشفاء أو الفوائد العلاجية يصف معتقدات أو استخدامات محلية محتملة، "
+            "وليس دليلاً طبياً على علاج مرض."
+        )
+
     def ask(
         self,
         user_query: str,
@@ -286,10 +380,35 @@ class ChatService:
             local_artifacts: list[dict[str, Any]] = []
             target_fmts = getattr(intent, "target_formats", None) or getattr(intent, "requested_formats", ())
             if intent.explicit_artifact_request and target_fmts:
+                from sard.agent.capability_routing import Capability
+
+                proposal_capability = intent.domain_capability in {
+                    Capability.RECIPE_CARD,
+                    Capability.ARTISAN_CRAFT,
+                    Capability.ETIQUETTE_SIMULATOR,
+                }
+                proposal_is_grounded = strong_product_grounding(user_query, sources)
                 for fmt in target_fmts:
                     if fmt == "text":
                         continue
                     topic_str = getattr(intent, "canonical_topic", None) or getattr(intent, "extracted_topic", None) or user_query
+                    if proposal_capability and not proposal_is_grounded:
+                        local_artifacts.append(
+                            ArtifactResult(
+                                id=f"art-gated-{fmt}",
+                                kind=_format_to_kind(fmt),
+                                format=fmt,
+                                title=f"مخرج ثقافي: {topic_str}",
+                                filename=f"sard-{fmt}",
+                                mime_type="application/octet-stream",
+                                size_bytes=0,
+                                status="failed",
+                                download_url=None,
+                                error="لم يُنشأ المخرج لأن الطلب يحتاج إلى شاهد ثقافي قوي ومطابق للكيان والقطاع.",
+                                error_category="insufficient_evidence",
+                            ).to_dict()
+                        )
+                        continue
                     # Map format to orchestrator call
                     art_req = ArtifactRequest(
                         format=fmt,
@@ -303,6 +422,7 @@ class ChatService:
                             "session_id": session_id,
                             "intent": intent.to_dict() if hasattr(intent, "to_dict") else asdict(intent),
                             "locale": resolved_lang,
+                            "evidence_gate": "strong" if proposal_is_grounded else "not_applicable",
                         },
                     )
                     try:
@@ -366,17 +486,37 @@ class ChatService:
                     lang=resolved_lang,
                     uploaded_files=uploaded_files,
                 )
+                plan_res = self._filter_planner_result(user_query, plan_res)
                 for ev in plan_res.visible_sources:
+                    raw: dict[str, Any] = {}
+                    memory = getattr(self.planner, "memory", None)
+                    l0 = getattr(memory, "l0", None)
+                    try:
+                        raw = l0.get_raw_ref(ev.raw_ref) or {} if l0 is not None else {}
+                    except Exception as exc:
+                        logger.debug("Planner citation lookup skipped: %s", type(exc).__name__)
+                    raw_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+                    source_url = (
+                        raw_meta.get("source_url")
+                        or raw.get("source_url")
+                        or (ev.url_or_doc_id if str(ev.url_or_doc_id or "").startswith(("http://", "https://")) else "")
+                    )
+                    citation_id = raw_meta.get("citation_id") or raw.get("citation_id") or ev.source_id
                     citations.append({
-                        "id": ev.source_id,
-                        "title": f"{ev.origin} ({ev.region})",
-                        "url": ev.url_or_doc_id or "",
+                        "id": citation_id,
+                        "citation_id": citation_id,
+                        "title": raw.get("title") or f"{ev.origin} ({ev.region})",
+                        "url": source_url,
+                        "source_url": source_url,
                         "origin": ev.origin,
                         "source_type": ev.source_type,
-                        "chunk_id": ev.source_id,
+                        "chunk_id": raw_meta.get("chunk_id") or raw.get("chunk_id") or ev.source_id,
                         "source_id": ev.source_id,
                         "excerpt": (ev.excerpt or "")[:500],
                         "region": ev.region,
+                        "topic": raw_meta.get("topic") or raw.get("topic") or "",
+                        "sector": raw_meta.get("sector") or raw.get("sector") or "",
+                        "score": raw.get("score") or raw_meta.get("confidence_score") or 0.0,
                     })
 
                 # Choose answer language based on resolved locale
@@ -412,6 +552,11 @@ class ChatService:
                 if decision is None:
                     decision = "hedge"
 
+            if requires_medical_qualification(user_query):
+                medical_note = self._medical_note(resolved_lang)
+                if medical_note.strip() not in text_resp:
+                    text_resp = f"{text_resp.rstrip()}{medical_note}"
+
             # 3. Artifact Orchestration — always via helper (BOTH paths)
             artifacts = _maybe_orchestrate(text_resp, citations)
 
@@ -441,16 +586,10 @@ class ChatService:
         try:
             system_prompt = _SYSTEM_PROMPT_EN if resolved_lang == "en" else _SYSTEM_PROMPT
             lc_messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
-            if messages:
-                for m in messages[:-1]:
-                    role = m.get("role")
-                    content = m.get("content", "").strip()
-                    if not content:
-                        continue
-                    if role == "user":
-                        lc_messages.append(HumanMessage(content=content))
-                    elif role == "assistant":
-                        lc_messages.append(AIMessage(content=content))
+            # The direct path is a failure/degraded fallback for factual
+            # cultural requests.  Client-provided history may belong to a
+            # different session or topic, so it must not become evidence or
+            # prompt context for the current turn.
             lc_messages.append(HumanMessage(content=user_query))
 
             future = _SHARED_EXECUTOR.submit(model.invoke, lc_messages)
@@ -466,6 +605,11 @@ class ChatService:
             text = sanitize_cultural_output(text)
             if not text or not text.strip():
                 text = ""
+
+            if text and requires_medical_qualification(user_query):
+                medical_note = self._medical_note(resolved_lang)
+                if medical_note.strip() not in text:
+                    text = f"{text.rstrip()}{medical_note}"
 
             artifacts = _maybe_orchestrate(text, []) if text else []
             return ChatResult(ok=True, text=text, artifacts=artifacts)

@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from sard.rag.schemas import ScoreType
+from sard.rag.relevance import filter_relevant_evidence
 from sard.url_policy import is_safe_external_url, safe_external_url
 
 logger = logging.getLogger("sard.tools.cultural")
@@ -290,7 +291,11 @@ def rag_search(query: str, k: int = 6) -> list[dict[str, Any]]:
             continue
         if sc >= _CALIBRATED_THRESHOLD:
             filtered.append(r)
-    results = filtered
+    # A calibrated score only says that the text matched the index.  Apply the
+    # shared entity/region/mandate gate before any caller can treat it as
+    # verified evidence.  This is intentionally after channel fusion so Zvec,
+    # bundled, and local corpus results obey the same policy.
+    results = filter_relevant_evidence(query_str, filtered)
     results.sort(key=lambda x: x["score"], reverse=True)
     results = results[:k]
 
