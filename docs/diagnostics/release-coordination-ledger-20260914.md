@@ -120,12 +120,54 @@ Previous Codex coordinator hit its usage limit with the cultural worker
 
 ## Final release state
 
-- Release branch `herdr/release-integration-20260914` at `25035ca` + this
-  ledger commit; worktree clean; ahead of `origin/main` by 9 commits
-  (5 prior + 3 cultural + ledger).
-- Workstreams: Python CI repair accepted; Vercel repair accepted (modulo the
-  external auth blocker); cultural integration remediated, independently
-  reviewed PASS, integrated, validated.
+- Release branch `herdr/release-integration-20260914`; worktree clean.
+- Workstreams: Python CI repair accepted; Vercel repair accepted; cultural
+  integration remediated, independently reviewed PASS, integrated, validated.
 - Verdict: **READY WITH EXTERNAL BLOCKER** (authenticated Vercel
   build/deploy not performed; `next build` static generation environmentally
   blocked for local reproduction only).
+
+## Post-ledger CI signal and offline-serving fix (2026-09-15)
+
+- Pushed the branch to `origin/herdr/release-integration-20260914` and opened
+  PR #5 (`https://github.com/NBTON/Sard/pull/5`) with explicit user permission.
+- First CI run (34907623222): frontend SUCCESS, python FAILURE with 6 failed /
+  673 passed. Causes, all from CI running offline with zero model credentials:
+  - 2 new cultural SSE tests (no citations offline): the `ask()` early model
+    check bailed before the hybrid deterministic path;
+  - 2 persona-greeting e2e tests: server skipped hybrid for greetings and hit
+    the direct-model path;
+  - G10 fastpath test: deterministic block sat behind the model check;
+  - `/api/health` test: endpoint required `model_configured` for overall ok.
+- Fix commit `dbcc781` (cultural branch) / `4985ed4` (release), verified
+  locally both with creds (136 passed) and with creds stripped (8/8 of the
+  failing set pass):
+  - early model check now guards only the direct-model path; hybrid planner
+    and deterministic synthesis serve offline by design;
+  - server SSE always runs hybrid — the planner serves greetings
+    deterministically with byte-identical output online/offline;
+  - `_probe_inference` reports unknown (None) instead of failed when no model
+    is configured; `/health` overall ok means retrieval works and no probed
+    inference failed, with `model_configured` still disclosed. `/status`
+    degraded semantics unchanged. No test was weakened.
+- Note: `dbcc781` post-dates the independent PASS review (`f9e724a`); it is a
+  24-line behavioral fix verified by the full local suites (online + offline)
+  and by green CI below.
+- Second CI run (34908370107): **python SUCCESS, frontend SUCCESS**; PR checks
+  all green, branch MERGEABLE.
+- Vercel GitHub integration built the PR preview: **Ready**
+  (`https://sard-git-herdr-release-integration-20260914-nbtons-projects.vercel.app`,
+  deployment Ready 2026-09-14T23:21Z). This proves the real Vercel
+  build/function-discovery path that the earlier CLI-auth blocker had left
+  unverified.
+- Live preview API probes could NOT be performed: the deployment sits behind
+  the team's Vercel SSO protection (anonymous `/` and `/api/health` return
+  302 to `vercel.com/sso-api`), and bypassing that control is out of scope.
+  The owner can verify in one click while logged in.
+
+## Final release state (updated)
+
+- Release branch `herdr/release-integration-20260914` at `4985ed4` plus this
+  ledger update; worktree clean; PR #5 open with all checks green.
+- Verdict: **READY**. Merge PR #5 at will. Optional owner follow-ups: logged-in
+  preview API probe; production deploy.
