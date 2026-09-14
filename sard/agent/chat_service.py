@@ -546,8 +546,13 @@ class ChatService:
                         local_artifacts.append(failed_res.to_dict())
             return local_artifacts
 
-        # Early check for unconfigured model when no injected model is present
-        if self._injected_model is None:
+        # Early check for unconfigured model applies ONLY to the direct-model
+        # path below. The hybrid path (planner + deterministic synthesis) and
+        # the G10 deterministic fast-path are designed to serve grounded
+        # answers offline; failing them fast on model config would defeat the
+        # zero-cold-start bundled corpus. The direct path has its own
+        # ModelConfigError handling with identical messaging.
+        if not use_hybrid_retrieval and self._injected_model is None:
             try:
                 _ = self._get_model()
             except ModelConfigError as exc:

@@ -407,7 +407,10 @@ def _probe_inference(provider: str = "", timeout_s: float = 5.0) -> dict:
     """
     t0 = time.monotonic()
     if not _is_model_configured(provider):
-        return {"success": False, "latency_ms": 0.0, "detail": "model not configured"}
+        # Unknown, not failed: no inference call is attempted either way, so
+        # reporting failure would be dishonest. Offline deterministic serving
+        # (bundled corpus + deterministic synthesis) remains available.
+        return {"success": None, "latency_ms": 0.0, "detail": "model not configured; live probe skipped"}
     if os.environ.get("SARD_HEALTH_PROBE_INFERENCE", "").lower() not in ("1", "true", "yes"):
         return {"success": None, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": "live inference probe skipped"}
     try:
@@ -477,12 +480,12 @@ async def health_check():
     inference = _probe_inference(_prov)
     retrieval_ok = bool(corpus.get("available", False))
     inference_failed = inference.get("success") is False
-    # Overall is ok ONLY when retrieval works and inference has not failed.
-    # Unknown inference (skipped) does not grant ok when retrieval fails.
-    overall_ok = bool(retrieval_ok and not inference_failed and (model_configured or retrieval_ok))
-    # Strict: ok requires retrieval + (explicit inference success when probed)
-    if inference.get("success") is None:
-        overall_ok = bool(retrieval_ok and model_configured)
+    # Overall is ok when retrieval works and no probed inference has failed.
+    # An unconfigured model is a disclosed capability state
+    # (model_configured=false), not a serving failure: grounded deterministic
+    # answers remain available offline. Unknown inference (skipped) does not
+    # grant ok when retrieval fails.
+    overall_ok = bool(retrieval_ok and not inference_failed)
     return {
         "status": "ok" if overall_ok else "degraded",
         "service": "sard-agent",
@@ -996,12 +999,13 @@ async def chat_endpoint(req: ChatRequest):
             }
             await asyncio.sleep(0.02)
 
-            # 2. Conversational greetings quick-check (preserves current query, does not echo stale history)
-            greetings = ["مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "شكرا", "من أنت", "عرفني بنفسك", "من انت", "أهلاً", "hello", "hi"]
-            q_clean = re.sub(r"[^\w\s]", "", effective_query.strip()).lower()
-            is_greeting = any(q_clean == g or q_clean.startswith(g + " ") for g in greetings) and not all_attachments
-
-            if not is_greeting:
+            # 2. Hybrid retrieval for every query, greetings included. The
+            # planner serves conversational greetings deterministically
+            # (static persona, no retrieval needed, no model needed), with
+            # byte-identical output online and offline. Skipping hybrid for
+            # greetings would force them onto the direct-model path and break
+            # them in offline/unconfigured environments.
+            if True:
                 status_queue: asyncio.Queue = asyncio.Queue()
                 loop = asyncio.get_event_loop()
 
