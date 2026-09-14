@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from sard.agent.capability_routing import (
     classify_intent,
@@ -39,6 +39,7 @@ from sard.rag.relevance import (
     requires_medical_qualification,
     strong_product_grounding,
 )
+from sard.agent.proposals import CulturalProposalResult, build_cultural_proposal_result
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,12 @@ class ChatResult:
     citations: list[dict[str, str]] = field(default_factory=list)
     planner_result: Optional[PlannerResult] = None
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    proposal_result: CulturalProposalResult = field(default_factory=CulturalProposalResult)
+
+    @property
+    def proposals(self):
+        """Compatibility shorthand for consumers interested only in proposals."""
+        return self.proposal_result.proposals
 
 
 class ChatService:
@@ -247,11 +254,18 @@ class ChatService:
             update={
                 "evidence": keep,
                 "atoms": [atom for atom in result.chain.atoms if set(atom.source_ids) & kept_ids],
+                "score": "low",
+                "decision": "ask",
+                "missing": ["The synthesized answer was cleared because filtering removed evidence."],
             }
         )
         return result.model_copy(
             update={
                 "chain": chain,
+                # Never leave claims from removed evidence in a response. A
+                # subsequent caller emits an explicit uncertainty hedge.
+                "answer_ar": None,
+                "answer_en": None,
                 "visible_sources": [ev for ev in result.visible_sources if ev.source_id in kept_ids],
             }
         )
@@ -475,6 +489,7 @@ class ChatService:
             text_resp = ""
             decision = None
             plan_res = None
+            proposal_result = CulturalProposalResult()
 
             # 2. Run Retrieval & Provenance Planning
             try:
@@ -546,6 +561,14 @@ class ChatService:
                 citations = cultural_res.citations
                 # planner_result stays None on fallback, but citations/text are preserved
 
+            # Recommendations are derived only after current-turn factual
+            # citations have been validated. Mandate records are added as
+            # separate, inspectable citations only when a strong proposal is
+            # actually visible.
+            proposal_result, mandate_citations = build_cultural_proposal_result(user_query, citations)
+            if mandate_citations:
+                citations.extend(mandate_citations)
+
             # Empty output must be explicit hedge, not empty string
             if not text_resp or not text_resp.strip():
                 text_resp = _empty_hedge(user_query)
@@ -567,6 +590,7 @@ class ChatService:
                 citations=citations,
                 planner_result=plan_res,
                 artifacts=artifacts,
+                proposal_result=proposal_result,
             )
 
         # Direct conversation path — MUST also support artifact intent
@@ -586,10 +610,25 @@ class ChatService:
         try:
             system_prompt = _SYSTEM_PROMPT_EN if resolved_lang == "en" else _SYSTEM_PROMPT
             lc_messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
-            # The direct path is a failure/degraded fallback for factual
-            # cultural requests.  Client-provided history may belong to a
-            # different session or topic, so it must not become evidence or
-            # prompt context for the current turn.
+            # Restore only validated history from the explicitly identified
+            # session. It is prompt context, never current-turn evidence; the
+            # hybrid path above retrieves using user_query alone. Without a
+            # session ID, omit client history to prevent accidental leakage.
+            if session_id and messages:
+                prior_messages = list(messages)
+                if prior_messages and str(prior_messages[-1].get("content", "")).strip() == user_query:
+                    prior_messages = prior_messages[:-1]
+                for prior in prior_messages[-12:]:
+                    role = str(prior.get("role", "")).strip().lower()
+                    content = str(prior.get("content", "")).strip()
+                    # Never promote client-supplied system messages. The
+                    # server-owned cultural system prompt must remain first
+                    # and authoritative; history is context only.
+                    if role in {"user", "assistant"} and content:
+                        if role == "user":
+                            lc_messages.append(HumanMessage(content=content))
+                        elif role == "assistant":
+                            lc_messages.append(AIMessage(content=content))
             lc_messages.append(HumanMessage(content=user_query))
 
             future = _SHARED_EXECUTOR.submit(model.invoke, lc_messages)

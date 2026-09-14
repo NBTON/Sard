@@ -23,6 +23,7 @@ load_dotenv()
 
 from sard.rag.schemas import ScoreType
 from sard.rag.relevance import filter_relevant_evidence
+from sard.rag.relevance import expanded_query_terms, query_profile, relevance_details
 from sard.url_policy import is_safe_external_url, safe_external_url
 
 logger = logging.getLogger("sard.tools.cultural")
@@ -332,11 +333,15 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
         return t
 
     cleaned_terms = [_clean_token(t) for t in raw_terms if len(_clean_token(t)) >= 2 and _clean_token(t) not in stop_words]
-    terms = cleaned_terms or raw_terms
+    # Keep entity expansion shared with the bundled retriever.  The source
+    # corpus uses روبيان while users may ask for جمبري/قريدس; both must reach
+    # the same local evidence before the relevance gate runs.
+    terms = sorted(set(cleaned_terms) | set(expanded_query_terms(query))) or raw_terms
     if not terms:
         return []
 
     q_lower = query.lower()
+    query_topics = query_profile(query).topics
 
     # Geographical regions — full 13 Saudi administrative regions + key cities
     # Used for strict cross-region rejection to prevent Eastern pilot corpus leakage.
@@ -408,8 +413,8 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
                 or any(k in doc_text_lower for k in ["روبيان", "ربيان", "تجفيف"])
             )
 
-            is_springs_query = any(k in q_lower for k in ["ينابيع", "عين حارة", "عيون حارة", "عين الحارة", "عيون الأحساء", "عيون الاحساء", "مياه حارة", "مياه كبريتية", "springs", "استشفاء"])
-            is_shrimp_query = any(k in q_lower for k in ["روبيان", "ربيان", "تجفيف الروبيان", "تجفيف الربيان", "الروبيان المجفف", "الربيان المجفف", "تاروت", "shrimp"])
+            is_springs_query = "al_ahsa_springs" in query_topics
+            is_shrimp_query = "shrimp_drying" in query_topics
 
             if is_springs_doc and not is_springs_query:
                 continue
@@ -420,6 +425,23 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
             matches = sum(1 for term in terms if term in content_clean)
             if matches == 0:
                 continue
+
+            # A recognized topic match is a strong lexical signal even when
+            # the paraphrase shares few surface words with the source.  The
+            # final shared gate still decides whether the candidate is safe.
+            probe = {
+                "title": title,
+                "chunk": text,
+                "source": source_name,
+                "metadata": {
+                    "topic": topic_str,
+                    "sector": meta_json.get("sector", ""),
+                    "region": meta_json.get("region", ""),
+                    "region_code": meta_json.get("region_code", ""),
+                },
+            }
+            if query_topics and relevance_details(query, probe)["accepted"]:
+                matches = max(matches, min(len(terms), 3))
 
             match_ratio = matches / max(len(terms), 1)
             score = min(0.95, match_ratio * 0.70 + (0.25 if match_ratio >= 0.5 else 0.10))

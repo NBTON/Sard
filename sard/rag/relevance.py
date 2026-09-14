@@ -76,9 +76,13 @@ _REGION_ALIASES: dict[str, tuple[str, ...]] = {
         "المنطقة الشرقية", "الشرقية", "الأحساء", "الاحساء", "الهفوف", "القطيف",
         "تاروت", "الدمام", "الظهران", "الخبر", "eastern province", "al-ahsa", "qatif",
     ),
-    "south": (
-        "الجنوب", "عسير", "جازان", "نجران", "أبها", "ابها", "فيفاء", "asir", "jazan", "najran", "southern",
-    ),
+    # Keep the southern cluster and its provinces as separate keys.  The
+    # broad ``south`` key is compatible with any province, while an explicit
+    # Jazan/Najran/Asir query is not compatible with another province.
+    "south": ("الجنوب", "جنوب المملكة", "southern", "south"),
+    "asir": ("عسير", "عسيري", "أبها", "ابها", "رجال ألمع", "فيفاء", "asir"),
+    "jazan": ("جازان", "جيزان", "فرسان", "صبيا", "أبو عريش", "صامطة", "jazan"),
+    "najran": ("نجران", "نجراني", "najran"),
     "najd": ("نجد", "الرياض", "الدرعية", "القصيم", "طريف", "najd", "riyadh", "diriyah"),
     "hijaz": ("الحجاز", "مكة", "جدة", "المدينة", "الطائف", "العلا", "hijaz", "jeddah", "alula"),
     "north": ("حائل", "تبوك", "الجوف", "عرعر", "hail", "tabuk", "jouf"),
@@ -102,6 +106,19 @@ class CulturalQueryProfile:
     regions: frozenset[str]
     sectors: frozenset[str]
     terms: frozenset[str]
+
+
+_REGION_GROUPS: dict[str, frozenset[str]] = {
+    "south": frozenset({"south", "asir", "jazan", "najran"}),
+}
+
+# These terms identify coffee itself.  Generic hospitality/majlis wording is
+# deliberately not enough: otherwise a municipal-council question or an
+# unrelated tourism/craft page can be promoted to coffee evidence.
+_COFFEE_STRONG_ALIASES = (
+    "القهوة", "قهوة", "دلة", "فنجان", "هيل", "بن", "صب القهوة", "صبة الحشمة",
+    "saudi coffee", "arabic coffee",
+)
 
 
 def _norm(value: Any) -> str:
@@ -144,12 +161,42 @@ def query_profile(query: str) -> CulturalQueryProfile:
     ):
         topics.add("southern_bread")
 
+    # مجلس/ضيافة/آداب are sector hints, not a coffee entity.  A coffee topic
+    # requires at least one coffee-specific lexeme in the current text.
+    if "saudi_coffee_majlis" in topics and not any(
+        _contains(query, alias) for alias in _COFFEE_STRONG_ALIASES
+    ):
+        topics.remove("saudi_coffee_majlis")
+
     return CulturalQueryProfile(
         topics=frozenset(topics),
         regions=frozenset(regions),
         sectors=frozenset(sectors),
         terms=frozenset(_tokens(query)),
     )
+
+
+def expanded_query_terms(query: str) -> frozenset[str]:
+    """Return shared lexical terms for bundled and local retrieval.
+
+    The expansion is derived from the current query's recognized aliases; it
+    does not add a different topic.  In particular, جمبري expands to the
+    documented روبيان/ربيان spellings so the local corpus and bundled index
+    use the same Arabic entity normalization.
+    """
+
+    profile = query_profile(query)
+    terms = set(profile.terms)
+    for topic in profile.topics:
+        for alias in _TOPIC_ALIASES.get(topic, ()):
+            terms.update(_tokens(alias))
+    for region in profile.regions:
+        for alias in _REGION_ALIASES.get(region, ()):
+            terms.update(_tokens(alias))
+    for sector in profile.sectors:
+        for alias in _SECTOR_ALIASES.get(sector, ()):
+            terms.update(_tokens(alias))
+    return frozenset(terms)
 
 
 def _document_text(hit: Mapping[str, Any]) -> str:
@@ -190,7 +237,60 @@ def _explicit_region_keys(hit: Mapping[str, Any]) -> frozenset[str]:
         str(hit.get(key) or metadata.get(key) or "")
         for key in ("region", "region_code", "culture")
     )
-    return _keys_for_aliases(region_text, _REGION_ALIASES)
+    # Include title/topic/content as a fallback for sparse metadata.  This is
+    # needed for exact province isolation when an Asir source is labelled only
+    # as a southern-bread document.
+    return _keys_for_aliases(f"{region_text} {_document_text(hit)}", _REGION_ALIASES)
+
+
+def _regions_compatible(query_regions: frozenset[str], evidence_regions: frozenset[str]) -> bool:
+    q_regions = query_regions - {"national"}
+    d_regions = evidence_regions - {"national"}
+    if not q_regions or not d_regions:
+        return True
+    southern_provinces = frozenset({"asir", "jazan", "najran"})
+    explicit_q_provinces = q_regions & southern_provinces
+    if explicit_q_provinces:
+        # A broad southern label must not make an Asir document answer a
+        # Jazan/Najran question.  Require the same explicit province in the
+        # evidence metadata/text.
+        return bool(explicit_q_provinces & d_regions)
+    for q_region in q_regions:
+        for d_region in d_regions:
+            if q_region == d_region:
+                return True
+            if d_region in _REGION_GROUPS.get(q_region, frozenset()):
+                return True
+            if q_region in _REGION_GROUPS.get(d_region, frozenset()):
+                return True
+    return False
+
+
+def _regions_for_matched_topics(
+    profile: CulturalQueryProfile,
+    matched_topics: frozenset[str],
+) -> frozenset[str]:
+    """Select regional constraints belonging to the matched topic.
+
+    Combined requests can mention Eastern springs/shrimp and an Asir bread
+    topic in the same turn. Applying every query region to every document
+    would incorrectly reject valid independent evidence. Province isolation
+    remains strict within the southern-bread topic.
+    """
+
+    if not profile.regions:
+        return frozenset()
+    if len(profile.topics) == 1:
+        return profile.regions
+    topic_region_keys = {
+        "shrimp_drying": frozenset({"eastern"}),
+        "al_ahsa_springs": frozenset({"eastern"}),
+        "southern_bread": frozenset({"south", "asir", "jazan", "najran"}),
+    }
+    selected: set[str] = set()
+    for topic in matched_topics:
+        selected.update(profile.regions & topic_region_keys.get(topic, frozenset()))
+    return frozenset(selected)
 
 
 def relevance_details(query: str, hit: Mapping[str, Any]) -> dict[str, Any]:
@@ -214,9 +314,9 @@ def relevance_details(query: str, hit: Mapping[str, Any]) -> dict[str, Any]:
     )) if q.topics else frozenset()
     sector_conflict = bool(explicit_sector and allowed_sectors and explicit_sector not in allowed_sectors)
 
-    q_regions = q.regions - {"national"}
-    d_regions = _explicit_region_keys(hit) - {"national"}
-    region_conflict = bool(q_regions and d_regions and not (q_regions & d_regions))
+    d_regions = _explicit_region_keys(hit)
+    matched_region_query = _regions_for_matched_topics(q, matched_topics)
+    region_conflict = bool(d_regions and not _regions_compatible(matched_region_query, d_regions))
 
     if q.topics:
         topic_match = bool(matched_topics)

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from sard.rag.schemas import ScoreType
-from sard.rag.relevance import relevance_details
+from sard.rag.relevance import expanded_query_terms, relevance_details
 
 logger = logging.getLogger("sard.rag.bundled")
 
@@ -112,6 +112,15 @@ class BundledHybridRetriever:
             for w in raw_words
             if len(normalize_token(w)) >= 2 and normalize_token(w) not in _STOP_WORDS
         ]
+        # Use the same Arabic entity expansion as the local corpus scanner.
+        # This makes جمبري/روبيان and unseen safe paraphrases share one
+        # retrieval vocabulary without adding a different cultural topic.
+        q_tokens.extend(
+            normalize_token(term)
+            for term in expanded_query_terms(query)
+            if len(normalize_token(term)) >= 2
+        )
+        q_tokens = list(dict.fromkeys(q_tokens))
         if not q_tokens:
             q_tokens = [normalize_token(w) for w in raw_words if len(normalize_token(w)) >= 2]
         if not q_tokens:
