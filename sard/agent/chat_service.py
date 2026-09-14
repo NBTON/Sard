@@ -51,6 +51,65 @@ _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="sard-chat"
 )
 
+_HISTORY_TURNS = ("user", "assistant")
+_MAX_HISTORY_TURNS = 12
+
+
+def extract_session_history_turns(
+    messages: Optional[Sequence[dict]],
+    current_query: str,
+    session_id: Optional[str],
+    limit: int = _MAX_HISTORY_TURNS,
+) -> list[dict[str, str]]:
+    """Return validated same-session history turns for prompt context.
+
+    Only bounded, non-empty prior ``user``/``assistant`` turns are kept.
+    Client-provided ``role="system"`` messages are NEVER promoted: the
+    server-owned cultural system prompt stays first and authoritative.
+    Without an explicit ``session_id``, history is omitted entirely to
+    prevent cross-session leakage. The trailing duplicate of the current
+    query is dropped so it is not repeated. History is prompt context —
+    never current-turn evidence.
+    """
+
+    if not session_id or not messages:
+        return []
+    prior = list(messages)
+    if prior and str(prior[-1].get("content", "")).strip() == (current_query or "").strip():
+        prior = prior[:-1]
+    turns: list[dict[str, str]] = []
+    for item in prior[-limit:]:
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role in _HISTORY_TURNS and content:
+            turns.append({"role": role, "content": content})
+    return turns
+
+
+def resolve_followup_retrieval_query(
+    user_query: str,
+    history_turns: list[dict[str, str]],
+) -> str:
+    """Resolve an elliptical same-session follow-up to a retrievable query.
+
+    When the current query carries no recognized topic (e.g. ``وماذا عن
+    طريقة تقديمها؟``), the most recent prior user turn supplies the
+    antecedent for *retrieval scoping only*. Retrieved evidence is still
+    validated as current-turn evidence; history itself is never cited.
+    Queries that already carry a topic are returned unchanged.
+    """
+
+    from sard.rag.relevance import query_profile
+
+    if query_profile(user_query).topics:
+        return user_query
+    for turn in reversed(history_turns):
+        if turn["role"] == "user":
+            antecedent = turn["content"].strip()
+            if antecedent:
+                return f"{antecedent}\n{user_query}"
+    return user_query
+
 
 @dataclass(frozen=True)
 class ChatResult:
@@ -190,10 +249,16 @@ class ChatService:
         """Remove planner evidence that does not match the current entity/mandate.
 
         The planner owns the classification and provenance stages, but its
-        legacy retriever can be replaced by a test or external boundary.  A
-        final agent-side check keeps an unrelated Fashion/Crafts or regional
-        record from becoming a citation or a generated answer in that case.
+        retriever can be replaced by a test or external boundary, and live web
+        hits bypass the curated index. A final agent-side check keeps an
+        unrelated Fashion/Crafts or regional record from becoming a citation.
+        When every requested topic retains supporting evidence, the already
+        generated answer is kept and only the disallowed sources are trimmed;
+        when a topic loses all support, the synthesis is cleared so no removed
+        evidence survives in prose and the caller emits an explicit hedge.
         """
+
+        from sard.rag.relevance import query_profile
 
         evidence = list(result.chain.evidence or [])
         if not evidence:
@@ -227,11 +292,8 @@ class ChatService:
                 }
             )
 
-        keep = [
-            ev
-            for ev, candidate in zip(evidence, candidates)
-            if relevance_details(query, candidate)["accepted"]
-        ]
+        decisions = [relevance_details(query, candidate) for candidate in candidates]
+        keep = [ev for ev, decision in zip(evidence, decisions) if decision["accepted"]]
         if len(keep) == len(evidence):
             return result
 
@@ -249,23 +311,46 @@ class ChatService:
                 update={"chain": chain, "answer_ar": None, "answer_en": None, "visible_sources": []}
             )
 
+        # Per-topic coverage: every requested topic must retain at least one
+        # supporting evidence record, otherwise claims from the removed
+        # evidence may linger in the generated prose.
+        required_topics = set(query_profile(query).topics)
+        covered_topics: set[str] = set()
+        for decision in decisions:
+            if decision["accepted"]:
+                covered_topics.update(decision.get("matched_topics") or [])
+        if required_topics and not required_topics <= covered_topics:
+            kept_ids = {ev.source_id for ev in keep}
+            chain = result.chain.model_copy(
+                update={
+                    "evidence": keep,
+                    "atoms": [atom for atom in result.chain.atoms if set(atom.source_ids) & kept_ids],
+                    "score": "low",
+                    "decision": "ask",
+                    "missing": ["The synthesized answer was cleared because filtering removed evidence."],
+                }
+            )
+            return result.model_copy(
+                update={
+                    "chain": chain,
+                    # Never leave claims from removed evidence in a response. A
+                    # subsequent caller emits an explicit uncertainty hedge.
+                    "answer_ar": None,
+                    "answer_en": None,
+                    "visible_sources": [ev for ev in result.visible_sources if ev.source_id in kept_ids],
+                }
+            )
+
         kept_ids = {ev.source_id for ev in keep}
         chain = result.chain.model_copy(
             update={
                 "evidence": keep,
                 "atoms": [atom for atom in result.chain.atoms if set(atom.source_ids) & kept_ids],
-                "score": "low",
-                "decision": "ask",
-                "missing": ["The synthesized answer was cleared because filtering removed evidence."],
             }
         )
         return result.model_copy(
             update={
                 "chain": chain,
-                # Never leave claims from removed evidence in a response. A
-                # subsequent caller emits an explicit uncertainty hedge.
-                "answer_ar": None,
-                "answer_en": None,
                 "visible_sources": [ev for ev in result.visible_sources if ev.source_id in kept_ids],
             }
         )
@@ -491,17 +576,23 @@ class ChatService:
             plan_res = None
             proposal_result = CulturalProposalResult()
 
-            # 2. Run Retrieval & Provenance Planning
+            # 2. Run Retrieval & Provenance Planning. An elliptical
+            # same-session follow-up (e.g. "وماذا عن طريقة تقديمها؟") carries
+            # no topic of its own; the most recent prior user turn supplies
+            # the antecedent for retrieval scoping only. Retrieved evidence is
+            # still validated as current-turn evidence; history is never cited.
+            history_turns = extract_session_history_turns(messages, user_query, session_id)
+            retrieval_query = resolve_followup_retrieval_query(user_query, history_turns)
             try:
                 plan_res = self.ask_isnad(
-                    user_query=user_query,
+                    user_query=retrieval_query,
                     session_id=session_id,
                     mock_multimodal_files=mock_multimodal_files,
                     status_callback=status_callback,
                     lang=resolved_lang,
                     uploaded_files=uploaded_files,
                 )
-                plan_res = self._filter_planner_result(user_query, plan_res)
+                plan_res = self._filter_planner_result(retrieval_query, plan_res)
                 for ev in plan_res.visible_sources:
                     raw: dict[str, Any] = {}
                     memory = getattr(self.planner, "memory", None)
@@ -555,7 +646,7 @@ class ChatService:
                     )
                     return ChatResult(ok=False, error_message=msg, artifacts=[])
                 logger.warning("Isnād planner execution encountered exception: %s. Falling back to cultural router.", exc)
-                cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files, lang=resolved_lang, uploaded_files=uploaded_files)
+                cultural_res = self.ask_cultural(retrieval_query, mock_multimodal_files=mock_multimodal_files, lang=resolved_lang, uploaded_files=uploaded_files)
                 text_resp = sanitize_cultural_output(cultural_res.answer_text)
                 decision = cultural_res.decision
                 citations = cultural_res.citations
@@ -610,25 +701,14 @@ class ChatService:
         try:
             system_prompt = _SYSTEM_PROMPT_EN if resolved_lang == "en" else _SYSTEM_PROMPT
             lc_messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
-            # Restore only validated history from the explicitly identified
-            # session. It is prompt context, never current-turn evidence; the
-            # hybrid path above retrieves using user_query alone. Without a
-            # session ID, omit client history to prevent accidental leakage.
-            if session_id and messages:
-                prior_messages = list(messages)
-                if prior_messages and str(prior_messages[-1].get("content", "")).strip() == user_query:
-                    prior_messages = prior_messages[:-1]
-                for prior in prior_messages[-12:]:
-                    role = str(prior.get("role", "")).strip().lower()
-                    content = str(prior.get("content", "")).strip()
-                    # Never promote client-supplied system messages. The
-                    # server-owned cultural system prompt must remain first
-                    # and authoritative; history is context only.
-                    if role in {"user", "assistant"} and content:
-                        if role == "user":
-                            lc_messages.append(HumanMessage(content=content))
-                        elif role == "assistant":
-                            lc_messages.append(AIMessage(content=content))
+            # Restore only validated same-session history. It is prompt
+            # context, never current-turn evidence; without a session ID,
+            # client history is omitted to prevent cross-session leakage.
+            for prior in extract_session_history_turns(messages, user_query, session_id):
+                if prior["role"] == "user":
+                    lc_messages.append(HumanMessage(content=prior["content"]))
+                else:
+                    lc_messages.append(AIMessage(content=prior["content"]))
             lc_messages.append(HumanMessage(content=user_query))
 
             future = _SHARED_EXECUTOR.submit(model.invoke, lc_messages)

@@ -51,18 +51,22 @@ class CulturalProposalResult(BaseModel):
 
 
 MANDATE_POLICIES: dict[str, dict[str, Any]] = {
+    # Every mandate requires its *distinguishing* capabilities to be evidenced.
+    # Generic dimensions such as ``documented_practice`` alone never qualify:
+    # they must accompany the mandate's primary capability (e.g. culinary for
+    # the Culinary Commission, place+visitor for Tourism, museum for Museums).
     "culinary": {
         "organization": "هيئة فنون الطهي",
         "role": "صون وتوثيق وتطوير فنون الطهي والمنتجات الغذائية المحلية",
         "dimensions": ("culinary", "documented_practice"),
-        "required_all": ("culinary",),
+        "required_all": ("culinary", "documented_practice"),
         "product_dimension": "culinary",
     },
     "heritage": {
         "organization": "هيئة التراث",
         "role": "حماية وتوثيق وتنمية عناصر التراث المادي وغير المادي",
         "dimensions": ("history", "documented_practice"),
-        "required_any": ("history", "documented_practice"),
+        "required_all": ("history", "documented_practice"),
         "product_dimension": "documented_practice",
     },
     "tourism": {
@@ -90,21 +94,21 @@ MANDATE_POLICIES: dict[str, dict[str, Any]] = {
         "organization": "هيئة المتاحف",
         "role": "حفظ المقتنيات وإتاحة السرد المتحفي والتجارب التعليمية",
         "dimensions": ("museum", "history", "documented_practice"),
-        "required_any": ("museum", "history", "documented_practice", "tools_materials"),
+        "required_all": ("museum",),
         "product_dimension": "museum",
     },
     "film": {
         "organization": "هيئة الأفلام",
         "role": "دعم الإنتاج السينمائي وتطوير المحتوى والصناعة الفيلمية",
         "dimensions": ("narrative", "documented_practice"),
-        "required_any": ("narrative", "documented_practice"),
+        "required_all": ("narrative",),
         "product_dimension": "narrative",
     },
     "literature": {
         "organization": "هيئة الأدب والنشر والترجمة",
         "role": "دعم الأدب والنشر والترجمة وإتاحة المحتوى الثقافي",
         "dimensions": ("narrative", "oral_history", "documented_practice"),
-        "required_any": ("narrative", "oral_history", "history"),
+        "required_any": ("narrative", "oral_history"),
         "product_dimension": "narrative",
     },
 }
@@ -338,7 +342,6 @@ def build_cultural_proposal_result(
     suppresses other topics in the same request.
     """
 
-    profile = query_profile(query)
     topic_citations = _topic_citations(query, citations)
     all_topic_citations = [
         citation
@@ -387,11 +390,16 @@ def build_cultural_proposal_result(
             supported_dimensions = evidence_dimensions & mandate_dimensions & record_dimensions
             if not supported_dimensions:
                 continue
+            # Required capabilities must be evidenced *within* the mandate's
+            # authoritative capability set — not merely present somewhere in
+            # the evidence text. A generic documented-practice signal alone
+            # can never satisfy a mandate whose distinguishing capability
+            # (e.g. museum, narrative, culinary) is absent.
             required_all = frozenset(policy.get("required_all", ()))
             required_any = frozenset(policy.get("required_any", ()))
-            if required_all and not required_all <= evidence_dimensions:
+            if required_all and not required_all <= supported_dimensions:
                 continue
-            if required_any and not (required_any & evidence_dimensions):
+            if required_any and not (required_any & supported_dimensions):
                 continue
             # Strong means the evidence describes a capability the selected
             # mandate actually covers, with a material query/evidence signal.

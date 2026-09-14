@@ -335,8 +335,12 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
     cleaned_terms = [_clean_token(t) for t in raw_terms if len(_clean_token(t)) >= 2 and _clean_token(t) not in stop_words]
     # Keep entity expansion shared with the bundled retriever.  The source
     # corpus uses روبيان while users may ask for جمبري/قريدس; both must reach
-    # the same local evidence before the relevance gate runs.
-    terms = sorted(set(cleaned_terms) | set(expanded_query_terms(query))) or raw_terms
+    # the same local evidence before the relevance gate runs.  Expansion terms
+    # are recall aids only: the match ratio denominator stays on the user's
+    # own base terms so paraphrases are not penalized for a larger alias set.
+    base_terms = cleaned_terms or raw_terms
+    recall_terms = sorted(set(base_terms) | set(expanded_query_terms(query)))
+    terms = recall_terms
     if not terms:
         return []
 
@@ -349,7 +353,7 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
         "riyadh": ["رياض", "الرياض", "درعية", "الدرعية", "خرج", "الخرج", "وشم", "سدير", "مجمعة", "دوادمي", "نجد"],
         "makkah": ["مكة", "مكة المكرمة", "جدة", "الطائف", "طائف", "القنفذة", "رابغ", "حجاز"],
         "madinah": ["المدينة", "مدينة منورة", "ينبع", "العلا", "علا", "بدر", "خيبر"],
-        "eastern": ["شرقية", "الشرقية", "أحساء", "احساء", "هفوف", "قطيف", "تاروت", "دمام", "ظهران", "خبر", "سيهات", "جبيل", "خفجي", "نعيرية", "بقيق"],
+        "eastern": ["شرقية", "الشرقية", "أحساء", "احساء", "هفوف", "قطيف", "تاروت", "دمام", "ظهران", "خبر", "سيهات", "جبيل", "خفجي", "نعيرية", "بقيق", "ساحل", "الساحل", "سواحل"],
         "asir": ["عسير", "أبها", "ابها", "خميس مشيط", "سودة", "رجال ألمع", "المع", "محايل", "تنومة", "ظهران الجنوب"],
         "jazan": ["جازان", "جيزان", "فرسان", "صبيا", "أبو عريش", "صامطة"],
         "najran": ["نجران"],
@@ -441,9 +445,9 @@ def _scan_local_cultural_corpus(query: str, k: int = 6) -> list[dict[str, Any]]:
                 },
             }
             if query_topics and relevance_details(query, probe)["accepted"]:
-                matches = max(matches, min(len(terms), 3))
+                matches = max(matches, min(len(base_terms), 3))
 
-            match_ratio = matches / max(len(terms), 1)
+            match_ratio = matches / max(len(base_terms), 1)
             score = min(0.95, match_ratio * 0.70 + (0.25 if match_ratio >= 0.5 else 0.10))
 
             if score < _CALIBRATED_THRESHOLD:

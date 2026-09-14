@@ -969,6 +969,7 @@ async def chat_endpoint(req: ChatRequest):
         run_id = f"chat-{uuid.uuid4().hex[:10]}"
         citations_sent: list[dict[str, Any]] = []
         artifacts_sent: list[dict[str, Any]] = []
+        proposals: list[Any] = []
         full_response_text = ""
         verified = False
         # Early intent classification so fallback path knows artifact expectation and can surface failed artifacts
@@ -1156,6 +1157,28 @@ async def chat_endpoint(req: ChatRequest):
                                 "data": json.dumps({
                                     "citations": citations_sent,
                                     "count": len(citations_sent)
+                                }, ensure_ascii=False)
+                            }
+                        # Organization/product proposals are a separate typed
+                        # result derived only from validated citations. They
+                        # are emitted as their own event so clients can render
+                        # factual answers and institutional recommendations
+                        # independently. Absence of the event means no strong
+                        # proposal was supported (fail closed).
+                        try:
+                            proposal_payload = getattr(hybrid_chat_res, "proposal_result", None)
+                            proposals = list(getattr(proposal_payload, "proposals", None) or [])
+                        except Exception:
+                            proposals = []
+                        if proposals:
+                            yield {
+                                "event": "proposals",
+                                "data": json.dumps({
+                                    "proposals": [
+                                        p.model_dump() if hasattr(p, "model_dump") else dict(p)
+                                        for p in proposals
+                                    ],
+                                    "count": len(proposals),
                                 }, ensure_ascii=False)
                             }
                         # Capture text if ok, otherwise keep empty to trigger fallback path below
@@ -1369,6 +1392,7 @@ async def chat_endpoint(req: ChatRequest):
                             "total_ms": round(total_time_ms, 1),
                         },
                         "artifacts_count": len(artifacts_sent),
+                        "proposals_count": len(proposals),
                         "session_id": session_id_out,
                         "run_id": run_id,
                     }, ensure_ascii=False)

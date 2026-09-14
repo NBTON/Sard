@@ -74,7 +74,8 @@ _TOPIC_SECTORS: dict[str, frozenset[str]] = {
 _REGION_ALIASES: dict[str, tuple[str, ...]] = {
     "eastern": (
         "المنطقة الشرقية", "الشرقية", "الأحساء", "الاحساء", "الهفوف", "القطيف",
-        "تاروت", "الدمام", "الظهران", "الخبر", "eastern province", "al-ahsa", "qatif",
+        "تاروت", "الدمام", "الظهران", "الخبر", "الساحل الشرقي", "ساحل", "الساحل",
+        "ساحلي", "الساحلية", "سواحل", "eastern province", "al-ahsa", "qatif",
     ),
     # Keep the southern cluster and its provinces as separate keys.  The
     # broad ``south`` key is compatible with any province, while an explicit
@@ -125,11 +126,23 @@ def _norm(value: Any) -> str:
     return normalize_arabic(str(value or "")).casefold().strip()
 
 
+# Ultra-short aliases must never match as substrings of longer words: بن
+# (coffee beans) appears inside بنفحاته (fragrance), البنت (girl), البنوك
+# (banks); لبن alone is yogurt, not coffee. These match only as standalone
+# tokens with an optional leading conjunction/preposition/article.
+_STRICT_TOKEN_ALIASES: dict[str, str] = {
+    "بن": r"(?<![\u0600-\u06FF])و?(?:[بف]|لل)?(?:ال)?بن(?![\u0600-\u06FF])",
+}
+
+
 def _contains(text: str, phrase: str) -> bool:
     text_n = _norm(text)
     phrase_n = _norm(phrase)
     if not text_n or not phrase_n:
         return False
+    strict = _STRICT_TOKEN_ALIASES.get(phrase_n)
+    if strict is not None:
+        return bool(re.search(strict, text_n))
     if re.search(r"[a-z]", phrase_n):
         return bool(re.search(rf"(?<![a-z]){re.escape(phrase_n)}(?![a-z])", text_n))
     return phrase_n in text_n
@@ -237,10 +250,10 @@ def _explicit_region_keys(hit: Mapping[str, Any]) -> frozenset[str]:
         str(hit.get(key) or metadata.get(key) or "")
         for key in ("region", "region_code", "culture")
     )
-    # Include title/topic/content as a fallback for sparse metadata.  This is
-    # needed for exact province isolation when an Asir source is labelled only
-    # as a southern-bread document.
-    return _keys_for_aliases(f"{region_text} {_document_text(hit)}", _REGION_ALIASES)
+    # Metadata only: body text often mentions several regions illustratively
+    # (e.g. a national coffee record naming Najd/Hijaz/Eastern/South), which
+    # must not be mistaken for the record's own regional scope.
+    return _keys_for_aliases(region_text, _REGION_ALIASES)
 
 
 def _regions_compatible(query_regions: frozenset[str], evidence_regions: frozenset[str]) -> bool:
@@ -282,14 +295,30 @@ def _regions_for_matched_topics(
         return frozenset()
     if len(profile.topics) == 1:
         return profile.regions
-    topic_region_keys = {
+    # Per-topic regional scope for combined requests. A mapped empty scope
+    # (None) marks a national practice such as coffee hospitality: it imposes
+    # no scoped constraint in multi-topic requests. Single-topic requests
+    # still enforce the full regional constraint via the branch above.
+    # Unmapped (unseen) topics fail closed on the full regional constraint.
+    topic_region_keys: dict[str, frozenset[str] | None] = {
         "shrimp_drying": frozenset({"eastern"}),
         "al_ahsa_springs": frozenset({"eastern"}),
         "southern_bread": frozenset({"south", "asir", "jazan", "najran"}),
+        "saudi_coffee_majlis": None,
+        "known_food": None,
+        "fashion_craft": None,
     }
     selected: set[str] = set()
+    scoped = False
     for topic in matched_topics:
-        selected.update(profile.regions & topic_region_keys.get(topic, frozenset()))
+        if topic not in topic_region_keys:
+            continue
+        scoped = True
+        keys = topic_region_keys[topic]
+        if keys is not None:
+            selected.update(profile.regions & keys)
+    if not scoped:
+        return profile.regions
     return frozenset(selected)
 
 
@@ -322,11 +351,16 @@ def relevance_details(query: str, hit: Mapping[str, Any]) -> dict[str, Any]:
         topic_match = bool(matched_topics)
         # Sparse test/federated hits may not carry topic metadata; an explicit
         # entity in the excerpt is still enough to keep them, but generic
-        # source names are never enough.
-        anchor_match = any(
-            any(_contains(doc_text, alias) for alias in _TOPIC_ALIASES.get(topic, ()))
-            for topic in q.topics
-        )
+        # source names are never enough. Hospitality wording (مجلس/ضيافة)
+        # alone is not a coffee anchor: coffee requires a coffee-specific
+        # lexeme, mirroring the query-side guard above.
+        def _anchor(topic: str) -> bool:
+            aliases = _TOPIC_ALIASES.get(topic, ())
+            if topic == "saudi_coffee_majlis":
+                aliases = _COFFEE_STRONG_ALIASES
+            return any(_contains(doc_text, alias) for alias in aliases)
+
+        anchor_match = any(_anchor(topic) for topic in q.topics)
         accepted = not topic_conflict and not sector_conflict and not region_conflict and (topic_match or anchor_match)
         if not topic_match and not anchor_match and overlap < 2:
             accepted = False

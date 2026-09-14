@@ -672,8 +672,44 @@ class CulturalRouter:
                 desc = mm.description
                 return f"نتائج التحليل الهندسي والمجسم ثلاثي الأبعاد ({mm.filename}):\n\n{desc}"
 
-        # Check if purely RAG-grounded
+        # Check if purely RAG-grounded.  A multi-topic request must not
+        # collapse to its top hit: emit one grounded section per requested
+        # topic that has verified evidence, each with its own source.
         if rag_res and not web_res:
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for item in rag_res:
+                item_meta = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+                matched = item_meta.get("matched_topics") or [str(item_meta.get("topic", ""))]
+                for topic_key in matched:
+                    groups.setdefault(str(topic_key), []).append(item)
+            if len(groups) > 1:
+                sections: list[str] = []
+                for topic_key in sorted(groups):
+                    top = groups[topic_key][0]
+                    meta = top.get("metadata", {})
+                    source_title = top.get("title") or top.get("source") or "سجلات التراث الوطني"
+                    chunk = (top.get("chunk") or top.get("text") or "")[:600]
+                    if is_arabic:
+                        sections.append(
+                            f"### {source_title}\n\n{chunk}\n\n"
+                            f"**المصدر المعتمد:** {source_title} ({meta.get('culture', 'التراث السعودي')})."
+                        )
+                    else:
+                        sections.append(
+                            f"### {source_title}\n\n{chunk}\n\n"
+                            f"**Documented source:** {source_title} ({meta.get('culture', 'Saudi heritage')})."
+                        )
+                if is_arabic:
+                    return (
+                        "استناداً إلى وثائق التراث المعتمدة:\n\n"
+                        + "\n\n".join(sections)
+                        + f"{medical_note}"
+                    )
+                return (
+                    "Based on documented cultural records:\n\n"
+                    + "\n\n".join(sections)
+                    + f"{medical_note}"
+                )
             top = rag_res[0]
             meta = top.get("metadata", {})
             source_title = top.get("title") or top.get("source") or "سجلات التراث الوطني"
