@@ -669,6 +669,10 @@ def load_precached_artifacts(cache_root: Path = DEMO_CACHE_ROOT) -> tuple[UIArti
             data = path.read_bytes()
         except (OSError, ValueError) as exc:
             raise DemoCacheUnavailable(f"packaged {artifact_type} file is unavailable") from exc
+        if artifact_type == "raw_text":
+            data = data.replace(b"\r\n", b"\n")
+        elif artifact_type == "calendar":
+            data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
         checksum = hashlib.sha256(data).hexdigest()
         if checksum != entry.get("sha256") or len(data) != entry.get("size_bytes"):
             raise DemoCacheUnavailable(f"packaged {artifact_type} integrity check failed")
