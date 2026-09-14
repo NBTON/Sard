@@ -124,6 +124,11 @@ _CREATION_VERB_RE = re.compile(
     r"(اكتب|إكتب|أعد|اعد|أعدّ|اعدّ|صدّر|صدر|تصدير|ولّد|ولد|توليد|نزّل|نزل|تحميل|صيغ|صغ|أنشئ|انشئ|أنشئ لي|اعطني|أعطني|أعطني ملف|اعطني ملف|صمم|جهز|حضّر|حضر|حوّل|حول|حول هذا|حوّل هذا|سوّي|سوي|اعمل|احتاج|أحتاج|أحتاج ملف|اريد|أريد|أريد ملف|write|export|download|create|make|generate|need|i need|give me|provide|want|build|design|convert|turn into|prepare|produce|حوّل هذا إلى|حول هذا إلى)",
     re.I,
 )
+_INTERACTIVE_ARTIFACT_SIGNAL_RE = re.compile(
+    r"(أنشئ|انشئ|صمم|جهز|حضّر|حضر|حوّل|حول|مخطط|محاكاة|simulator|flowchart|svg|"
+    r"create|generate|build|design|convert|turn into|export)",
+    re.I,
+)
 _FORMAT_QUESTION_RE = re.compile(
     r"(ما هو\s*(?:ملف\s*)?(?:pdf|docx|pptx|ics|svg|png|تقرير|عرض تقديمي|بوربوينت)|ما هي\s*(?:صيغة|مميزات|فوائد).*(?:pdf|docx|pptx)|what is\s*(?:a\s*)?(?:pdf|docx|pptx|ics|svg|png|presentation|report|powerpoint)|define\s*(?:pdf|docx|pptx)|explain\s*what\s*is\s*(?:pdf|pptx))",
     re.I,
@@ -388,6 +393,12 @@ def classify_intent(
     elif _ETIQUETTE_HINT.search(q):
         if is_format_question(q):
             domain_cap = Capability.SIMPLE_CONVERSATION
+        elif not (_INTERACTIVE_ARTIFACT_SIGNAL_RE.search(q) or req_formats):
+            # A factual coffee/majlis question is not an instruction to emit
+            # an SVG simulator.  Keep the etiquette lexeme as domain context,
+            # but require an explicit interactive/output signal before adding
+            # an artifact format.
+            domain_cap = Capability.SAUDI_CULTURAL_FACTUAL
         else:
             domain_cap = Capability.ETIQUETTE_SIMULATOR
             if "svg" not in req_formats:

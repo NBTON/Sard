@@ -104,7 +104,7 @@ export interface StreamChatOptions {
   onCitations?: (citations: Citation[]) => void;
   onDelta?: (deltaText: string) => void;
   onArtifacts?: (artifacts: Artifact[]) => void;
-  onDone?: (meta: { verified?: boolean; sources_count?: number; timings_ms?: { total_ms?: number }; updated_at?: string; artifacts_count?: number }) => void;
+  onDone?: (meta: { verified?: boolean; sources_count?: number; timings_ms?: { total_ms?: number }; updated_at?: string; artifacts_count?: number; session_id?: string; run_id?: string }) => void;
   onError?: (error: Error) => void;
 }
 

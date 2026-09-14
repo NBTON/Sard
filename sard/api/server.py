@@ -407,7 +407,10 @@ def _probe_inference(provider: str = "", timeout_s: float = 5.0) -> dict:
     """
     t0 = time.monotonic()
     if not _is_model_configured(provider):
-        return {"success": False, "latency_ms": 0.0, "detail": "model not configured"}
+        # Unknown, not failed: no inference call is attempted either way, so
+        # reporting failure would be dishonest. Offline deterministic serving
+        # (bundled corpus + deterministic synthesis) remains available.
+        return {"success": None, "latency_ms": 0.0, "detail": "model not configured; live probe skipped"}
     if os.environ.get("SARD_HEALTH_PROBE_INFERENCE", "").lower() not in ("1", "true", "yes"):
         return {"success": None, "latency_ms": round((time.monotonic() - t0) * 1000, 1), "detail": "live inference probe skipped"}
     try:
@@ -477,12 +480,12 @@ async def health_check():
     inference = _probe_inference(_prov)
     retrieval_ok = bool(corpus.get("available", False))
     inference_failed = inference.get("success") is False
-    # Overall is ok ONLY when retrieval works and inference has not failed.
-    # Unknown inference (skipped) does not grant ok when retrieval fails.
-    overall_ok = bool(retrieval_ok and not inference_failed and (model_configured or retrieval_ok))
-    # Strict: ok requires retrieval + (explicit inference success when probed)
-    if inference.get("success") is None:
-        overall_ok = bool(retrieval_ok and model_configured)
+    # Overall is ok when retrieval works and no probed inference has failed.
+    # An unconfigured model is a disclosed capability state
+    # (model_configured=false), not a serving failure: grounded deterministic
+    # answers remain available offline. Unknown inference (skipped) does not
+    # grant ok when retrieval fails.
+    overall_ok = bool(retrieval_ok and not inference_failed)
     return {
         "status": "ok" if overall_ok else "degraded",
         "service": "sard-agent",
@@ -969,6 +972,7 @@ async def chat_endpoint(req: ChatRequest):
         run_id = f"chat-{uuid.uuid4().hex[:10]}"
         citations_sent: list[dict[str, Any]] = []
         artifacts_sent: list[dict[str, Any]] = []
+        proposals: list[Any] = []
         full_response_text = ""
         verified = False
         # Early intent classification so fallback path knows artifact expectation and can surface failed artifacts
@@ -995,12 +999,13 @@ async def chat_endpoint(req: ChatRequest):
             }
             await asyncio.sleep(0.02)
 
-            # 2. Conversational greetings quick-check (preserves current query, does not echo stale history)
-            greetings = ["مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "شكرا", "من أنت", "عرفني بنفسك", "من انت", "أهلاً", "hello", "hi"]
-            q_clean = re.sub(r"[^\w\s]", "", effective_query.strip()).lower()
-            is_greeting = any(q_clean == g or q_clean.startswith(g + " ") for g in greetings) and not all_attachments
-
-            if not is_greeting:
+            # 2. Hybrid retrieval for every query, greetings included. The
+            # planner serves conversational greetings deterministically
+            # (static persona, no retrieval needed, no model needed), with
+            # byte-identical output online and offline. Skipping hybrid for
+            # greetings would force them onto the direct-model path and break
+            # them in offline/unconfigured environments.
+            if True:
                 status_queue: asyncio.Queue = asyncio.Queue()
                 loop = asyncio.get_event_loop()
 
@@ -1115,7 +1120,7 @@ async def chat_endpoint(req: ChatRequest):
                             def _has_valid_url(cits: Any) -> bool:
                                 try:
                                     for c in (cits or []):
-                                        u = str((c or {}).get("url", "") or "")
+                                        u = str((c or {}).get("url") or (c or {}).get("source_url") or "")
                                         p = _urlparse(u)
                                         if p.scheme in ("http", "https") and p.netloc:
                                             return True
@@ -1129,7 +1134,7 @@ async def chat_endpoint(req: ChatRequest):
                             )
                         # Extract citations (only validated HTTP(S); drop bare IDs)
                         for cit in (hybrid_chat_res.citations or []):
-                            raw_url = str(cit.get("url", "") or "")
+                            raw_url = str(cit.get("url") or cit.get("source_url") or "")
                             try:
                                 from urllib.parse import urlparse as _urlparse2
 
@@ -1139,8 +1144,11 @@ async def chat_endpoint(req: ChatRequest):
                                 valid = False
                             if not valid:
                                 continue
+                            citation_id = cit.get("citation_id") or cit.get("id") or cit.get("source_id") or ""
+                            if any(existing.get("citation_id") == citation_id for existing in citations_sent):
+                                continue
                             citations_sent.append({
-                                "citation_id": cit.get("id", ""),
+                                "citation_id": citation_id,
                                 "title": cit.get("title", ""),
                                 "source_name": cit.get("origin") or cit.get("id", ""),
                                 "source_url": raw_url,
@@ -1153,6 +1161,28 @@ async def chat_endpoint(req: ChatRequest):
                                 "data": json.dumps({
                                     "citations": citations_sent,
                                     "count": len(citations_sent)
+                                }, ensure_ascii=False)
+                            }
+                        # Organization/product proposals are a separate typed
+                        # result derived only from validated citations. They
+                        # are emitted as their own event so clients can render
+                        # factual answers and institutional recommendations
+                        # independently. Absence of the event means no strong
+                        # proposal was supported (fail closed).
+                        try:
+                            proposal_payload = getattr(hybrid_chat_res, "proposal_result", None)
+                            proposals = list(getattr(proposal_payload, "proposals", None) or [])
+                        except Exception:
+                            proposals = []
+                        if proposals:
+                            yield {
+                                "event": "proposals",
+                                "data": json.dumps({
+                                    "proposals": [
+                                        p.model_dump() if hasattr(p, "model_dump") else dict(p)
+                                        for p in proposals
+                                    ],
+                                    "count": len(proposals),
                                 }, ensure_ascii=False)
                             }
                         # Capture text if ok, otherwise keep empty to trigger fallback path below
@@ -1366,6 +1396,7 @@ async def chat_endpoint(req: ChatRequest):
                             "total_ms": round(total_time_ms, 1),
                         },
                         "artifacts_count": len(artifacts_sent),
+                        "proposals_count": len(proposals),
                         "session_id": session_id_out,
                         "run_id": run_id,
                     }, ensure_ascii=False)
@@ -1379,96 +1410,30 @@ async def chat_endpoint(req: ChatRequest):
 
 
 def _generate_cultural_fallback_answer(query: str, lang: str = "ar") -> str:
-    """Query-aware generic hedge — never injects shrimp/springs/Eastern/UNESCO canned articles as fallback.
+    """Return a transparent uncertainty hedge when grounded generation is unavailable.
 
-    Invariants:
-    - If query legitimately contains shrimp/springs terms, return that specific mini-fallback (still query-aware).
-    - Otherwise return explicit hedge in requested language mentioning Sard capabilities.
-    - Respects requested_formats at SSE layer: artifact failure is emitted as artifacts event, not as text substitution.
+    This path deliberately contains no topic-specific factual claims. Topic answers
+    must come from the grounded planner/router so citations and uncertainty stay
+    linked to the same evidence.
     """
-    q_norm = (query or "").lower().strip()
-    # Determine greeting language based on resolved lang
-    is_greeting = any(
-        q_norm == g or q_norm.startswith(g + " ")
-        for g in ["من أنت", "من انت", "عرفني بنفسك", "عرف بنفسك", "ما هو سرد", "مرحبا", "أهلا", "اهلا", "السلام عليكم", "صباح الخير", "مساء الخير", "هلا", "أهلاً", "hello", "hi", "who are you"]
-    )
-    if is_greeting:
-        if lang == "en":
-            return (
-                "Welcome! 🇸🇦\n\n"
-                "I am **Sard**, your intelligent cultural companion for Saudi heritage and civilization, "
-                "grounded in records of the **Saudi Ministry of Culture** and **King Abdulaziz Foundation**.\n\n"
-                "### How can I help you today?\n"
-                "1. **Regional heritage & identity** across the 13 Saudi regions.\n"
-                "2. **Eleven cultural sectors**: Heritage, Culinary Arts, Fashion, Literature, Music, Architecture, Museums, Visual Arts, Theater, Film, and Libraries.\n"
-                "3. **Interactive outputs**:\n"
-                "   - **Presentations (PowerPoint .pptx)**\n"
-                "   - **Recipe & craft cards (PDF)**\n"
-                "   - **Etiquette & hospitality simulators**\n"
-                "   - **Proverbs & dialects**\n"
-                "   - **Memoir booklets**\n"
-                "   - **Heritage calendars (.ics)**\n\n"
-                "Please ask a question or pick a topic to begin!"
-            )
-        return (
-            "أهلاً وسهلاً بك! 🇸🇦\n\n"
-            "أنا **سرد**، رفيقك الثقافي الذكي ومستشارك المعتمد لاستكشاف التراث والحضارة في المملكة العربية السعودية، "
-            "بمعارف موثقة مستندة إلى سجلات وهيئات **وزارة الثقافة السعودية** و**دارة الملك عبد العزيز**.\n\n"
-            "### 🏛️ كيف يمكنني مساعدتك اليوم؟\n"
-            "1. **المعارف والتراث الإقليمي**: استكشاف التراث والعمارة والأزياء والتقاليد عبر **مناطق المملكة الـ 13**.\n"
-            "2. **القطاعات الثقافية الـ 11**: التراث، فنون الطهي، الأزياء، الأدب، الموسيقى، العمارة، المتاحف، الفنون البصرية، المسرح، الأفلام، والمكتبات.\n"
-            "3. **المخرجات والأدوات التفاعلية**:\n"
-            "   - تصميم **عروض تقديمية (PowerPoint .pptx)** للإيجاز الثقافي.\n"
-            "   - إعداد **بطاقات الوصفات والحرف التراثية (PDF)**.\n"
-            "   - محاكاة **بروتوكولات الإتيكيت والضيافة والمجالس** ومخططات تدفقية.\n"
-            "   - فك شفرة **الأمثال واللهجات المحلية** وسرد قصصها.\n"
-            "   - توثيق **السير والتاريخ الشفوي العائلي** في كتيبات مصقولة.\n"
-            "   - مزامنة **المواسم الفلكية والمناسبات التراثية (.ics)**.\n\n"
-            "تفضل بطرح سؤالك أو اختر موضوعاً للبدء!"
-        )
-
-    # Narrow legitimate shrimp query: must contain explicit shrimp lexeme
-    has_shrimp = any(k in q_norm for k in ["روبيان", "ربيان", "تاروت", "shrimp"])
-    has_springs = any(k in q_norm for k in ["ينابيع", "عيون حارة", "عين حارة", "مياه كبريتية", "springs"])
-    # Only shrimp/springs legitimate branches are kept; Eastern/UNESCO canned articles removed
-    if has_shrimp and any(k in q_norm for k in ["روبيان", "ربيان", "تجفيف", "تاروت", "shrimp"]):
-        return (
-            "تُعد حرفة **تجفيف الروبيان** في جزيرة تاروت بمحافظة القطيف إحدى أقدم الحرف والتقاليد البحرية "
-            "في المنطقة الشرقية بالمملكة العربية السعودية.\n\n"
-            "### مراحل الحرفة التقليدية:\n"
-            "1. **صيد الروبيان**: يتم الصيد في مواسم محددة (موسم فسح الروبيان) باستخدام قوارب الصيد التقليدية.\n"
-            "2. **السلق الفوري**: يُسلق الروبيان في قدور ضخمة على الشاطئ مباشرة بمياه البحر المملحة للحفاظ على نكهته وجودته.\n"
-            "3. **التجفيف تحت أشعة الشمس**: يُفرد الروبيان المسلوق على مسطحات خوص خاصة (السفات) لعدة أيام حتى يجف تماماً.\n"
-            "4. **التقشير والتعبئة**: يُفصل القشر عن اللحم المجفف يدوياً، ويُحفظ ليُستخدم في أشهر المأكولات التراثية مثل الكبسة والمحموس والثريد.\n\n"
-            "هذه الحرفة تمثل جزءاً حيوياً من التراث الثقافي غير المادي الذي تحرص **وزارة الثقافة** على توثيقه وإبرازه."
-        )
-    if has_springs:
-        return (
-            f"بخصوص استفسارك حول الينابيع والعيون الحارة: *\"{query[:120]}\"*\n\n"
-            "تُعد الينابيع والعيون الحارة جزءاً من التراث الطبيعي في بعض مناطق المملكة، وتُرتبط بمعارف استشفائية وتقاليد محلية.\n"
-            "لعدم توفر مصدر موثق كافٍ لهذا الاستعلام في الوقت الحالي، يُرجى تحديد المنطقة (مثلاً: الأحساء، الليث، عسير) أو السياق المطلوب، وسأقدّم توثيقاً أدق مع الإسناد."
-        )
-     # Generic hedge — language-aware
+    normalized = (query or "").strip()
+    snippet = normalized[:120]
     if lang == "en":
+        if not normalized:
+            return "Hello. How can I help you today?"
         return (
-            f"Unable to generate a verified answer for: \"{query[:120]}\" at this time.\n\n"
-            "To preserve knowledge integrity, I don't generate unsourced syntheses.\n"
-            "As your cultural companion **Sard**, I can help you with:\n"
-            "- Tailored heritage and tourism itineraries by region and duration.\n"
-            "- Verified information on archaeological sites, arts, and handicrafts.\n"
-            "- Cultural events and seasons organized by the Ministry of Culture.\n\n"
-            "Please clarify the region or context you need, or try again."
+            "I couldn't establish a sufficiently grounded source for this request. "
+            f'I won\'t present an unverified answer about "{snippet}". '
+            "Please provide a source, or narrow the question to a specific place, "
+            "practice, or time period."
         )
+    if not normalized:
+        return "مرحباً! كيف يمكنني مساعدتك اليوم؟"
     return (
-        f"تعذّر توليد إجابة موثقة عن: \"{query[:120]}\" في الوقت الحالي.\n\n"
-        "حفاظًا على الأمانة المعرفية، لا أقدّم توليفًا غير مُسنَد بلا مصادر.\n"
-        "كرفيقك الثقافي في **سرد**، يمكنني مساعدتك في:\n"
-        "- برامج ومسارات سياحية وتراثية مخصصة حسب المنطقة والمدة.\n"
-        "- معلومات موثقة عن المواقع الأثرية والفنون والحرف اليدوية.\n"
-        "- الفعاليات والمواسم الثقافية التي تنظمها قطاعات وهيئات **وزارة الثقافة**.\n\n"
-        "يرجى توضيح المنطقة أو السياق المطلوب، أو إعادة المحاولة."
+        "لم أتمكن من تثبيت مصدر موثوق وكافٍ لهذا الطلب، لذلك لن أقدّم معلومة غير موثقة "
+        f"عن «{snippet}». "
+        "يمكنك تزويدي بمصدر أو تحديد المكان والممارسة والفترة الزمنية."
     )
-
 
 # --- Agentic Cultural Feature Models & Endpoints ---
 

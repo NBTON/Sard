@@ -34,6 +34,12 @@ from sard.outputs.orchestrator import (
     get_artifact_orchestrator,
 )
 from sard.schemas.isnad import PlannerResult
+from sard.rag.relevance import (
+    relevance_details,
+    requires_medical_qualification,
+    strong_product_grounding,
+)
+from sard.agent.proposals import CulturalProposalResult, build_cultural_proposal_result
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,65 @@ _SYSTEM_PROMPT_EN = CULTURAL_SYSTEM_PROMPT_EN
 _SHARED_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="sard-chat"
 )
+
+_HISTORY_TURNS = ("user", "assistant")
+_MAX_HISTORY_TURNS = 12
+
+
+def extract_session_history_turns(
+    messages: Optional[Sequence[dict]],
+    current_query: str,
+    session_id: Optional[str],
+    limit: int = _MAX_HISTORY_TURNS,
+) -> list[dict[str, str]]:
+    """Return validated same-session history turns for prompt context.
+
+    Only bounded, non-empty prior ``user``/``assistant`` turns are kept.
+    Client-provided ``role="system"`` messages are NEVER promoted: the
+    server-owned cultural system prompt stays first and authoritative.
+    Without an explicit ``session_id``, history is omitted entirely to
+    prevent cross-session leakage. The trailing duplicate of the current
+    query is dropped so it is not repeated. History is prompt context —
+    never current-turn evidence.
+    """
+
+    if not session_id or not messages:
+        return []
+    prior = list(messages)
+    if prior and str(prior[-1].get("content", "")).strip() == (current_query or "").strip():
+        prior = prior[:-1]
+    turns: list[dict[str, str]] = []
+    for item in prior[-limit:]:
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role in _HISTORY_TURNS and content:
+            turns.append({"role": role, "content": content})
+    return turns
+
+
+def resolve_followup_retrieval_query(
+    user_query: str,
+    history_turns: list[dict[str, str]],
+) -> str:
+    """Resolve an elliptical same-session follow-up to a retrievable query.
+
+    When the current query carries no recognized topic (e.g. ``وماذا عن
+    طريقة تقديمها؟``), the most recent prior user turn supplies the
+    antecedent for *retrieval scoping only*. Retrieved evidence is still
+    validated as current-turn evidence; history itself is never cited.
+    Queries that already carry a topic are returned unchanged.
+    """
+
+    from sard.rag.relevance import query_profile
+
+    if query_profile(user_query).topics:
+        return user_query
+    for turn in reversed(history_turns):
+        if turn["role"] == "user":
+            antecedent = turn["content"].strip()
+            if antecedent:
+                return f"{antecedent}\n{user_query}"
+    return user_query
 
 
 @dataclass(frozen=True)
@@ -60,6 +125,12 @@ class ChatResult:
     citations: list[dict[str, str]] = field(default_factory=list)
     planner_result: Optional[PlannerResult] = None
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    proposal_result: CulturalProposalResult = field(default_factory=CulturalProposalResult)
+
+    @property
+    def proposals(self):
+        """Compatibility shorthand for consumers interested only in proposals."""
+        return self.proposal_result.proposals
 
 
 class ChatService:
@@ -174,6 +245,128 @@ class ChatService:
             uploaded_files=uploaded_files,
         )
 
+    def _filter_planner_result(self, query: str, result: PlannerResult) -> PlannerResult:
+        """Remove planner evidence that does not match the current entity/mandate.
+
+        The planner owns the classification and provenance stages, but its
+        retriever can be replaced by a test or external boundary, and live web
+        hits bypass the curated index. A final agent-side check keeps an
+        unrelated Fashion/Crafts or regional record from becoming a citation.
+        When every requested topic retains supporting evidence, the already
+        generated answer is kept and only the disallowed sources are trimmed;
+        when a topic loses all support, the synthesis is cleared so no removed
+        evidence survives in prose and the caller emits an explicit hedge.
+        """
+
+        from sard.rag.relevance import query_profile
+
+        evidence = list(result.chain.evidence or [])
+        if not evidence:
+            return result
+
+        candidates: list[dict[str, Any]] = []
+        for ev in evidence:
+            raw: dict[str, Any] = {}
+            memory = getattr(self.planner, "memory", None)
+            l0 = getattr(memory, "l0", None)
+            try:
+                raw = l0.get_raw_ref(ev.raw_ref) or {} if l0 is not None else {}
+            except Exception as exc:
+                logger.debug("Planner raw evidence lookup skipped: %s", type(exc).__name__)
+            raw_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            candidates.append(
+                {
+                    "title": raw.get("title") or ev.origin,
+                    "source": ev.origin,
+                    "chunk": ev.excerpt,
+                    "metadata": {
+                        "source_name": ev.origin,
+                        "source_url": raw_meta.get("source_url") or raw.get("source_url") or "",
+                        "citation_id": raw_meta.get("citation_id") or raw.get("citation_id") or ev.source_id,
+                        "chunk_id": raw_meta.get("chunk_id") or raw.get("chunk_id") or ev.source_id,
+                        "topic": raw_meta.get("topic") or raw.get("topic") or "",
+                        "sector": raw_meta.get("sector") or raw.get("sector") or "",
+                        "region": ev.region,
+                        "region_code": raw_meta.get("region_code") or raw.get("region_code") or "",
+                    },
+                }
+            )
+
+        decisions = [relevance_details(query, candidate) for candidate in candidates]
+        keep = [ev for ev, decision in zip(evidence, decisions) if decision["accepted"]]
+        if len(keep) == len(evidence):
+            return result
+
+        if not keep:
+            chain = result.chain.model_copy(
+                update={
+                    "evidence": [],
+                    "atoms": [],
+                    "score": "low",
+                    "decision": "ask",
+                    "missing": ["No entity- and mandate-matched evidence was found for the current query."],
+                }
+            )
+            return result.model_copy(
+                update={"chain": chain, "answer_ar": None, "answer_en": None, "visible_sources": []}
+            )
+
+        # Per-topic coverage: every requested topic must retain at least one
+        # supporting evidence record, otherwise claims from the removed
+        # evidence may linger in the generated prose.
+        required_topics = set(query_profile(query).topics)
+        covered_topics: set[str] = set()
+        for decision in decisions:
+            if decision["accepted"]:
+                covered_topics.update(decision.get("matched_topics") or [])
+        if required_topics and not required_topics <= covered_topics:
+            kept_ids = {ev.source_id for ev in keep}
+            chain = result.chain.model_copy(
+                update={
+                    "evidence": keep,
+                    "atoms": [atom for atom in result.chain.atoms if set(atom.source_ids) & kept_ids],
+                    "score": "low",
+                    "decision": "ask",
+                    "missing": ["The synthesized answer was cleared because filtering removed evidence."],
+                }
+            )
+            return result.model_copy(
+                update={
+                    "chain": chain,
+                    # Never leave claims from removed evidence in a response. A
+                    # subsequent caller emits an explicit uncertainty hedge.
+                    "answer_ar": None,
+                    "answer_en": None,
+                    "visible_sources": [ev for ev in result.visible_sources if ev.source_id in kept_ids],
+                }
+            )
+
+        kept_ids = {ev.source_id for ev in keep}
+        chain = result.chain.model_copy(
+            update={
+                "evidence": keep,
+                "atoms": [atom for atom in result.chain.atoms if set(atom.source_ids) & kept_ids],
+            }
+        )
+        return result.model_copy(
+            update={
+                "chain": chain,
+                "visible_sources": [ev for ev in result.visible_sources if ev.source_id in kept_ids],
+            }
+        )
+
+    @staticmethod
+    def _medical_note(lang: str) -> str:
+        if lang == "en":
+            return (
+                "\n\n> Note: references to healing or therapeutic benefits describe reported local beliefs or uses, "
+                "not medical evidence or a treatment claim."
+            )
+        return (
+            "\n\n> تنبيه: ما يرد عن الاستشفاء أو الفوائد العلاجية يصف معتقدات أو استخدامات محلية محتملة، "
+            "وليس دليلاً طبياً على علاج مرض."
+        )
+
     def ask(
         self,
         user_query: str,
@@ -286,10 +479,35 @@ class ChatService:
             local_artifacts: list[dict[str, Any]] = []
             target_fmts = getattr(intent, "target_formats", None) or getattr(intent, "requested_formats", ())
             if intent.explicit_artifact_request and target_fmts:
+                from sard.agent.capability_routing import Capability
+
+                proposal_capability = intent.domain_capability in {
+                    Capability.RECIPE_CARD,
+                    Capability.ARTISAN_CRAFT,
+                    Capability.ETIQUETTE_SIMULATOR,
+                }
+                proposal_is_grounded = strong_product_grounding(user_query, sources)
                 for fmt in target_fmts:
                     if fmt == "text":
                         continue
                     topic_str = getattr(intent, "canonical_topic", None) or getattr(intent, "extracted_topic", None) or user_query
+                    if proposal_capability and not proposal_is_grounded:
+                        local_artifacts.append(
+                            ArtifactResult(
+                                id=f"art-gated-{fmt}",
+                                kind=_format_to_kind(fmt),
+                                format=fmt,
+                                title=f"مخرج ثقافي: {topic_str}",
+                                filename=f"sard-{fmt}",
+                                mime_type="application/octet-stream",
+                                size_bytes=0,
+                                status="failed",
+                                download_url=None,
+                                error="لم يُنشأ المخرج لأن الطلب يحتاج إلى شاهد ثقافي قوي ومطابق للكيان والقطاع.",
+                                error_category="insufficient_evidence",
+                            ).to_dict()
+                        )
+                        continue
                     # Map format to orchestrator call
                     art_req = ArtifactRequest(
                         format=fmt,
@@ -303,6 +521,7 @@ class ChatService:
                             "session_id": session_id,
                             "intent": intent.to_dict() if hasattr(intent, "to_dict") else asdict(intent),
                             "locale": resolved_lang,
+                            "evidence_gate": "strong" if proposal_is_grounded else "not_applicable",
                         },
                     )
                     try:
@@ -327,8 +546,13 @@ class ChatService:
                         local_artifacts.append(failed_res.to_dict())
             return local_artifacts
 
-        # Early check for unconfigured model when no injected model is present
-        if self._injected_model is None:
+        # Early check for unconfigured model applies ONLY to the direct-model
+        # path below. The hybrid path (planner + deterministic synthesis) and
+        # the G10 deterministic fast-path are designed to serve grounded
+        # answers offline; failing them fast on model config would defeat the
+        # zero-cold-start bundled corpus. The direct path has its own
+        # ModelConfigError handling with identical messaging.
+        if not use_hybrid_retrieval and self._injected_model is None:
             try:
                 _ = self._get_model()
             except ModelConfigError as exc:
@@ -355,28 +579,55 @@ class ChatService:
             text_resp = ""
             decision = None
             plan_res = None
+            proposal_result = CulturalProposalResult()
 
-            # 2. Run Retrieval & Provenance Planning
+            # 2. Run Retrieval & Provenance Planning. An elliptical
+            # same-session follow-up (e.g. "وماذا عن طريقة تقديمها؟") carries
+            # no topic of its own; the most recent prior user turn supplies
+            # the antecedent for retrieval scoping only. Retrieved evidence is
+            # still validated as current-turn evidence; history is never cited.
+            history_turns = extract_session_history_turns(messages, user_query, session_id)
+            retrieval_query = resolve_followup_retrieval_query(user_query, history_turns)
             try:
                 plan_res = self.ask_isnad(
-                    user_query=user_query,
+                    user_query=retrieval_query,
                     session_id=session_id,
                     mock_multimodal_files=mock_multimodal_files,
                     status_callback=status_callback,
                     lang=resolved_lang,
                     uploaded_files=uploaded_files,
                 )
+                plan_res = self._filter_planner_result(retrieval_query, plan_res)
                 for ev in plan_res.visible_sources:
+                    raw: dict[str, Any] = {}
+                    memory = getattr(self.planner, "memory", None)
+                    l0 = getattr(memory, "l0", None)
+                    try:
+                        raw = l0.get_raw_ref(ev.raw_ref) or {} if l0 is not None else {}
+                    except Exception as exc:
+                        logger.debug("Planner citation lookup skipped: %s", type(exc).__name__)
+                    raw_meta = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+                    source_url = (
+                        raw_meta.get("source_url")
+                        or raw.get("source_url")
+                        or (ev.url_or_doc_id if str(ev.url_or_doc_id or "").startswith(("http://", "https://")) else "")
+                    )
+                    citation_id = raw_meta.get("citation_id") or raw.get("citation_id") or ev.source_id
                     citations.append({
-                        "id": ev.source_id,
-                        "title": f"{ev.origin} ({ev.region})",
-                        "url": ev.url_or_doc_id or "",
+                        "id": citation_id,
+                        "citation_id": citation_id,
+                        "title": raw.get("title") or f"{ev.origin} ({ev.region})",
+                        "url": source_url,
+                        "source_url": source_url,
                         "origin": ev.origin,
                         "source_type": ev.source_type,
-                        "chunk_id": ev.source_id,
+                        "chunk_id": raw_meta.get("chunk_id") or raw.get("chunk_id") or ev.source_id,
                         "source_id": ev.source_id,
                         "excerpt": (ev.excerpt or "")[:500],
                         "region": ev.region,
+                        "topic": raw_meta.get("topic") or raw.get("topic") or "",
+                        "sector": raw_meta.get("sector") or raw.get("sector") or "",
+                        "score": raw.get("score") or raw_meta.get("confidence_score") or 0.0,
                     })
 
                 # Choose answer language based on resolved locale
@@ -400,17 +651,30 @@ class ChatService:
                     )
                     return ChatResult(ok=False, error_message=msg, artifacts=[])
                 logger.warning("Isnād planner execution encountered exception: %s. Falling back to cultural router.", exc)
-                cultural_res = self.ask_cultural(user_query, mock_multimodal_files=mock_multimodal_files, lang=resolved_lang, uploaded_files=uploaded_files)
+                cultural_res = self.ask_cultural(retrieval_query, mock_multimodal_files=mock_multimodal_files, lang=resolved_lang, uploaded_files=uploaded_files)
                 text_resp = sanitize_cultural_output(cultural_res.answer_text)
                 decision = cultural_res.decision
                 citations = cultural_res.citations
                 # planner_result stays None on fallback, but citations/text are preserved
+
+            # Recommendations are derived only after current-turn factual
+            # citations have been validated. Mandate records are added as
+            # separate, inspectable citations only when a strong proposal is
+            # actually visible.
+            proposal_result, mandate_citations = build_cultural_proposal_result(user_query, citations)
+            if mandate_citations:
+                citations.extend(mandate_citations)
 
             # Empty output must be explicit hedge, not empty string
             if not text_resp or not text_resp.strip():
                 text_resp = _empty_hedge(user_query)
                 if decision is None:
                     decision = "hedge"
+
+            if requires_medical_qualification(user_query):
+                medical_note = self._medical_note(resolved_lang)
+                if medical_note.strip() not in text_resp:
+                    text_resp = f"{text_resp.rstrip()}{medical_note}"
 
             # 3. Artifact Orchestration — always via helper (BOTH paths)
             artifacts = _maybe_orchestrate(text_resp, citations)
@@ -422,6 +686,7 @@ class ChatService:
                 citations=citations,
                 planner_result=plan_res,
                 artifacts=artifacts,
+                proposal_result=proposal_result,
             )
 
         # Direct conversation path — MUST also support artifact intent
@@ -441,16 +706,14 @@ class ChatService:
         try:
             system_prompt = _SYSTEM_PROMPT_EN if resolved_lang == "en" else _SYSTEM_PROMPT
             lc_messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
-            if messages:
-                for m in messages[:-1]:
-                    role = m.get("role")
-                    content = m.get("content", "").strip()
-                    if not content:
-                        continue
-                    if role == "user":
-                        lc_messages.append(HumanMessage(content=content))
-                    elif role == "assistant":
-                        lc_messages.append(AIMessage(content=content))
+            # Restore only validated same-session history. It is prompt
+            # context, never current-turn evidence; without a session ID,
+            # client history is omitted to prevent cross-session leakage.
+            for prior in extract_session_history_turns(messages, user_query, session_id):
+                if prior["role"] == "user":
+                    lc_messages.append(HumanMessage(content=prior["content"]))
+                else:
+                    lc_messages.append(AIMessage(content=prior["content"]))
             lc_messages.append(HumanMessage(content=user_query))
 
             future = _SHARED_EXECUTOR.submit(model.invoke, lc_messages)
@@ -466,6 +729,11 @@ class ChatService:
             text = sanitize_cultural_output(text)
             if not text or not text.strip():
                 text = ""
+
+            if text and requires_medical_qualification(user_query):
+                medical_note = self._medical_note(resolved_lang)
+                if medical_note.strip() not in text:
+                    text = f"{text.rstrip()}{medical_note}"
 
             artifacts = _maybe_orchestrate(text, []) if text else []
             return ChatResult(ok=True, text=text, artifacts=artifacts)

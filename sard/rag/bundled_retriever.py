@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from sard.rag.schemas import ScoreType
+from sard.rag.relevance import expanded_query_terms, relevance_details
 
 logger = logging.getLogger("sard.rag.bundled")
 
@@ -111,6 +112,15 @@ class BundledHybridRetriever:
             for w in raw_words
             if len(normalize_token(w)) >= 2 and normalize_token(w) not in _STOP_WORDS
         ]
+        # Use the same Arabic entity expansion as the local corpus scanner.
+        # This makes جمبري/روبيان and unseen safe paraphrases share one
+        # retrieval vocabulary without adding a different cultural topic.
+        q_tokens.extend(
+            normalize_token(term)
+            for term in expanded_query_terms(query)
+            if len(normalize_token(term)) >= 2
+        )
+        q_tokens = list(dict.fromkeys(q_tokens))
         if not q_tokens:
             q_tokens = [normalize_token(w) for w in raw_words if len(normalize_token(w)) >= 2]
         if not q_tokens:
@@ -202,6 +212,22 @@ class BundledHybridRetriever:
                 "doc_id": doc.get("id"),
                 "citation_id": doc.get("citation_id"),
             }
+            relevance = relevance_details(query, result_item)
+            if not relevance["accepted"]:
+                # BM25/keyword proximity is not sufficient evidence of entity
+                # or sector relevance.  Keep Fashion/Crafts and other
+                # documents out of food/place answers when generic words such
+                # as “Saudi” or “heritage” overlap.
+                continue
+            result_item["metadata"].update(
+                {
+                    "entity_relevance": relevance["topic_match"],
+                    "region_relevance": relevance["region_match"],
+                    "mandate_relevance": relevance["mandate_match"],
+                    "matched_topics": relevance["matched_topics"],
+                    "term_overlap": relevance["term_overlap"],
+                }
+            )
             scored_results.append((calibrated_score, result_item))
 
         scored_results.sort(key=lambda x: x[0], reverse=True)
