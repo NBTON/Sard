@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +44,61 @@ logger = logging.getLogger("sard.outputs.orchestrator")
 _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _FORMAT_EXTENSIONS = {fmt: f".{fmt}" for fmt in ARTIFACT_MIME_TYPES}
+
+# Default blob access for new writes (brief: private sard-blob store).
+_BLOB_DEFAULT_ACCESS = "private"
+_BLOB_DEFAULT_RUN = "default"
+_BLOB_DEFAULT_VERSION = 1
+
+
+def _resolve_blob_token(explicit: Optional[str] = None) -> str:
+    """Resolve a blob RW token from explicit value or supported env aliases.
+
+    Priority: explicit arg, ``SARD_BLOB_TOKEN``, ``BLOB_READ_WRITE_TOKEN``,
+    ``VERCEL_BLOB_READ_WRITE_TOKEN``.  Read-only; never writes or logs secrets.
+    """
+
+    if explicit:
+        return explicit
+    return (
+        os.environ.get("SARD_BLOB_TOKEN")
+        or os.environ.get("BLOB_READ_WRITE_TOKEN")
+        or os.environ.get("VERCEL_BLOB_READ_WRITE_TOKEN")
+        or ""
+    )
+
+
+def _resolve_run_version(metadata: Optional[Dict[str, Any]]) -> Tuple[str, int, str]:
+    """Derive (run_id, version, artifact_type) for the idempotent blob key.
+
+    Falls back to ``default``/``1``/``""`` so legacy callers without metadata
+    still produce a stable ``runs/{run}/{id}/v{n}/{safe}`` key.
+    """
+
+    meta = metadata or {}
+    raw_run = str(meta.get("run_id") or meta.get("runId") or _BLOB_DEFAULT_RUN)
+    run_id = raw_run if _SAFE_ID_RE.fullmatch(raw_run) else _BLOB_DEFAULT_RUN
+    try:
+        version = int(meta.get("version", _BLOB_DEFAULT_VERSION))
+    except (TypeError, ValueError):
+        version = _BLOB_DEFAULT_VERSION
+    if version < 1:
+        version = _BLOB_DEFAULT_VERSION
+    artifact_type = str(meta.get("type") or meta.get("artifact_type") or meta.get("kind") or "")
+    return run_id, version, artifact_type
+
+
+def _blob_key_new(run_id: str, artifact_id: str, version: int, safe_name: str) -> str:
+    return f"runs/{run_id}/{artifact_id}/v{version}/{safe_name}"
+
+
+def _blob_key_legacy(artifact_id: str, safe_name: str) -> str:
+    return f"artifacts/{artifact_id}/{safe_name}"
+
+
+def _artifact_id_from_filename(filename: str) -> Optional[str]:
+    match = re.search(r"--(art-[A-Za-z0-9_-]+)\.[A-Za-z0-9]+$", str(filename or ""))
+    return match.group(1) if match else None
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +141,7 @@ class ArtifactResult:
     checksum: Optional[str] = None
     data: Optional[bytes] = None
     error_category: Optional[str] = None
+    document: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to the canonical public API JSON shape."""
@@ -155,6 +212,40 @@ class ArtifactStore(abc.ABC):
     def exists(self, id_or_filename: str) -> bool:
         """Checks whether artifact exists in store."""
         pass
+
+    # --- Additive ArtifactStorage concept aliases (non-breaking) ---
+
+    def put(
+        self,
+        artifact_id: str,
+        filename: str,
+        data: bytes,
+        mime_type: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, str, int, str]:
+        """Alias for :meth:`store_bytes` (ArtifactStorage ``put`` concept)."""
+        return self.store_bytes(artifact_id, filename, data, mime_type, metadata)
+
+    def get(self, id_or_filename: str) -> Optional[Tuple[bytes, str, str]]:
+        """Alias for :meth:`get_bytes` (ArtifactStorage ``get`` concept)."""
+        return self.get_bytes(id_or_filename)
+
+    def delete(self, id_or_filename: str) -> bool:
+        """Remove an artifact; returns True when something was removed."""
+        return False
+
+    def signed_url(self, artifact_id: str, filename: str, expires_in: int = 3600) -> str:
+        """Returns a download URL usable by browsers (never embeds secrets).
+
+        Blob-backed stores return the authenticated ``/api/artifacts`` proxy;
+        local stores return the same stable proxy path.
+        """
+        _ = expires_in
+        return self.get_download_url(artifact_id, filename)
+
+    def get_metadata(self, id_or_filename: str) -> Optional[Dict[str, Any]]:
+        """Returns the metadata record for an artifact, if known."""
+        return None
 
 
 class FileSystemArtifactStore(ArtifactStore):
@@ -265,8 +356,20 @@ class FileSystemArtifactStore(ArtifactStore):
         safe_name = self._stored_filename(safe_id, requested)
         dest_path = self._destination(safe_name)
         checksum = hashlib.sha256(raw).hexdigest()
+        run_id, version, artifact_type = _resolve_run_version(metadata)
         record = {
             "artifact_id": safe_id,
+            "run_id": run_id,
+            "version": version,
+            "type": artifact_type,
+            "key": _blob_key_new(run_id, safe_id, version, safe_name),
+            "mime": mime,
+            "size": len(raw),
+            "sha256": checksum,
+            "created_at": time.time(),
+            "status": "created",
+            "verification": {"sha256": checksum, "size_bytes": len(raw)},
+            # Legacy compat fields (existing readers use these).
             "filename": safe_name,
             "mime_type": mime,
             "size_bytes": len(raw),
@@ -337,6 +440,64 @@ class FileSystemArtifactStore(ArtifactStore):
     def exists(self, id_or_filename: str) -> bool:
         return self.get_file_path(id_or_filename) is not None
 
+    def delete(self, id_or_filename: str) -> bool:
+        value = str(id_or_filename or "")
+        record = self._record_for(value)
+        removed = False
+        with self._lock:
+            if record:
+                try:
+                    safe_id = self._validate_id(str(record.get("artifact_id") or value))
+                except ValueError:
+                    safe_id = None
+                if safe_id:
+                    try:
+                        self._metadata_path(safe_id).unlink(missing_ok=True)
+                        removed = True
+                    except OSError:
+                        pass
+                fname = str(record.get("filename") or "")
+                if fname:
+                    try:
+                        self._destination(self._validate_filename(fname)).unlink(missing_ok=True)
+                        removed = True
+                    except (OSError, ValueError):
+                        pass
+            else:
+                try:
+                    target = self._destination(self._validate_filename(value))
+                except ValueError:
+                    return False
+                if target.exists() and target.is_file():
+                    try:
+                        target.unlink(missing_ok=True)
+                        removed = True
+                    except OSError:
+                        pass
+        return removed
+
+    def signed_url(self, artifact_id: str, filename: str, expires_in: int = 3600) -> str:
+        _ = expires_in
+        return self.get_download_url(artifact_id, filename)
+
+    def get_metadata(self, id_or_filename: str) -> Optional[Dict[str, Any]]:
+        record = self._record_for(id_or_filename)
+        if record is None:
+            path = self.get_file_path(id_or_filename)
+            if path is None:
+                return None
+            for candidate in self._metadata_root.glob("*.json"):
+                try:
+                    item = json.loads(candidate.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if item.get("filename") == path.name:
+                    record = item
+                    break
+        if record is None:
+            return None
+        return dict(record)
+
     def _guess_mime(self, filename: str) -> str:
         fn = filename.lower()
         if fn.endswith(".pdf"):
@@ -378,18 +539,27 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
         self.endpoint = (
             endpoint
             or os.environ.get("SARD_BLOB_ENDPOINT")
-            or (DEFAULT_VERCEL_BLOB_ENDPOINT if os.environ.get("BLOB_READ_WRITE_TOKEN") else "")
+            or (DEFAULT_VERCEL_BLOB_ENDPOINT if _resolve_blob_token() else "")
         ).rstrip("/")
-        self.token = token or os.environ.get("SARD_BLOB_TOKEN") or os.environ.get("BLOB_READ_WRITE_TOKEN")
+        self.token = _resolve_blob_token(token)
         self.public_base_url = (public_base_url or os.environ.get("SARD_BLOB_PUBLIC_BASE_URL") or self.endpoint).rstrip("/")
         self.timeout = timeout
         self.blob_configured = bool(self.endpoint and self.token)
 
     def _key(self, artifact_id: str, filename: str) -> str:
+        """Legacy flat key (read-fallback for blobs written before the overhaul)."""
         if not _SAFE_ID_RE.fullmatch(str(artifact_id or "")):
             raise ValueError("Artifact ID must be a safe identifier.")
         safe_name = FileSystemArtifactStore._validate_filename(filename)
-        return f"artifacts/{artifact_id}/{safe_name}"
+        return _blob_key_legacy(artifact_id, safe_name)
+
+    def _new_key(self, artifact_id: str, filename: str, metadata: Optional[Dict[str, Any]] = None) -> Tuple[str, str, str, int, str]:
+        """Idempotent new key ``runs/{run}/{id}/v{n}/{safe}`` + resolved parts."""
+        if not _SAFE_ID_RE.fullmatch(str(artifact_id or "")):
+            raise ValueError("Artifact ID must be a safe identifier.")
+        safe_name = FileSystemArtifactStore._stored_filename(artifact_id, filename)
+        run_id, version, artifact_type = _resolve_run_version(metadata)
+        return _blob_key_new(run_id, artifact_id, version, safe_name), safe_name, run_id, version, artifact_type
 
     def _url(self, key: str, base: Optional[str] = None) -> str:
         return f"{(base or self.endpoint).rstrip('/')}/{urllib.parse.quote(key, safe='/')}"
@@ -406,8 +576,7 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
             return self.fallback.store_bytes(artifact_id, filename, data, mime_type, metadata)
         if not data:
             raise ValueError("Artifact bytes must be non-empty.")
-        safe_name = FileSystemArtifactStore._stored_filename(artifact_id, filename)
-        key = self._key(artifact_id, safe_name)
+        key, safe_name, run_id, version, artifact_type = self._new_key(artifact_id, filename, metadata)
         canonical_mime = ARTIFACT_MIME_TYPES.get(Path(safe_name).suffix.lower().lstrip("."), mime_type)
         request = urllib.request.Request(
             self._url(key),
@@ -434,8 +603,25 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
         # Providers may return a public URL, but the portable contract remains
         # the safe filename plus checksum and ID.
         # Keep a tiny remote index so ID lookup is possible after a new store
-        # instance is created.  It contains no user content.
-        index = json.dumps({"filename": safe_name, "mime_type": canonical_mime}, separators=(",", ":")).encode()
+        # instance is created.  It contains no user content.  The record carries
+        # the new idempotent key with a legacy fallback on read.
+        index = json.dumps(
+            {
+                "artifact_id": str(artifact_id),
+                "run_id": run_id,
+                "version": version,
+                "type": artifact_type,
+                "key": key,
+                "filename": safe_name,
+                "mime_type": canonical_mime,
+                "mime": canonical_mime,
+                "size": len(data),
+                "sha256": checksum,
+                "created_at": time.time(),
+                "status": "created",
+            },
+            separators=(",", ":"),
+        ).encode()
         index_request = urllib.request.Request(
             self._url(f"artifacts/{artifact_id}.json"),
             data=index,
@@ -448,6 +634,16 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
         except (urllib.error.URLError, OSError) as exc:
             raise RuntimeError("Configured artifact object storage is unavailable.") from exc
         return str(artifact_id), safe_name, len(data), checksum
+
+    def _fetch_key(self, key: str) -> Optional[bytes]:
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(self._url(key), headers={"Authorization": f"Bearer {self.token}"}),
+                timeout=self.timeout,
+            ) as response:
+                return response.read()
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            return None
 
     def get_bytes(self, id_or_filename: str) -> Optional[Tuple[bytes, str, str]]:
         if not self.blob_configured:
@@ -464,7 +660,15 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
                 ) as response:
                     record = json.loads(response.read().decode("utf-8"))
                 filename = FileSystemArtifactStore._validate_filename(str(record["filename"]))
-                mime = str(record.get("mime_type") or "application/octet-stream")
+                mime = str(record.get("mime_type") or record.get("mime") or "application/octet-stream")
+                # New idempotent key first, legacy flat key as read-fallback.
+                for candidate in (str(record.get("key") or ""), _blob_key_legacy(value, filename)):
+                    if not candidate:
+                        continue
+                    payload = self._fetch_key(candidate)
+                    if payload is not None:
+                        return payload, filename, mime
+                return None
             except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError, KeyError):
                 return None
         else:
@@ -472,18 +676,37 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
                 filename = FileSystemArtifactStore._validate_filename(value)
             except ValueError:
                 return None
-            match = re.search(r"--(art-[A-Za-z0-9_-]+)\.[A-Za-z0-9]+$", filename)
-            if not match:
+            artifact_id = _artifact_id_from_filename(filename)
+            if not artifact_id:
                 return None
             mime = ARTIFACT_MIME_TYPES.get(Path(filename).suffix.lower().lstrip("."), "application/octet-stream")
-            value = match.group(1)
-        try:
-            with urllib.request.urlopen(
-                urllib.request.Request(self._url(self._key(value, filename), self.endpoint), headers={"Authorization": f"Bearer {self.token}"}),
-                timeout=self.timeout,
-            ) as response:
-                return response.read(), filename, mime
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            # Resolve the authoritative key via the remote index when possible
+            # (new runs/... key), otherwise fall back to the legacy flat key.
+            try:
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        self._url(f"artifacts/{artifact_id}.json"),
+                        headers={"Authorization": f"Bearer {self.token}"},
+                    ),
+                    timeout=self.timeout,
+                ) as response:
+                    record = json.loads(response.read().decode("utf-8"))
+                indexed_name = str(record.get("filename") or filename)
+                if indexed_name != filename:
+                    return None
+                mime = str(record.get("mime_type") or record.get("mime") or mime)
+                for candidate in (str(record.get("key") or ""), _blob_key_legacy(artifact_id, filename)):
+                    if not candidate:
+                        continue
+                    payload = self._fetch_key(candidate)
+                    if payload is not None:
+                        return payload, filename, mime
+                return None
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError, KeyError):
+                pass
+            payload = self._fetch_key(_blob_key_legacy(artifact_id, filename))
+            if payload is not None:
+                return payload, filename, mime
             return None
 
     def get_file_path(self, id_or_filename: str) -> Optional[Path]:
@@ -492,29 +715,124 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
     def get_download_url(self, artifact_id: str, filename: str) -> str:
         if not self.blob_configured:
             return self.fallback.get_download_url(artifact_id, filename)
-        return self._url(self._key(artifact_id, filename), self.public_base_url)
+        # Private blobs are served through the authenticated server proxy so
+        # browsers never see blob URLs or credentials.
+        try:
+            safe_name = FileSystemArtifactStore._validate_filename(filename)
+        except ValueError:
+            safe_name = str(filename)
+        FileSystemArtifactStore._validate_id(artifact_id)
+        return "/api/artifacts/" + urllib.parse.quote(safe_name, safe="")
 
     def exists(self, id_or_filename: str) -> bool:
         if not self.blob_configured:
             return self.fallback.exists(id_or_filename)
         return self.get_bytes(id_or_filename) is not None
 
+    def delete(self, id_or_filename: str) -> bool:
+        resolved = self.get_bytes(id_or_filename)
+        removed = False
+        if resolved is not None:
+            _, filename, _ = resolved
+            artifact_id = _artifact_id_from_filename(filename) or (
+                str(id_or_filename) if _SAFE_ID_RE.fullmatch(str(id_or_filename or "")) else ""
+            )
+            keys: List[str] = []
+            if artifact_id:
+                try:
+                    keys.append(self._new_key(artifact_id, filename)[0])
+                except ValueError:
+                    pass
+                try:
+                    keys.append(self._key(artifact_id, filename))
+                except ValueError:
+                    pass
+                keys.append(f"artifacts/{artifact_id}.json")
+            for key in keys:
+                if not self.blob_configured:
+                    continue
+                request = urllib.request.Request(
+                    self._url(key),
+                    method="DELETE",
+                    headers={"Authorization": f"Bearer {self.token}"},
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=self.timeout):
+                        removed = True
+                except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+                    continue
+        try:
+            if self.fallback.delete(id_or_filename):
+                removed = True
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+        return removed
+
+    def signed_url(self, artifact_id: str, filename: str, expires_in: int = 3600) -> str:
+        _ = expires_in
+        return self.get_download_url(artifact_id, filename)
+
+    def get_metadata(self, id_or_filename: str) -> Optional[Dict[str, Any]]:
+        # Sidecar-first (local mirror), then remote index (head-like, no content GET).
+        try:
+            local = self.fallback.get_metadata(id_or_filename)
+        except Exception:
+            local = None
+        if not self.blob_configured:
+            return local
+        value = str(id_or_filename or "")
+        artifact_id = value if _SAFE_ID_RE.fullmatch(value) else _artifact_id_from_filename(value)
+        if not artifact_id:
+            return local
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    self._url(f"artifacts/{artifact_id}.json"),
+                    headers={"Authorization": f"Bearer {self.token}"},
+                ),
+                timeout=self.timeout,
+            ) as response:
+                record = json.loads(response.read().decode("utf-8"))
+            merged: Dict[str, Any] = dict(local or {})
+            merged.update(
+                {
+                    "artifact_id": artifact_id,
+                    "run_id": record.get("run_id", merged.get("run_id", _BLOB_DEFAULT_RUN)),
+                    "version": record.get("version", merged.get("version", _BLOB_DEFAULT_VERSION)),
+                    "type": record.get("type", merged.get("type", "")),
+                    "key": record.get("key", merged.get("key", "")),
+                    "mime": record.get("mime", record.get("mime_type", merged.get("mime", ""))),
+                    "size": record.get("size", merged.get("size", merged.get("size_bytes", 0))),
+                    "sha256": record.get("sha256", merged.get("sha256", merged.get("checksum", ""))),
+                    "status": record.get("status", merged.get("status", "created")),
+                }
+            )
+            return merged
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+            return local
+
 
 class VercelBlobArtifactStore(ArtifactStore):
     """Durable store via official Vercel Blob SDK (ADR Decision 3, G3).
 
-    Uses ``vercel.blob.BlobClient.put`` when ``BLOB_READ_WRITE_TOKEN`` is set.
-    Falls back to :class:`ConfigurableBlobArtifactStore` (custom REST) and then
-    to local filesystem, so offline/tests never require credentials.
+    Uses ``vercel.blob.BlobClient.put`` when a read/write token is set
+    (``SARD_BLOB_TOKEN`` / ``BLOB_READ_WRITE_TOKEN`` /
+    ``VERCEL_BLOB_READ_WRITE_TOKEN``).  Falls back to
+    :class:`ConfigurableBlobArtifactStore` (custom REST) and then to local
+    filesystem, so offline/tests never require credentials.
     """
 
-    def __init__(self, fallback_local: Optional[ArtifactStore] = None):
+    def __init__(self, fallback_local: Optional[ArtifactStore] = None, client: Any = None):
         self.fallback = fallback_local or FileSystemArtifactStore()
         self.rest = ConfigurableBlobArtifactStore(fallback_local=self.fallback)
-        self.token = os.environ.get("SARD_BLOB_TOKEN") or os.environ.get("BLOB_READ_WRITE_TOKEN") or ""
+        self.token = _resolve_blob_token()
         self.blob_configured = bool(self.token)
-        self._client = None
-        if self.blob_configured:
+        # Retain the SDK-returned url/download_url per key for server-side use
+        # (head/get/delete).  Never sent to browsers; downloads go through the
+        # authenticated /api/artifacts proxy.
+        self._blob_urls: Dict[str, Dict[str, str]] = {}
+        self._client = client
+        if self._client is None and self.blob_configured:
             try:
                 from vercel.blob import BlobClient
 
@@ -525,28 +843,138 @@ class VercelBlobArtifactStore(ArtifactStore):
     def _sdk_available(self) -> bool:
         return bool(self.blob_configured and self._client is not None)
 
+    @staticmethod
+    def _sdk_url_of(result: Any) -> Tuple[str, str, str]:
+        url = str(getattr(result, "url", "") or "")
+        download_url = str(getattr(result, "download_url", "") or "")
+        pathname = str(getattr(result, "pathname", "") or "")
+        if not url and isinstance(result, dict):
+            url = str(result.get("url") or "")
+            download_url = str(result.get("downloadUrl") or result.get("download_url") or "")
+            pathname = str(result.get("pathname") or "")
+        return url, download_url, pathname
+
+    def _sdk_candidates(self, id_or_filename: str) -> Tuple[Optional[str], Optional[str], List[str]]:
+        """Resolve (artifact_id, filename, candidate blob keys) for SDK reads."""
+        value = str(id_or_filename or "")
+        if not value or any(token in value for token in ("/", "\\", "\x00")):
+            return None, None, []
+        if _SAFE_ID_RE.fullmatch(value):
+            artifact_id: Optional[str] = value
+            filename: Optional[str] = None
+            try:
+                local_meta = self.fallback.get_metadata(value)
+            except Exception:
+                local_meta = None
+            if local_meta:
+                filename = str(local_meta.get("filename") or "")
+        else:
+            try:
+                filename = FileSystemArtifactStore._validate_filename(value)
+            except ValueError:
+                return None, None, []
+            artifact_id = _artifact_id_from_filename(filename)
+            if artifact_id is None:
+                return None, None, []
+            if not _SAFE_ID_RE.fullmatch(artifact_id):
+                return None, None, []
+        keys: List[str] = []
+        if artifact_id and filename:
+            try:
+                local_meta = self.fallback.get_metadata(artifact_id)
+            except Exception:
+                local_meta = None
+            stored_key = str((local_meta or {}).get("key") or "")
+            if stored_key:
+                keys.append(stored_key)
+            run_id, version, _ = _resolve_run_version(
+                (local_meta or {}).get("metadata") if isinstance((local_meta or {}).get("metadata"), dict) else None
+            )
+            keys.append(_blob_key_new(run_id, artifact_id, version, filename))
+            keys.append(_blob_key_legacy(artifact_id, filename))
+        elif artifact_id:
+            try:
+                local_meta = self.fallback.get_metadata(artifact_id)
+            except Exception:
+                local_meta = None
+            if local_meta and local_meta.get("filename"):
+                fname = str(local_meta["filename"])
+                stored_key = str(local_meta.get("key") or "")
+                if stored_key:
+                    keys.append(stored_key)
+                filename = fname
+                keys.append(_blob_key_legacy(artifact_id, fname))
+        # Deduplicate while preserving order.
+        seen: Dict[str, None] = {}
+        ordered = [k for k in keys if k and not (k in seen or seen.setdefault(k))]
+        return artifact_id, filename, ordered
+
+    def _sdk_list_keys(self, artifact_id: str) -> List[str]:
+        """Discover remote keys for an artifact via list (cross-instance reads)."""
+        found: List[str] = []
+        client = self._client
+        if client is None or not artifact_id:
+            return found
+        for prefix in (f"runs/", f"artifacts/{artifact_id}"):
+            try:
+                listing = client.list_objects(prefix=prefix, limit=100)
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+                continue
+            blobs = getattr(listing, "blobs", None)
+            if blobs is None and isinstance(listing, dict):
+                blobs = listing.get("blobs", [])
+            for item in blobs or []:
+                pathname = str(getattr(item, "pathname", "") or (item.get("pathname") if isinstance(item, dict) else "") or "")
+                if f"/{artifact_id}/" in f"/{pathname}/" or pathname.startswith(f"artifacts/{artifact_id}"):
+                    found.append(pathname)
+        seen: Dict[str, None] = {}
+        return [k for k in found if k and not (k in seen or seen.setdefault(k))]
+
+    def _sdk_fetch(self, key: str) -> Optional[Tuple[bytes, Optional[str]]]:
+        client = self._client
+        if client is None or not key:
+            return None
+        for access in ("private", "public"):
+            try:
+                result = client.get(key, access=access)  # type: ignore[arg-type]
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+                continue
+            content = getattr(result, "content", None)
+            if content is None and isinstance(result, dict):
+                content = result.get("content")
+            if content is None:
+                continue
+            ctype = getattr(result, "content_type", None)
+            if ctype is None and isinstance(result, dict):
+                ctype = result.get("contentType") or result.get("content_type")
+            return bytes(content), (str(ctype) if ctype else None)
+        return None
+
     def store_bytes(self, artifact_id, filename, data, mime_type, metadata=None):
         if self._sdk_available():
             try:
+                FileSystemArtifactStore._validate_id(artifact_id)
                 safe_name = FileSystemArtifactStore._stored_filename(artifact_id, filename)
-                key = f"artifacts/{artifact_id}/{safe_name}"
+                run_id, version, _ = _resolve_run_version(metadata)
+                key = _blob_key_new(run_id, str(artifact_id), version, safe_name)
                 canonical = ARTIFACT_MIME_TYPES.get(Path(safe_name).suffix.lower().lstrip("."), mime_type)
-                # Official SDK: put(pathname, body, options)
-                res = self._client.put(key, bytes(data), {"access": "public", "contentType": canonical})
-                # SDK returns dict-like with downloadUrl/url; persist checksum locally for verification
+                if not data:
+                    raise ValueError("Artifact bytes must be non-empty.")
+                # Official SDK: put(path, body, *, access, content_type, ...).
+                res = self._client.put(key, bytes(data), access=_BLOB_DEFAULT_ACCESS, content_type=canonical)
+                url, download_url, pathname = self._sdk_url_of(res)
+                # Retain SDK urls server-side (never exposed to browsers).
+                self._blob_urls[key] = {"url": url, "download_url": download_url or url, "pathname": pathname or key}
+                logger.debug("Vercel Blob stored %s (access=%s url=%s)", key, _BLOB_DEFAULT_ACCESS, url)
                 checksum = hashlib.sha256(bytes(data)).hexdigest()
-                # Also mirror to local fallback for same-process verification (no durability claim)
+                # Mirror to local fallback for same-process verification
+                # (no durability claim across instances).
                 try:
                     self.fallback.store_bytes(artifact_id, filename, bytes(data), mime_type, metadata)
                 except Exception as exc:
                     logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
-                dl = ""
-                try:
-                    dl = res.get("downloadUrl") or res.get("url") or ""
-                except Exception:
-                    dl = ""
-                # Return canonical tuple; download URL resolution stays via get_download_url
-                _ = dl
                 return str(artifact_id), safe_name, len(data), checksum
             except Exception as exc:
                 logger.warning("Vercel Blob SDK store failed (%s); falling back to REST/FS.", type(exc).__name__)
@@ -556,13 +984,33 @@ class VercelBlobArtifactStore(ArtifactStore):
     def get_bytes(self, id_or_filename):
         if self._sdk_available():
             try:
-                # Try REST index first (our own key scheme), then local mirror
-                got = self.rest.get_bytes(id_or_filename)
-                if got is not None:
-                    return got
+                artifact_id, filename, candidates = self._sdk_candidates(id_or_filename)
+                for key in candidates:
+                    fetched = self._sdk_fetch(key)
+                    if fetched is not None:
+                        payload, ctype = fetched
+                        name = filename or Path(key).name
+                        mime = ctype or ARTIFACT_MIME_TYPES.get(Path(name).suffix.lower().lstrip("."), "application/octet-stream")
+                        return payload, name, mime
+                # Cross-instance discovery via list when the local sidecar is
+                # absent (second Vercel instance with a fresh /tmp).
+                if artifact_id and (not candidates or filename is None):
+                    for key in self._sdk_list_keys(artifact_id):
+                        fetched = self._sdk_fetch(key)
+                        if fetched is not None:
+                            payload, ctype = fetched
+                            name = filename or Path(key).name
+                            mime = ctype or ARTIFACT_MIME_TYPES.get(Path(name).suffix.lower().lstrip("."), "application/octet-stream")
+                            return payload, name, mime
             except Exception as exc:
                 logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
-        return self.rest.get_bytes(id_or_filename)
+        try:
+            got = self.rest.get_bytes(id_or_filename)
+            if got is not None:
+                return got
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+        return None
 
     def get_file_path(self, id_or_filename):
         # Blob has no local path; expose local mirror if present for verification
@@ -575,10 +1023,134 @@ class VercelBlobArtifactStore(ArtifactStore):
         return self.rest.get_file_path(id_or_filename)
 
     def get_download_url(self, artifact_id: str, filename: str) -> str:
-        return self.rest.get_download_url(artifact_id, filename)
+        # Always serve through the authenticated server proxy so private-blob
+        # downloads work and browsers never see blob URLs or credentials.
+        try:
+            return self.rest.get_download_url(artifact_id, filename)
+        except Exception:
+            safe_name = FileSystemArtifactStore._validate_filename(filename)
+            return "/api/artifacts/" + urllib.parse.quote(safe_name, safe="")
 
     def exists(self, id_or_filename: str) -> bool:
+        if self._sdk_available():
+            try:
+                _, _, candidates = self._sdk_candidates(id_or_filename)
+                for key in candidates:
+                    try:
+                        head = self._client.head(key)
+                        if head is not None:
+                            return True
+                    except Exception as exc:
+                        logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+                        continue
+                artifact_id, _, _ = self._sdk_candidates(id_or_filename)
+                if artifact_id and self._sdk_list_keys(artifact_id):
+                    return True
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
         return self.rest.exists(id_or_filename)
+
+    def delete(self, id_or_filename: str) -> bool:
+        removed = False
+        if self._sdk_available():
+            try:
+                artifact_id, _, candidates = self._sdk_candidates(id_or_filename)
+                keys = list(candidates)
+                if artifact_id:
+                    keys.extend(self._sdk_list_keys(artifact_id))
+                    try:
+                        keys.append(f"artifacts/{artifact_id}.json")
+                    except Exception:
+                        pass
+                for key in keys:
+                    try:
+                        self._client.delete(key)
+                        removed = True
+                    except Exception as exc:
+                        logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+                        continue
+                    self._blob_urls.pop(key, None)
+            except Exception as exc:
+                logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+        try:
+            if self.rest.delete(id_or_filename):
+                removed = True
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+        return removed
+
+    def signed_url(self, artifact_id: str, filename: str, expires_in: int = 3600) -> str:
+        _ = expires_in
+        return self.get_download_url(artifact_id, filename)
+
+    def get_metadata(self, id_or_filename: str) -> Optional[Dict[str, Any]]:
+        # Sidecar-first, then SDK head (no content download, no second PUT).
+        try:
+            local = self.fallback.get_metadata(id_or_filename)
+        except Exception:
+            local = None
+        base: Dict[str, Any] = dict(local or {})
+        if not self._sdk_available():
+            try:
+                rest_meta = self.rest.get_metadata(id_or_filename)
+                if rest_meta:
+                    merged = dict(base)
+                    merged.update(rest_meta)
+                    return merged
+            except Exception:
+                pass
+            return base or None
+        try:
+            artifact_id, filename, candidates = self._sdk_candidates(id_or_filename)
+            for key in candidates:
+                try:
+                    head = self._client.head(key)
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+                    continue
+                if head is None:
+                    continue
+                size = getattr(head, "size", None)
+                ctype = getattr(head, "content_type", None)
+                url = getattr(head, "url", "")
+                download_url = getattr(head, "download_url", "")
+                if base:
+                    base.setdefault("size", size if size is not None else base.get("size"))
+                    base.setdefault("mime", ctype or base.get("mime"))
+                    base.setdefault("key", key)
+                else:
+                    base = {
+                        "artifact_id": artifact_id or "",
+                        "run_id": _BLOB_DEFAULT_RUN,
+                        "version": _BLOB_DEFAULT_VERSION,
+                        "type": "",
+                        "key": key,
+                        "filename": filename or Path(key).name,
+                        "mime": ctype or "application/octet-stream",
+                        "size": size if size is not None else 0,
+                        "sha256": "",
+                        "created_at": time.time(),
+                        "status": "created",
+                        "verification": {},
+                        "url": url,
+                        "download_url": download_url,
+                    }
+                retained = self._blob_urls.get(key, {})
+                if retained:
+                    base.setdefault("url", retained.get("url", ""))
+                    base.setdefault("download_url", retained.get("download_url", ""))
+                return base
+        except Exception as exc:
+            logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
+        try:
+            rest_meta = self.rest.get_metadata(id_or_filename)
+            if rest_meta:
+                merged = dict(base)
+                merged.update(rest_meta)
+                return merged or None
+        except Exception:
+            pass
+        return base or None
 
 
 # Default global store instance (official SDK first, REST/FS fallback)
@@ -986,17 +1558,45 @@ class ArtifactOrchestrator:
     def store(self) -> ArtifactStore:
         return self._store if self._store is not None else get_artifact_store()
 
-    def generate_artifact(self, request: ArtifactRequest, deadline_monotonic: float | None = None) -> ArtifactResult:
+    def generate_artifact(
+        self,
+        request: ArtifactRequest,
+        deadline_monotonic: float | object | None = None,
+        deadline: float | object | None = None,
+        cancel_event: Optional[Any] = None,
+    ) -> ArtifactResult:
         """Executes rendering, verifies storage, and returns guaranteed ArtifactResult.
 
-        G11: if ``deadline_monotonic`` is set and already exceeded, refuse to
+        G11: if the deadline is set and already exceeded, refuse to
         store (discard late worker output) and return a timeout failure instead
-        of writing orphan files after the terminal SSE event.
+        of writing orphan files after the terminal SSE event. Workstream E:
+        ``deadline`` accepts a :class:`sard.agent.deadline.Deadline`
+        (reserve-preserving); floats remain compat. The deadline is checked
+        before render AND before store; ``cancel_event`` aborts both.
         """
         import time as _time
 
+        from sard.agent.deadline import DeadlineCancelledError as _Cancelled
+        from sard.agent.deadline import coerce_deadline as _coerce
+
+        dl = _coerce(deadline, cancel_event=cancel_event, label="artifact")
+        if dl is None and deadline_monotonic is not None:
+            dl = _coerce(deadline_monotonic, cancel_event=cancel_event, label="artifact")
+        if dl is not None and cancel_event is None:
+            cancel_event = dl.cancel_event
+
+        def _cancelled() -> bool:
+            try:
+                return bool(cancel_event is not None and cancel_event.is_set())
+            except Exception:
+                return False
+
         def _expired() -> bool:
-            return deadline_monotonic is not None and _time.monotonic() > deadline_monotonic
+            if _cancelled():
+                return True
+            if dl is not None:
+                return dl.reserve_remaining() <= 0
+            return deadline_monotonic is not None and isinstance(deadline_monotonic, (float, int)) and _time.monotonic() > float(deadline_monotonic)
 
         art_id = f"art-{uuid.uuid4().hex}"
         fmt = request.format.lower().strip()
@@ -1018,7 +1618,12 @@ class ArtifactOrchestrator:
                 stem = re.sub(r"[^A-Za-z0-9._-]", "_", request.topic[:30]).strip("._") or "sard"
                 filename = f"sard-{stem}{ext}"
 
-            # 1. Render Deterministic Bytes
+            # 1. Render Deterministic Bytes (never start doomed renders:
+            # check reserve-preserving deadline AND cancel before render).
+            if _cancelled():
+                raise _Cancelled("cancelled before render")
+            if _expired():
+                raise TimeoutError("Artifact deadline exceeded before render; refusing doomed render.")
             if fmt == "pdf":
                 raw_bytes, mime_type, preview = self.registry.render_pdf(request)
             elif fmt == "docx":
@@ -1061,8 +1666,43 @@ class ArtifactOrchestrator:
                 raise RuntimeError("Stored artifact could not be verified.")
             validate_artifact_bytes(fmt, stored[0])
 
-            # 4. Construct Verified Download URL
+            # 4. Construct Verified Download URL via the store (never hand-built).
             download_url = active_store.get_download_url(art_id, stored_filename)
+
+            # 5. Canonical preview via ArtifactDocument (single generator).
+            try:
+                from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+
+                _doc = _ArtifactDocument.from_request(
+                    request,
+                    artifact_id=art_id,
+                    preview=preview if isinstance(preview, dict) else None,
+                    checksum=checksum,
+                )
+                canonical = _doc.to_preview()
+                if isinstance(preview, dict):
+                    if preview.get("slides") and not canonical.get("slides"):
+                        canonical["slides"] = preview["slides"]
+                        canonical["slides_count"] = preview.get("slides_count", len(preview["slides"]))
+                    for _alias in ("card_data", "diagram_data"):
+                        if _alias in preview and _alias not in canonical:
+                            canonical[_alias] = preview[_alias]
+                    for _key in (
+                        "deck_id", "events", "events_count", "width", "height",
+                        "paragraphs_count", "sections_count", "rows", "characters", "text",
+                    ):
+                        if _key in preview and _key not in canonical:
+                            canonical[_key] = preview[_key]
+                    if "type" not in preview:
+                        if any(k in preview for k in ("card_type", "occasion", "item_name", "ingredients_or_materials", "steps")):
+                            canonical["card_data"] = preview
+                        if any(k in preview for k in ("diagram_type", "nodes", "timeline_milestones", "comparison_aspects")):
+                            canonical["diagram_data"] = preview
+                document = _doc
+            except Exception:
+                logger.debug("ArtifactDocument preview build failed; using renderer preview.", exc_info=True)
+                canonical = preview if isinstance(preview, dict) else {"type": kind, "title": request.title}
+                document = None
 
             return ArtifactResult(
                 id=art_id,
@@ -1074,9 +1714,10 @@ class ArtifactOrchestrator:
                 size_bytes=size_bytes,
                 status="created",
                 download_url=download_url,
-                preview=preview,
+                preview=canonical,
                 checksum=checksum,
                 data=raw_bytes,
+                document=document,
             )
 
         except ArtifactValidationError as exc:
@@ -1088,6 +1729,15 @@ class ArtifactOrchestrator:
                 size_bytes=0, status="failed", download_url=None,
                 error="تعذر التحقق من الملف الناتج. الرجاء إعادة المحاولة لاحقاً.", error_category=category,
             )
+        except _Cancelled as exc:
+            logger.warning("Artifact generation cancelled before store (fmt=%s): %s", fmt, exc)
+            return ArtifactResult(
+                id=art_id, kind=kind, format=fmt, title=request.title or f"مخرج ثقافي: {request.topic}",
+                filename=filename, mime_type=ARTIFACT_MIME_TYPES.get(fmt, "application/octet-stream"),
+                size_bytes=0, status="failed", download_url=None,
+                error="تم إلغاء الطلب قبل اكتمال التوليد.",
+                error_category="cancelled",
+            )
         except TimeoutError as exc:
             logger.warning("Artifact generation discarded after deadline (fmt=%s): %s", fmt, exc)
             return ArtifactResult(
@@ -1096,9 +1746,13 @@ class ArtifactOrchestrator:
                 size_bytes=0, status="failed", download_url=None,
                 error="تجاوز المهلة المحددة؛ تم إلغاء التوليد دون حفظ ملفات يتيمة.", error_category="timeout",
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Artifact generation or storage failed for format %s", fmt)
-            category = "storage_error" if stage == "store" else "renderer_exception"
+            message = str(exc).lower()
+            if isinstance(exc, ValueError) and ("overwrite" in message or "already exists" in message or "refusing" in message):
+                category = "duplicate_artifact"
+            else:
+                category = "storage_error" if stage == "store" else "renderer_exception"
             return ArtifactResult(
                 id=art_id,
                 kind=kind,
@@ -1119,11 +1773,34 @@ class ArtifactOrchestrator:
         raw_text: str = "",
         content_data: Optional[Dict[str, Any]] = None,
         sources: Sequence[Any] = (),
+        deadline: float | object | None = None,
+        deadline_monotonic: float | object | None = None,
+        cancel_event: Optional[Any] = None,
     ) -> List[ArtifactResult]:
-        """Generates all requested artifacts derived from structured intent."""
+        """Generates all requested artifacts derived from structured intent.
+
+        Workstream E: checks the reserve-preserving deadline before each
+        format and degrades to a typed ``failed`` (``error_category``
+        timeout/cancelled) instead of starting doomed renders.
+        """
         # Import lazily: sard.agent's package initializer imports the chat
         # service, which in turn exposes this orchestrator.
         from sard.agent.capability_routing import Capability
+        from sard.agent.deadline import DeadlineCancelledError as _Cancelled2
+        from sard.agent.deadline import coerce_deadline as _coerce2
+
+        _dl = _coerce2(deadline, cancel_event=cancel_event, label="orchestrate")
+        if _dl is None and deadline_monotonic is not None:
+            _dl = _coerce2(deadline_monotonic, cancel_event=cancel_event, label="orchestrate")
+
+        def _mk_failed(fmt: str, kind: str, title: str, category: str, msg: str) -> ArtifactResult:
+            return ArtifactResult(
+                id=f"art-{uuid.uuid4().hex}", kind=kind, format=fmt,
+                title=title, filename=f"sard-{fmt}",
+                mime_type=ARTIFACT_MIME_TYPES.get(fmt, "application/octet-stream"),
+                size_bytes=0, status="failed", download_url=None,
+                error=msg, error_category=category,
+            )
 
         results: List[ArtifactResult] = []
 
@@ -1167,7 +1844,18 @@ class ArtifactOrchestrator:
                 region=intent.region,
             )
 
-            res = self.generate_artifact(req)
+            # Per-format reserve check: degrade, don't doom-render.
+            if _dl is not None:
+                try:
+                    _dl.check(f"orchestrate:{fmt}")
+                except _Cancelled2:
+                    results.append(_mk_failed(fmt, kind, title, "cancelled", "تم إلغاء الطلب قبل اكتمال التوليد."))
+                    continue
+                except Exception:
+                    results.append(_mk_failed(fmt, kind, title, "timeout", "تجاوز المهلة المحددة؛ تم إلغاء التوليد دون حفظ ملفات يتيمة."))
+                    continue
+
+            res = self.generate_artifact(req, deadline=_dl, cancel_event=cancel_event)
             results.append(res)
 
         return results

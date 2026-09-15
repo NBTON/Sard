@@ -21,7 +21,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
 
@@ -53,10 +53,28 @@ app = FastAPI(
     version="2.0.0",
 )
 
-# Enable CORS for Next.js and frontend dev servers
+# CORS: env-aware explicit origins. Never wildcard ("*") together with
+# credentials. Local dev defaults plus prod frontend domain(s) via
+# SARD_FRONTEND_ORIGINS (comma-separated) / SARD_FRONTEND_ORIGIN.
+# Workstream E: wildcard+credentials replaced (was allow_origins=["*"]).
+def _cors_origins() -> List[str]:
+    origins: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    extra: List[str] = []
+    try:
+        raw_multi = os.environ.get("SARD_FRONTEND_ORIGINS", "") or ""
+        raw_single = os.environ.get("SARD_FRONTEND_ORIGIN", "") or ""
+        for token in (raw_multi.split(",") + [raw_single]):
+            token = (token or "").strip().rstrip("/")
+            if token and token != "*" and token not in origins:
+                extra.append(token)
+    except Exception:
+        extra = []
+    return origins + extra
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -687,15 +705,66 @@ async def get_artifact_file(filename: str):
     safe_name = Path(filename).name
 
     store = get_artifact_store()
-    file_path = store.get_file_path(safe_name)
+    file_path = None
+    try:
+        file_path = store.get_file_path(safe_name)
+    except Exception as exc:
+        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
+        file_path = None
 
-    if not file_path or not file_path.exists():
-        # Check output root fallback
-        matches = list(OUTPUT_DIR.glob(f"**/{safe_name}"))
-        if matches and matches[0].is_file():
-            file_path = matches[0]
+    if file_path is not None and file_path.exists():
+        # Local fast path (FS dev / same-process blob mirror).
+        fn_lower = safe_name.lower()
+        if fn_lower.endswith(".pdf"):
+            media_type = "application/pdf"
+        elif fn_lower.endswith(".docx"):
+            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fn_lower.endswith(".pptx"):
+            media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        elif fn_lower.endswith(".ics"):
+            media_type = "text/calendar; charset=utf-8"
+        elif fn_lower.endswith(".svg"):
+            media_type = "image/svg+xml"
+        elif fn_lower.endswith(".png"):
+            media_type = "image/png"
+        elif fn_lower.endswith(".json"):
+            media_type = "application/json"
+        elif fn_lower.endswith(".csv"):
+            media_type = "text/csv; charset=utf-8"
+        elif fn_lower.endswith(".txt"):
+            media_type = "text/plain; charset=utf-8"
         else:
-            raise HTTPException(status_code=404, detail="الملف المطلوب غير موجود.")
+            media_type = "application/octet-stream"
+
+        return FileResponse(
+            path=file_path,
+            filename=safe_name,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
+
+    # Blob-configured (get_file_path is None): authenticated server-side proxy.
+    # The read token never leaves the server; browsers only see this endpoint.
+    try:
+        streamed = store.get_bytes(safe_name)
+    except Exception as exc:
+        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
+        streamed = None
+    if streamed is not None:
+        data, resolved_name, mime = streamed
+        resolved = Path(str(resolved_name or safe_name)).name or safe_name
+        return Response(
+            content=data,
+            media_type=mime or "application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{resolved}"'},
+        )
+
+    # Check output root fallback
+    matches = list(OUTPUT_DIR.glob(f"**/{safe_name}"))
+    if matches and matches[0].is_file():
+        file_path = matches[0]
+    else:
+        raise HTTPException(status_code=404, detail="الملف المطلوب غير موجود.")
 
     # Determine MIME
     fn_lower = safe_name.lower()

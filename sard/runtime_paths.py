@@ -9,6 +9,22 @@ from pathlib import Path
 DEFAULT_VERCEL_BLOB_ENDPOINT = "https://blob.vercel-storage.com"
 
 
+def _blob_token() -> str:
+    """Resolve a blob read/write token from supported env aliases (read-only).
+
+    Priority: ``SARD_BLOB_TOKEN`` (explicit override), then Vercel-provided
+    ``BLOB_READ_WRITE_TOKEN``, then ``VERCEL_BLOB_READ_WRITE_TOKEN`` (newer
+    Vercel naming).  No secrets are ever written or logged here.
+    """
+
+    return (
+        os.environ.get("SARD_BLOB_TOKEN")
+        or os.environ.get("BLOB_READ_WRITE_TOKEN")
+        or os.environ.get("VERCEL_BLOB_READ_WRITE_TOKEN")
+        or ""
+    )
+
+
 def durable_storage_configured() -> bool:
     """Return whether a configured remote blob store can outlive a request.
 
@@ -19,9 +35,9 @@ def durable_storage_configured() -> bool:
     """
 
     endpoint = os.environ.get("SARD_BLOB_ENDPOINT") or (
-        DEFAULT_VERCEL_BLOB_ENDPOINT if os.environ.get("BLOB_READ_WRITE_TOKEN") else ""
+        DEFAULT_VERCEL_BLOB_ENDPOINT if _blob_token() else ""
     )
-    token = os.environ.get("SARD_BLOB_TOKEN") or os.environ.get("BLOB_READ_WRITE_TOKEN")
+    token = _blob_token()
     return bool(endpoint and token)
 
 
