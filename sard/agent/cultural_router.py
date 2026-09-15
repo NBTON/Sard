@@ -28,6 +28,7 @@ from sard.agent.tools.multimodal_tools import (
     extract_multimodal_context,
 )
 from sard.agent.util import sanitize_cultural_output
+from sard.rag.relevance import filter_relevant_evidence, requires_medical_qualification
 from sard.rag.schemas import ScoreType
 
 logger = logging.getLogger("sard.agent.cultural_router")
@@ -254,7 +255,8 @@ class CulturalRouter:
                             continue
                         norm = _normalize_router_web_hit(item)
                         if norm.get("url") and not any(w.get("url") == norm.get("url") for w in web_results):
-                            web_results.append(norm)
+                            if filter_relevant_evidence(user_query, [norm]):
+                                web_results.append(norm)
                     if len(web_results) >= 3:
                         break
                 except Exception as exc:
@@ -605,6 +607,15 @@ class CulturalRouter:
                 answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res, multimodal_items, lang=resolved_lang)
         else:
             answer_text = self._synthesize_grounded_answer(user_query, rag_res, web_res, ext_res, multimodal_items, lang=resolved_lang)
+
+        if requires_medical_qualification(user_query):
+            qualification_note = (
+                "\n\n> Note: references to healing or therapeutic benefits describe reported local beliefs or uses, not medical evidence or a treatment claim."
+                if resolved_lang == "en"
+                else "\n\n> تنبيه: ما يرد عن الاستشفاء أو الفوائد العلاجية يصف معتقدات أو استخدامات محلية محتملة، وليس دليلاً طبياً على علاج مرض."
+            )
+            if not any(marker in answer_text for marker in ("دليلاً طبياً", "medical evidence")):
+                answer_text = f"{answer_text.rstrip()}{qualification_note}"
 
         latency_ms = (time.monotonic() - t0) * 1000
         return CulturalQueryResult(

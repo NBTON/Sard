@@ -363,7 +363,9 @@ class GroundedRetriever:
                                 "region_code": "" if region == "unknown" else str(region),
                             },
                         }
-                        if not _gate(query, [gate_candidate]):
+                        from sard.rag.relevance import query_profile
+
+                        if query_profile(query).topics and not _gate(query, [gate_candidate]):
                             retrieval_logs.append(f"مصدر ويب مرفوض لبوابة الصلة: {title or url}")
                             continue
                     except Exception as exc:

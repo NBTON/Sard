@@ -1367,6 +1367,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
         run_id = f"chat-{uuid.uuid4().hex[:10]}"
         citations_sent: list[dict[str, Any]] = []
         artifacts_sent: list[dict[str, Any]] = []
+        proposals: list[Any] = []
         full_response_text = ""
         verified = False
         # Early intent classification so fallback path knows artifact expectation and can surface failed artifacts
@@ -1586,6 +1587,22 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                                 "data": json.dumps({
                                     "citations": citations_sent,
                                     "count": len(citations_sent)
+                                }, ensure_ascii=False)
+                            }
+                        try:
+                            proposal_payload = getattr(hybrid_chat_res, "proposal_result", None)
+                            proposals = list(getattr(proposal_payload, "proposals", None) or [])
+                        except Exception:
+                            proposals = []
+                        if proposals:
+                            yield {
+                                "event": "proposals",
+                                "data": json.dumps({
+                                    "proposals": [
+                                        p.model_dump() if hasattr(p, "model_dump") else dict(p)
+                                        for p in proposals
+                                    ],
+                                    "count": len(proposals),
                                 }, ensure_ascii=False)
                             }
                         # Capture text if ok, otherwise keep empty to trigger fallback path below
@@ -1831,6 +1848,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                                 "total_ms": round(total_time_ms, 1),
                             },
                             "artifacts_count": len(artifacts_sent),
+                            "proposals_count": len(proposals),
                             "session_id": session_id_out,
                             "run_id": run_id,
                             "partial": bool(_partial),
@@ -1898,22 +1916,10 @@ def _generate_cultural_fallback_answer(query: str, lang: str = "ar") -> str:
     has_shrimp = any(k in q_norm for k in ["روبيان", "ربيان", "تاروت", "shrimp"])
     has_springs = any(k in q_norm for k in ["ينابيع", "عيون حارة", "عين حارة", "مياه كبريتية", "springs"])
     # Only shrimp/springs legitimate branches are kept; Eastern/UNESCO canned articles removed
-    if has_shrimp and any(k in q_norm for k in ["روبيان", "ربيان", "تجفيف", "تاروت", "shrimp"]):
+    if has_shrimp or has_springs:
         return (
-            "تُعد حرفة **تجفيف الروبيان** في جزيرة تاروت بمحافظة القطيف إحدى أقدم الحرف والتقاليد البحرية "
-            "في المنطقة الشرقية بالمملكة العربية السعودية.\n\n"
-            "### مراحل الحرفة التقليدية:\n"
-            "1. **صيد الروبيان**: يتم الصيد في مواسم محددة (موسم فسح الروبيان) باستخدام قوارب الصيد التقليدية.\n"
-            "2. **السلق الفوري**: يُسلق الروبيان في قدور ضخمة على الشاطئ مباشرة بمياه البحر المملحة للحفاظ على نكهته وجودته.\n"
-            "3. **التجفيف تحت أشعة الشمس**: يُفرد الروبيان المسلوق على مسطحات خوص خاصة (السفات) لعدة أيام حتى يجف تماماً.\n"
-            "4. **التقشير والتعبئة**: يُفصل القشر عن اللحم المجفف يدوياً، ويُحفظ ليُستخدم في أشهر المأكولات التراثية مثل الكبسة والمحموس والثريد.\n\n"
-            "هذه الحرفة تمثل جزءاً حيوياً من التراث الثقافي غير المادي الذي تحرص **وزارة الثقافة** على توثيقه وإبرازه."
-        )
-    if has_springs:
-        return (
-            f"بخصوص استفسارك حول الينابيع والعيون الحارة: *\"{query[:120]}\"*\n\n"
-            "تُعد الينابيع والعيون الحارة جزءاً من التراث الطبيعي في بعض مناطق المملكة، وتُرتبط بمعارف استشفائية وتقاليد محلية.\n"
-            "لعدم توفر مصدر موثق كافٍ لهذا الاستعلام في الوقت الحالي، يُرجى تحديد المنطقة (مثلاً: الأحساء، الليث، عسير) أو السياق المطلوب، وسأقدّم توثيقاً أدق مع الإسناد."
+            f"تعذّر تقديم إجابة موثقة عن: \"{query[:120]}\" لعدم توفر مصدر موثوق كافٍ في هذه المحاولة. "
+            "لن أستنتج تفاصيل عن الممارسة أو فوائدها دون شاهد مطابق."
         )
      # Generic hedge — language-aware
     if lang == "en":
@@ -1928,7 +1934,8 @@ def _generate_cultural_fallback_answer(query: str, lang: str = "ar") -> str:
         )
     return (
         f"تعذّر توليد إجابة موثقة عن: \"{query[:120]}\" في الوقت الحالي.\n\n"
-        "حفاظًا على الأمانة المعرفية، لا أقدّم توليفًا غير مُسنَد بلا مصادر.\n"
+            "حفاظًا على الأمانة المعرفية، لا أقدّم توليفًا غير مُسنَد بلا مصدر موثوق.\n"
+
         "كرفيقك الثقافي في **سرد**، يمكنني مساعدتك في:\n"
         "- برامج ومسارات سياحية وتراثية مخصصة حسب المنطقة والمدة.\n"
         "- معلومات موثقة عن المواقع الأثرية والفنون والحرف اليدوية.\n"
