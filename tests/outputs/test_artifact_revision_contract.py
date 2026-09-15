@@ -148,3 +148,31 @@ def test_unknown_artifact_revision_is_422_and_versions_404(client):
     )
     assert resp.status_code == 422
     assert test_client.get("/api/artifacts/art-unknown999/versions").status_code == 404
+
+
+def test_blob_stores_delegate_version_document_surface(tmp_path):
+    """Production wiring uses blob stores; they must not drop revision support.
+
+    Regression: VercelBlob/ConfigurableBlob stores lacked put/get_document and
+    list/get_version_bytes, so chat-created artifacts (default store) failed
+    revision with unknown_artifact while injected FileSystem stores passed.
+    """
+    from sard.outputs.orchestrator import (
+        ArtifactOrchestrator,
+        ConfigurableBlobArtifactStore,
+        VercelBlobArtifactStore,
+    )
+
+    for store_cls in (VercelBlobArtifactStore, ConfigurableBlobArtifactStore):
+        store = store_cls(fallback_local=FileSystemArtifactStore(root_dir=tmp_path / store_cls.__name__))
+        assert not getattr(store, "blob_configured", True)
+        orch = ArtifactOrchestrator(store)
+        created = orch.generate_artifact(_request())
+        assert created.status == "created", created.error
+        assert store.get_document(created.id) is not None
+        assert len(store.list_versions(created.id)) >= 1
+        revised = orch.revise_artifact(created.id, updated_text="Revised body.")
+        assert revised.status == "created", revised.error
+        assert len(store.list_versions(created.id)) >= 2
+        v1 = store.get_version_bytes(created.id, 1)
+        assert v1 is not None and bytes(created.data or b"") == v1[0]

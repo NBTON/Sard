@@ -1018,6 +1018,25 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
         except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
             return local
 
+    # --- Version/document surface: canonical docs + history live in the local
+    # mirror (same-process authoritative for revision); blob keys carry bytes.
+    def put_document(self, artifact_id: str, document: Any, version: Optional[int] = None) -> None:
+        put = getattr(self.fallback, "put_document", None)
+        if callable(put):
+            put(artifact_id, document, version)
+
+    def get_document(self, artifact_id: str, version: Optional[int] = None) -> Optional[Any]:
+        get = getattr(self.fallback, "get_document", None)
+        return get(artifact_id, version) if callable(get) else None
+
+    def list_versions(self, artifact_id: str) -> List[Dict[str, Any]]:
+        lv = getattr(self.fallback, "list_versions", None)
+        return list(lv(artifact_id)) if callable(lv) else []
+
+    def get_version_bytes(self, artifact_id: str, version: int) -> Optional[Tuple[bytes, str, str]]:
+        gv = getattr(self.fallback, "get_version_bytes", None)
+        return gv(artifact_id, version) if callable(gv) else None
+
 
 class VercelBlobArtifactStore(ArtifactStore):
     """Durable store via official Vercel Blob SDK (ADR Decision 3, G3).
@@ -1358,6 +1377,28 @@ class VercelBlobArtifactStore(ArtifactStore):
         except Exception as exc:
             logger.debug("Blob version metadata skipped (%s).", type(exc).__name__)
         return base or None
+
+    # --- Version/document surface: delegate to the local mirror, which holds
+    # canonical .doc.json sidecars + version history. Without this, the default
+    # production store silently drops revision/version support that tests (with
+    # injected FileSystem stores) prove. Cross-instance revision of artifacts
+    # created elsewhere remains a documented limitation.
+    def put_document(self, artifact_id: str, document: Any, version: Optional[int] = None) -> None:
+        put = getattr(self.fallback, "put_document", None)
+        if callable(put):
+            put(artifact_id, document, version)
+
+    def get_document(self, artifact_id: str, version: Optional[int] = None) -> Optional[Any]:
+        get = getattr(self.fallback, "get_document", None)
+        return get(artifact_id, version) if callable(get) else None
+
+    def list_versions(self, artifact_id: str) -> List[Dict[str, Any]]:
+        lv = getattr(self.fallback, "list_versions", None)
+        return list(lv(artifact_id)) if callable(lv) else []
+
+    def get_version_bytes(self, artifact_id: str, version: int) -> Optional[Tuple[bytes, str, str]]:
+        gv = getattr(self.fallback, "get_version_bytes", None)
+        return gv(artifact_id, version) if callable(gv) else None
 
 
 # Default global store instance (official SDK first, REST/FS fallback)
