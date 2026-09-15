@@ -86,8 +86,7 @@ def test_10d_html_preview_renders_rtl_sanitized():
     assert "Content-Security-Policy" in html
 
 
-@pytest.mark.xfail(strict=False, reason="html is a preview renderer, not a stored artifact format (9-format validation map has no html)")
-def test_10e_html_as_stored_format_xfail(tmp_path):
+def test_10e_html_as_stored_format(tmp_path):
     orch = ArtifactOrchestrator(FileSystemArtifactStore(tmp_path))
     res = orch.generate_artifact(artifact_request("html"))
     assert res.status == "created"

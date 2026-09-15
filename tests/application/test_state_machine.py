@@ -228,15 +228,17 @@ def test_success_run_maps_progress_in_stage_order():
 
 
 def test_exhaustion_run_maps_retried_then_partially_completed():
-    scripts = success_scripts()[:3]
+    # New contract (claim-level verify): the model-verdict scripts are only
+    # consulted for L7 narrowing; deterministic layers decide first. Unknown
+    # citations are stripped by compose's _repair_citations, so every round
+    # below yields uncited (unsupported) claims -> recompose until exhausted.
+    scripts = success_scripts()[:2]
     scripts.extend(
         [
-            '{"claims":[{"claim_id":"CLAIM-01-001","status":"supported","correction":"","note":""},'
-            '{"claim_id":"CLAIM-01-002","status":"unsupported","correction":"إزالة","note":""}]}',
-            "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-RIY01]. "
-            "سعر الدخول خمسون ريالًا [CIT-RIY02].",
-            '{"claims":[{"claim_id":"CLAIM-02-001","status":"supported","correction":"","note":""},'
-            '{"claim_id":"CLAIM-02-002","status":"unsupported","correction":"إزالة","note":""}]}',
+            "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-FAKE01]. "
+            "سعر الدخول خمسون ريالًا [CIT-FAKE02].",
+            "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-FAKE03]. "
+            "سعر الدخول خمسون ريالًا [CIT-FAKE04].",
         ]
     )
     deps = make_offline_deps(scripts, rag_service=FakeRAGService(evidence_answer()), max_retries=1)
@@ -269,15 +271,16 @@ def test_success_path_follows_six_node_order():
 
 
 def test_retry_loop_is_bounded_and_recomposes():
-    scripts = success_scripts()[:3]
+    # New contract: first compose emits unknown citations (stripped to uncited
+    # claims -> verify fails deterministically -> exactly one recompose), the
+    # recomposed draft cites real evidence -> verify passes -> completed.
+    scripts = success_scripts()[:2]
     scripts.extend(
         [
-            '{"claims":[{"claim_id":"CLAIM-01-001","status":"supported","correction":"","note":""},'
-            '{"claim_id":"CLAIM-01-002","status":"unsupported","correction":"أزله","note":""}]}',
+            "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-FAKE01]. "
+            "تتوفر معلومات محدودة عن مواقيت الزيارة في المصادر الحالية [CIT-FAKE02].",
             "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-RIY01]. "
-            "تتوفر معلومات محدودة عن مواقيت الزيارة في المصادر الحالية.",
-            '{"claims":[{"claim_id":"CLAIM-02-001","status":"supported","correction":"","note":""},'
-            '{"claim_id":"CLAIM-02-002","status":"explicitly_uncertain","correction":"","note":""}]}',
+            "يُفضّل زيارتها مساءً في الصيف [CIT-RIY02].",
         ]
     )
     deps = make_offline_deps(scripts, rag_service=FakeRAGService(evidence_answer()), max_retries=2)

@@ -210,11 +210,25 @@ def test_chat_persona_greeting_salam(client):
 def test_tool_presentation_endpoint(client):
     test_client, _ = client
     # Test with normalized alias title instead of topic
-    res = test_client.post("/api/tools/presentation", json={"title": "عمارة الطين في نجد"})
+    res = test_client.post("/api/tools/presentation", json={
+        "title": "عمارة الطين في نجد",
+        "overview_text": "عمارة الطين في نجد تراث معماري عريق يستحق التوثيق والعرض.",
+        "key_takeaways": ["الطين مادة بناء تقليدية", "الدرعية مثال حي"],
+    })
     assert res.status_code == 200
     data = res.json()
     assert data["success"] is True
     assert data["download_url"].startswith("/api/artifacts/")
+
+
+def test_tool_presentation_endpoint_empty_content_fails_honestly(client):
+    test_client, _ = client
+    # No real content -> honest failure dict, never fabricated filler slides.
+    res = test_client.post("/api/tools/presentation", json={"title": "عمارة الطين في نجد"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["success"] is False
+    assert data["error"] == "empty_content"
 
 
 def test_tool_recipe_card_endpoint_with_alias(client):

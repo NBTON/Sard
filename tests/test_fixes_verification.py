@@ -107,7 +107,7 @@ def test_english_locale_produces_english():
     class FakeModel:
         def invoke(self, msgs):
             return AIMessage(content="fake")
-    def mock_plan(query, session_id=None, mock_multimodal_files=None, llm_invoke_fn=None, status_callback=None, lang="ar", uploaded_files=None):
+    def mock_plan(query, session_id=None, mock_multimodal_files=None, llm_invoke_fn=None, status_callback=None, lang="ar", uploaded_files=None, deadline=None, deadline_monotonic=None, cancel_event=None):
         chain = IsnadChain(request_id="r", classification="other", region="unknown", evidence=[], atoms=[], conflicts=[], score="high", decision="generate")
         if lang == "en":
             return PlannerResult(chain=chain, answer_ar=None, answer_en="English verified answer", visible_sources=[])
@@ -123,7 +123,7 @@ def test_arabic_locale_produces_arabic():
     class FakeModel:
         def invoke(self, msgs):
             return AIMessage(content="fake")
-    def mock_plan(query, session_id=None, mock_multimodal_files=None, llm_invoke_fn=None, status_callback=None, lang="ar", uploaded_files=None):
+    def mock_plan(query, session_id=None, mock_multimodal_files=None, llm_invoke_fn=None, status_callback=None, lang="ar", uploaded_files=None, deadline=None, deadline_monotonic=None, cancel_event=None):
         chain = IsnadChain(request_id="r", classification="other", region="unknown", evidence=[], atoms=[], conflicts=[], score="high", decision="generate")
         if lang == "en":
             return PlannerResult(chain=chain, answer_ar=None, answer_en="English", visible_sources=[])
