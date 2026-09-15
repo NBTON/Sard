@@ -1,20 +1,53 @@
-"""Cultural DOCX Document Generator for Sard.
+"""Cultural DOCX generator for Sard, built on python-docx.
 
-Produces standards-compliant Microsoft Word (.docx) documents with Arabic right-to-left
-formatting (<w:bidi/>, <w:rtl/>), Sard cultural design tokens (Ink, Clay, Date, Olive, Gold, Card),
-structured tables, styled callout boxes, and verified isnād citations.
+Generates standards-compliant Word (.docx) documents from the canonical
+:class:`ArtifactDocument <sard.outputs.document.ArtifactDocument>` (or the
+legacy ``render_cultural_docx_report`` kwargs): heading/paragraph styles,
+numbering, tables, images, sources, Arabic RTL properties, fonts, margins,
+headers/footers.
+
+RTL POLICY: native Unicode + RTL properties (``w:bidi`` on paragraphs,
+``w:rtl`` on runs, complex-script typefaces).  NO pre-reshaping — Word
+shapes Arabic natively.
+
+FONTS: rendering fails loudly when content is missing; partial files are
+deleted on failure.
 """
 
 from __future__ import annotations
 
 import io
-import time
+import logging
 import uuid
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from xml.sax.saxutils import escape as xml_escape
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+from docx.shared import Pt, RGBColor, Inches
+
+
+logger = logging.getLogger("sard.outputs.office_docx")
+
+MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+FONT_ARABIC = "Noto Naskh Arabic"
+FONT_BODY = "IBM Plex Sans Arabic"
+FONT_FALLBACK = "Arial"
+
+COLOR_INK = RGBColor(0x14, 0x12, 0x10)
+COLOR_CLAY = RGBColor(0xBE, 0x4A, 0x24)
+COLOR_DATE = RGBColor(0x6E, 0x1F, 0x1F)
+COLOR_OLIVE = RGBColor(0x4A, 0x51, 0x3C)
+COLOR_GOLD = RGBColor(0xC4, 0xA4, 0x6A)
+COLOR_MUTED = RGBColor(0x8A, 0x81, 0x78)
+
+
+class DocxRenderError(ValueError):
+    """DOCX rendering failed loudly (missing content, bad path)."""
 
 
 @dataclass
@@ -23,6 +56,7 @@ class DocxSection:
     content: str
     bullets: List[str] = field(default_factory=list)
     badge: str = ""
+    table_data: Optional[List[List[str]]] = None
 
 
 @dataclass
@@ -39,312 +73,308 @@ class CulturalDocxDocument:
     doc_id: str = field(default_factory=lambda: f"doc-{uuid.uuid4().hex[:8]}")
 
 
+def _set_run_rtl(run, *, size: Optional[Pt] = None, bold: bool = False, color=None, font: Optional[str] = None) -> None:
+    """Apply complex-script font + RTL marker to a python-docx run (native Unicode)."""
+
+    run.font.name = font or FONT_BODY
+    if size is not None:
+        run.font.size = size
+    run.font.bold = bold or None
+    if color is not None:
+        run.font.color.rgb = color
+    r = run._r
+    rPr = r.get_or_add_rPr()
+    rtl = OxmlElement("w:rtl")
+    rPr.append(rtl)
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.append(rFonts)
+    rFonts.set(qn("w:cs"), FONT_ARABIC)
+    rFonts.set(qn("w:ascii"), font or FONT_BODY)
+    rFonts.set(qn("w:hAnsi"), font or FONT_BODY)
+    szCs = OxmlElement("w:szCs")
+    szCs.set(qn("w:val"), str(int((size.pt if size else 11) * 2)))
+    rPr.append(szCs)
+
+
+def _set_paragraph_rtl(paragraph, *, align: WD_ALIGN_PARAGRAPH = WD_ALIGN_PARAGRAPH.RIGHT) -> None:
+    """Right-align + ``w:bidi`` so Word lays out mixed Arabic/Latin correctly."""
+
+    paragraph.alignment = align
+    pPr = paragraph._p.get_or_add_pPr()
+    if pPr.find(qn("w:bidi")) is None:
+        pPr.append(OxmlElement("w:bidi"))
+
+
+def _add_paragraph(doc: Document, text: str, *, size: float = 11, bold: bool = False, color=None, font: Optional[str] = None, style: Optional[str] = None, space_after: float = 6) -> Any:
+    paragraph = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+    _set_paragraph_rtl(paragraph)
+    paragraph.paragraph_format.space_after = Pt(space_after)
+    run = paragraph.add_run(str(text or ""))
+    _set_run_rtl(run, size=Pt(size), bold=bold, color=color, font=font)
+    return paragraph
+
+
+def _add_bullet(doc: Document, text: str, *, style: str = "List Bullet") -> Any:
+    try:
+        paragraph = doc.add_paragraph(style=style)
+    except (KeyError, ValueError):
+        paragraph = doc.add_paragraph()
+        paragraph.style = doc.styles["Normal"]
+    _set_paragraph_rtl(paragraph)
+    run = paragraph.add_run(str(text or ""))
+    _set_run_rtl(run, size=Pt(11))
+    return paragraph
+
+
+def _add_table(doc: Document, rows: Sequence[Sequence[str]]) -> Any:
+    """Add an RTL table (logical-first column renders rightmost via tblBidiVisual)."""
+
+    cleaned = [[str(c or "") for c in row] for row in rows if row]
+    if not cleaned:
+        raise DocxRenderError("Cannot render an empty table.")
+    width = max(len(row) for row in cleaned)
+    normalized = [row + [""] * (width - len(row)) for row in cleaned]
+    # RTL visual order: reverse columns so logical-first is rightmost.
+    rtl_rows = [list(reversed(row)) for row in normalized]
+    table = doc.add_table(rows=len(rtl_rows), cols=width)
+    table.style = "Light Grid Accent 1"
+    try:
+        tbl = table._tbl
+        tblPr = tbl.tblPr
+        bidi = OxmlElement("w:bidiVisual")
+        tblPr.append(bidi)
+    except Exception as exc:  # Non-fatal: table still renders LTR-grid.
+        logger.debug("Could not set tblBidiVisual: %s", type(exc).__name__)
+    for row_idx, row in enumerate(rtl_rows):
+        for col_idx, cell_text in enumerate(row):
+            cell = table.cell(row_idx, col_idx)
+            cell.text = ""
+            paragraph = cell.paragraphs[0]
+            _set_paragraph_rtl(paragraph)
+            run = paragraph.add_run(cell_text)
+            _set_run_rtl(
+                run,
+                size=Pt(11 if row_idx == 0 else 10),
+                bold=row_idx == 0,
+                color=COLOR_DATE if row_idx == 0 else None,
+            )
+            if row_idx == 0:
+                shading = OxmlElement("w:shd")
+                shading.set(qn("w:val"), "clear")
+                shading.set(qn("w:fill"), "E8E0D2")
+                cell._tc.get_or_add_tcPr().append(shading)
+    doc.add_paragraph().paragraph_format.space_after = Pt(4)
+    return table
+
+
+def _add_image(doc: Document, image_path: str, *, width_in: float = 5.5) -> bool:
+    """Best-effort local image; returns False (renders nothing) when unavailable."""
+
+    candidate = Path(str(image_path or "").strip())
+    if not candidate.is_file():
+        return False
+    try:
+        paragraph = doc.add_paragraph()
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph.add_run().add_picture(str(candidate), width=Inches(width_in))
+        return True
+    except Exception as exc:
+        logger.debug("Skipping unreadable image %s: %s", candidate, type(exc).__name__)
+        return False
+
+
+def _apply_page_setup(doc: Document) -> None:
+    for section in doc.sections:
+        section.top_margin = Inches(1.0)
+        section.bottom_margin = Inches(1.0)
+        section.left_margin = Inches(1.0)
+        section.right_margin = Inches(1.0)
+        sectPr = section._sectPr
+        bidi = OxmlElement("w:bidi")
+        sectPr.append(bidi)
+
+
+def _apply_header_footer(doc: Document, author: str) -> None:
+    try:
+        section = doc.sections[0]
+        header = section.header
+        h_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+        _set_paragraph_rtl(h_para)
+        run = h_para.add_run("المملكة العربية السعودية • وزارة الثقافة — سرد")
+        _set_run_rtl(run, size=Pt(8), color=COLOR_MUTED)
+        footer = section.footer
+        f_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        _set_paragraph_rtl(f_para)
+        run = f_para.add_run(f"سرد — المستشار الثقافي | {author}")
+        _set_run_rtl(run, size=Pt(8), color=COLOR_MUTED)
+    except Exception as exc:
+        logger.debug("Header/footer setup skipped: %s", type(exc).__name__)
+
+
 class DocxGenerator:
-    """Generates standard OOXML .docx files with Arabic RTL support and Sard branding."""
+    """Generates standard OOXML .docx files via python-docx with Arabic RTL support."""
 
     def __init__(self, output_dir: Optional[Path] = None):
         self.output_dir = output_dir or Path("output")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def build_docx(self, doc: CulturalDocxDocument) -> bytes:
-        """Constructs a valid OOXML ZIP package (.docx) in memory and returns bytes."""
+    # -- canonical ArtifactDocument entry point ---------------------------
+
+    def build_from_document(self, doc) -> bytes:
+        """Build DOCX bytes from a canonical ArtifactDocument (artifact agent shape)."""
+
+        from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+
+        if not isinstance(doc, _ArtifactDocument):
+            raise DocxRenderError("build_from_document requires an ArtifactDocument.")
+        meta = doc.metadata
+        title = (meta.title or "").strip()
+        topic = (meta.topic or "").strip()
+        if not title:
+            raise DocxRenderError("Artifact title is required.")
+        if not topic:
+            raise DocxRenderError("Artifact topic is required.")
+        document = Document()
+        _apply_page_setup(document)
+        _apply_header_footer(document, meta.region or "")
+        _add_paragraph(document, "المملكة العربية السعودية • وزارة الثقافة (سرد)", size=9, bold=True, color=COLOR_CLAY, space_after=2)
+        _add_paragraph(document, title, size=20, bold=True, color=COLOR_INK, font=FONT_ARABIC, space_after=2)
+        _add_paragraph(document, f"الموضوع: {topic} | المنطقة: {meta.region}", size=9, color=COLOR_MUTED, space_after=8)
+        if meta.warnings:
+            for warning in meta.warnings:
+                if str(warning or "").strip():
+                    _add_paragraph(document, f"تنبيه: {warning}", size=9, color=COLOR_CLAY, space_after=2)
+        for section in doc.sections:
+            if section.title.strip():
+                _add_paragraph(document, section.title.strip(), size=15, bold=True, color=COLOR_DATE, font=FONT_ARABIC, space_after=4)
+            for block in section.blocks:
+                self._render_block(document, block)
+        if doc.sources:
+            _add_paragraph(document, "المراجع والتوثيق المعتمد:", size=12, bold=True, color=COLOR_CLAY, space_after=4)
+            for source in doc.sources:
+                label = f"[{source.citation_id}] {source.title}"
+                if source.url:
+                    label += f" ({source.url})"
+                _add_bullet(document, label)
         stream = io.BytesIO()
-
-        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as zf:
-            # 1. [Content_Types].xml
-            zf.writestr("[Content_Types].xml", self._content_types_xml())
-
-            # 2. _rels/.rels
-            zf.writestr("_rels/.rels", self._global_rels_xml())
-
-            # 3. docProps/app.xml & docProps/core.xml
-            zf.writestr("docProps/app.xml", self._app_props_xml())
-            zf.writestr("docProps/core.xml", self._core_props_xml(doc.title, doc.author))
-
-            # 4. word/_rels/document.xml.rels
-            zf.writestr("word/_rels/document.xml.rels", self._document_rels_xml())
-
-            # 5. word/styles.xml
-            zf.writestr("word/styles.xml", self._styles_xml())
-
-            # 6. word/fontTable.xml
-            zf.writestr("word/fontTable.xml", self._font_table_xml())
-
-            # 7. word/document.xml
-            zf.writestr("word/document.xml", self._document_xml(doc))
-
+        document.save(stream)
         return stream.getvalue()
 
-    def _content_types_xml(self) -> str:
-        return (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
-            '  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n'
-            '  <Default Extension="xml" ContentType="application/xml"/>\n'
-            '  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\n'
-            '  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>\n'
-            '  <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>\n'
-            '  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>\n'
-            '  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>\n'
-            "</Types>"
-        )
+    def _render_block(self, document: Document, block) -> None:
+        btype = str(getattr(block, "block_type", "") or "").lower()
+        text = getattr(block, "text", "") or ""
+        data = getattr(block, "data", None) if isinstance(getattr(block, "data", None), dict) else {}
+        if btype == "heading":
+            level = data.get("level", 2) if data else 2
+            try:
+                level = int(level)
+            except (TypeError, ValueError):
+                level = 2
+            heading = document.add_heading(level=min(max(level, 1), 3))
+            _set_paragraph_rtl(heading)
+            run = heading.add_run(text)
+            _set_run_rtl(run, size=Pt(16), bold=True, color=COLOR_DATE, font=FONT_ARABIC)
+        elif btype in {"bullet", "item", "point", "takeaway"}:
+            _add_bullet(document, text)
+        elif btype in {"quote", "callout", "note"}:
+            prefix = "«" if btype == "quote" else ""
+            suffix = "»" if btype == "quote" else ""
+            _add_paragraph(document, f"{prefix}{text}{suffix}", size=11, bold=btype != "quote", color=COLOR_DATE if btype == "quote" else None)
+        elif btype == "code":
+            para = document.add_paragraph()
+            para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            run = para.add_run(text)
+            run.font.name = "Consolas"
+            run.font.size = Pt(9)
+        elif btype in {"table", "table_row", "row"}:
+            rows = data.get("rows") or data.get("table_data") or data.get("table")
+            if isinstance(rows, (list, tuple)) and rows:
+                _add_table(document, rows)
+            elif text.strip():
+                _add_paragraph(document, text)
+        elif btype in {"image", "diagram", "card"}:
+            src = str(data.get("src") or data.get("url") or "").strip()
+            rendered = _add_image(document, src) if src else False
+            if not rendered and text.strip():
+                _add_paragraph(document, text)
+        elif btype == "attachment":
+            return  # preview metadata, not visible content
+        elif btype in {"slide", "event", "calendar_event"}:
+            _add_paragraph(document, text, size=11, bold=True)
+        else:
+            if text.strip():
+                _add_paragraph(document, text)
 
-    def _global_rels_xml(self) -> str:
-        return (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
-            '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>\n'
-            '  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>\n'
-            '  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>\n'
-            "</Relationships>"
-        )
+    # -- legacy entry point (orchestrator-compatible) ----------------------
 
-    def _document_rels_xml(self) -> str:
-        return (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
-            '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n'
-            '  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>\n'
-            "</Relationships>"
-        )
+    def build_docx(self, doc: CulturalDocxDocument) -> bytes:
+        """Construct a valid .docx package in memory and return bytes."""
 
-    def _app_props_xml(self) -> str:
-        return (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">\n'
-            "  <Application>سرد (Sard Cultural Agent)</Application>\n"
-            "  <Company>وزارة الثقافة بالمملكة العربية السعودية</Company>\n"
-            "</Properties>"
-        )
+        title = (doc.title or "").strip()
+        topic = (doc.topic or "").strip()
+        if not title:
+            raise DocxRenderError("DOCX title is required; refusing to render filler.")
+        if not topic:
+            raise DocxRenderError("DOCX topic is required; refusing to render filler.")
+        paragraphs = [p for p in (doc.paragraphs or []) if str(p or "").strip()]
+        if not paragraphs and not doc.sections and not doc.key_takeaways and not doc.summary.strip():
+            raise DocxRenderError("DOCX content is missing; refusing to render filler.")
 
-    def _core_props_xml(self, title: str, author: str) -> str:
-        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        return (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
-            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">\n'
-            f"  <dc:title>{xml_escape(title)}</dc:title>\n"
-            f"  <dc:creator>{xml_escape(author)}</dc:creator>\n"
-            f"  <cp:lastModifiedBy>{xml_escape(author)}</cp:lastModifiedBy>\n"
-            f'  <dcterms:created xsi:type="dcterms:W3CDTF" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">{now_iso}</dcterms:created>\n'
-            f'  <dcterms:modified xsi:type="dcterms:W3CDTF" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">{now_iso}</dcterms:modified>\n'
-            "</cp:coreProperties>"
-        )
+        document = Document()
+        _apply_page_setup(document)
+        _apply_header_footer(document, doc.author)
 
-    def _font_table_xml(self) -> str:
-        return (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\n'
-            '  <w:font w:name="Noto Naskh Arabic">\n'
-            '    <w:family w:val="auto"/>\n'
-            '    <w:pitch w:val="variable"/>\n'
-            "  </w:font>\n"
-            '  <w:font w:name="IBM Plex Sans Arabic">\n'
-            '    <w:family w:val="auto"/>\n'
-            '    <w:pitch w:val="variable"/>\n'
-            "  </w:font>\n"
-            '  <w:font w:name="Arial">\n'
-            '    <w:family w:val="swiss"/>\n'
-            '    <w:pitch w:val="variable"/>\n'
-            "  </w:font>\n"
-            "</w:fonts>"
-        )
+        _add_paragraph(document, "المملكة العربية السعودية • وزارة الثقافة (سرد 2026)", size=9, bold=True, color=COLOR_CLAY, space_after=2)
+        _add_paragraph(document, title, size=20, bold=True, color=COLOR_INK, font=FONT_ARABIC, space_after=2)
+        _add_paragraph(document, f"المنطقة: {doc.region} | التوثيق والمعتمد: {doc.author}", size=9, color=COLOR_MUTED, space_after=8)
 
-    def _styles_xml(self) -> str:
-        return (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\n'
-            '  <w:docDefaults>\n'
-            "    <w:rPrDefault>\n"
-            "      <w:rPr>\n"
-            '        <w:rFonts w:ascii="IBM Plex Sans Arabic" w:hAnsi="IBM Plex Sans Arabic" w:cs="Noto Naskh Arabic"/>\n'
-            '        <w:sz w:val="24"/>\n'
-            '        <w:szCs w:val="24"/>\n'
-            '        <w:color w:val="141210"/>\n'
-            "        <w:rtl/>\n"
-            "      </w:rPr>\n"
-            "    </w:rPrDefault>\n"
-            "    <w:pPrDefault>\n"
-            "      <w:pPr>\n"
-            '        <w:jc w:val="right"/>\n'
-            "        <w:bidi/>\n"
-            '        <w:spacing w:line="360" w:lineRule="auto" w:after="160"/>\n'
-            "      </w:pPr>\n"
-            "    </w:pPrDefault>\n"
-            "  </w:docDefaults>\n"
-            "</w:styles>"
-        )
+        summary_text = doc.summary or (paragraphs[0] if paragraphs else "")
+        if summary_text.strip():
+            _add_paragraph(document, "ملخص التقرير والأصالة الثقافية", size=12, bold=True, color=COLOR_CLAY, space_after=2)
+            _add_paragraph(document, summary_text.strip(), size=11, space_after=8)
 
-    def _document_xml(self, doc: CulturalDocxDocument) -> str:
-        body_parts: List[str] = []
+        start = 1 if (not doc.summary.strip() and len(paragraphs) > 1) else 0
+        for para in paragraphs[start:]:
+            _add_paragraph(document, para.strip(), space_after=6)
 
-        # 1. Ministry Brand Header Subtitle
-        body_parts.append(
-            '<w:p>'
-            '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="80"/></w:pPr>'
-            '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="18"/><w:szCs w:val="18"/><w:color w:val="BE4A24"/></w:rPr>'
-            f'<w:t xml:space="preserve">المملكة العربية السعودية • وزارة الثقافة (سرد 2026)</w:t>'
-            '</w:r>'
-            '</w:p>'
-        )
+        for section in doc.sections:
+            badge_suffix = f" ({section.badge})" if section.badge else ""
+            _add_paragraph(document, f"◆ {section.title}{badge_suffix}", size=14, bold=True, color=COLOR_DATE, font=FONT_ARABIC, space_after=4)
+            if section.content.strip():
+                _add_paragraph(document, section.content.strip(), space_after=6)
+            for bullet in section.bullets:
+                if str(bullet or "").strip():
+                    _add_bullet(document, str(bullet).strip())
+            if section.table_data:
+                _add_table(document, section.table_data)
 
-        # 2. Document Title
-        body_parts.append(
-            '<w:p>'
-            '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:before="120" w:after="120"/></w:pPr>'
-            '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="42"/><w:szCs w:val="42"/><w:color w:val="141210"/><w:rFonts w:cs="Noto Naskh Arabic"/></w:rPr>'
-            f'<w:t xml:space="preserve">{xml_escape(doc.title)}</w:t>'
-            '</w:r>'
-            '</w:p>'
-        )
-
-        # 3. Meta info line
-        body_parts.append(
-            '<w:p>'
-            '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="240"/><w:pBdr><w:bottom w:val="single" w:sz="12" w:space="8" w:color="C4A46A"/></w:pBdr></w:pPr>'
-            '<w:r><w:rPr><w:rtl/><w:sz w:val="20"/><w:szCs w:val="20"/><w:color w:val="8A8178"/></w:rPr>'
-            f'<w:t xml:space="preserve">المنطقة: {xml_escape(doc.region)} | التوثيق والمعتمد: {xml_escape(doc.author)}</w:t>'
-            '</w:r>'
-            '</w:p>'
-        )
-
-        # 4. Summary Box if provided
-        summary_text = doc.summary or (doc.paragraphs[0] if doc.paragraphs else "")
-        if summary_text:
-            body_parts.append(
-                '<w:tbl>'
-                '<w:tblPr>'
-                '<w:tblW w:w="5000" w:type="pct"/>'
-                '<w:jc w:val="center"/>'
-                '<w:tblBorders>'
-                '<w:top w:val="single" w:sz="12" w:color="C4A46A"/>'
-                '<w:left w:val="single" w:sz="12" w:color="C4A46A"/>'
-                '<w:bottom w:val="single" w:sz="12" w:color="C4A46A"/>'
-                '<w:right w:val="single" w:sz="12" w:color="C4A46A"/>'
-                '</w:tblBorders>'
-                '<w:shd w:val="clear" w:color="auto" w:fill="FAF7F1"/>'
-                '<w:tblCellMar><w:top w:w="180" w:type="dxa"/><w:bottom w:w="180" w:type="dxa"/><w:left w:w="220" w:type="dxa"/><w:right w:w="220" w:type="dxa"/></w:tblCellMar>'
-                '</w:tblPr>'
-                '<w:tr>'
-                '<w:tc>'
-                '<w:p><w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="80"/></w:pPr>'
-                '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="BE4A24"/></w:rPr>'
-                '<w:t xml:space="preserve">ملخص التقرير والأصالة الثقافية</w:t></w:r></w:p>'
-                '<w:p><w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="40"/></w:pPr>'
-                '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                f'<w:t xml:space="preserve">{xml_escape(summary_text)}</w:t></w:r></w:p>'
-                '</w:tc>'
-                '</w:tr>'
-                '</w:tbl>'
-            )
-            body_parts.append('<w:p><w:pPr><w:bidi/><w:spacing w:after="160"/></w:pPr></w:p>')
-
-        # 5. Main paragraphs
-        start_p = 1 if (not doc.summary and len(doc.paragraphs) > 1) else 0
-        for p in doc.paragraphs[start_p:]:
-            if p.strip():
-                body_parts.append(
-                    '<w:p>'
-                    '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="140"/></w:pPr>'
-                    '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                    f'<w:t xml:space="preserve">{xml_escape(p.strip())}</w:t>'
-                    '</w:r>'
-                    '</w:p>'
-                )
-
-        # 6. Structured Sections
-        for sec in doc.sections:
-            badge_suffix = f" ({sec.badge})" if sec.badge else ""
-            body_parts.append(
-                '<w:p>'
-                '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:before="240" w:after="100"/><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="D4CBBD"/></w:pBdr></w:pPr>'
-                '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="6E1F1F"/><w:rFonts w:cs="Noto Naskh Arabic"/></w:rPr>'
-                f'<w:t xml:space="preserve">◆ {xml_escape(sec.title)}{xml_escape(badge_suffix)}</w:t>'
-                '</w:r>'
-                '</w:p>'
-            )
-            if sec.content:
-                body_parts.append(
-                    '<w:p>'
-                    '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="120"/></w:pPr>'
-                    '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                    f'<w:t xml:space="preserve">{xml_escape(sec.content)}</w:t>'
-                    '</w:r>'
-                    '</w:p>'
-                )
-            for b in sec.bullets:
-                body_parts.append(
-                    '<w:p>'
-                    '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="80"/><w:ind w:right="360"/></w:pPr>'
-                    '<w:r><w:rPr><w:rtl/><w:b/><w:color w:val="BE4A24"/></w:rPr><w:t xml:space="preserve">• </w:t></w:r>'
-                    '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                    f'<w:t xml:space="preserve">{xml_escape(b)}</w:t>'
-                    '</w:r>'
-                    '</w:p>'
-                )
-
-        # 7. Key Takeaways Box
         if doc.key_takeaways:
-            body_parts.append(
-                '<w:p>'
-                '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:before="240" w:after="100"/></w:pPr>'
-                '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/><w:color w:val="4A513C"/></w:rPr>'
-                '<w:t xml:space="preserve">الخلاصات المعرفية والأصالة التراثية:</w:t>'
-                '</w:r>'
-                '</w:p>'
-            )
-            for kt in doc.key_takeaways:
-                body_parts.append(
-                    '<w:p>'
-                    '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="80"/><w:ind w:right="360"/></w:pPr>'
-                    '<w:r><w:rPr><w:rtl/><w:b/><w:color w:val="4A513C"/></w:rPr><w:t xml:space="preserve">✔ </w:t></w:r>'
-                    '<w:r><w:rPr><w:rtl/><w:sz w:val="22"/><w:szCs w:val="22"/><w:color w:val="141210"/></w:rPr>'
-                    f'<w:t xml:space="preserve">{xml_escape(kt)}</w:t>'
-                    '</w:r>'
-                    '</w:p>'
-                )
+            _add_paragraph(document, "الخلاصات المعرفية والأصالة التراثية:", size=12, bold=True, color=COLOR_OLIVE, space_after=4)
+            for item in doc.key_takeaways:
+                if str(item or "").strip():
+                    _add_bullet(document, str(item).strip())
 
-        # 8. Sources & References
         if doc.sources:
-            body_parts.append(
-                '<w:p>'
-                '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:before="280" w:after="100"/><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="D4CBBD"/></w:pBdr></w:pPr>'
-                '<w:r><w:rPr><w:rtl/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/><w:color w:val="BE4A24"/></w:rPr>'
-                '<w:t xml:space="preserve">المراجع والتوثيق المعتمد:</w:t>'
-                '</w:r>'
-                '</w:p>'
-            )
-            for s in doc.sources:
-                s_title = s.get("title") or s.get("source_name") or s.get("id", "")
-                s_url = s.get("url") or s.get("source_url") or ""
-                ref_text = f"{s_title} ({s_url})" if s_url else s_title
-                body_parts.append(
-                    '<w:p>'
-                    '<w:pPr><w:jc w:val="right"/><w:bidi/><w:spacing w:after="60"/><w:ind w:right="280"/></w:pPr>'
-                    '<w:r><w:rPr><w:rtl/><w:color w:val="8A8178"/></w:rPr><w:t xml:space="preserve">[مرجع] </w:t></w:r>'
-                    '<w:r><w:rPr><w:rtl/><w:sz w:val="18"/><w:szCs w:val="18"/><w:color w:val="8A8178"/></w:rPr>'
-                    f'<w:t xml:space="preserve">{xml_escape(ref_text)}</w:t>'
-                    '</w:r>'
-                    '</w:p>'
-                )
+            _add_paragraph(document, "المراجع والتوثيق المعتمد:", size=12, bold=True, color=COLOR_CLAY, space_after=4)
+            for source in doc.sources:
+                if not isinstance(source, Mapping):
+                    continue
+                source_title = source.get("title") or source.get("source_name") or source.get("id", "")
+                source_url = source.get("url") or source.get("source_url") or ""
+                ref_text = f"{source_title} ({source_url})" if source_url else str(source_title)
+                if ref_text.strip():
+                    _add_bullet(document, ref_text.strip())
 
-        # Page setup
-        body_parts.append(
-            '<w:sectPr>'
-            '<w:pgSz w:w="11906" w:h="16838"/>'  # A4 size in twips
-            '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
-            '<w:bidi/>'
-            '</w:sectPr>'
-        )
+        core = document.core_properties
+        core.title = title
+        core.author = doc.author
+        core.comments = f"Sard cultural document {doc.doc_id}"
 
-        inner = "\n".join(body_parts)
-        return (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
-            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\n'
-            f"<w:body>\n{inner}\n</w:body>\n"
-            "</w:document>"
-        )
+        stream = io.BytesIO()
+        document.save(stream)
+        return stream.getvalue()
 
 
 def render_cultural_docx_report(
@@ -358,16 +388,20 @@ def render_cultural_docx_report(
     summary: str = "",
     output_path: Optional[Path] = None,
 ) -> bytes:
-    """Builds an Arabic RTL cultural Word (.docx) document and returns bytes."""
+    """Build an Arabic RTL cultural Word (.docx) document and return bytes."""
+
     sec_objs: List[DocxSection] = []
     if sections:
-        for s in sections:
+        for item in sections:
+            if not isinstance(item, Mapping):
+                continue
             sec_objs.append(
                 DocxSection(
-                    title=s.get("title", ""),
-                    content=s.get("content", ""),
-                    bullets=s.get("bullets", []),
-                    badge=s.get("badge", ""),
+                    title=str(item.get("title") or ""),
+                    content=str(item.get("content") or ""),
+                    bullets=[str(b) for b in (item.get("bullets") or [])],
+                    badge=str(item.get("badge") or ""),
+                    table_data=item.get("table_data"),
                 )
             )
 
@@ -386,8 +420,12 @@ def render_cultural_docx_report(
     data = gen.build_docx(doc)
 
     if output_path:
-        p = Path(output_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.write_bytes(data)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
 
     return data
