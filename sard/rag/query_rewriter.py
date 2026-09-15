@@ -84,9 +84,28 @@ _PILOT_TOPIC_ENTITIES = (
 
 
 def _sanitize_search_variants(variants: list[str], original_question: str) -> list[str]:
-    """Ensure search variants NEVER inject pilot-topic entities (shrimp/springs/tarout) into unrelated queries."""
+    """Reject injected entities while preserving deterministic equivalents.
+
+    A rewrite such as ``الينابيع الحارة`` -> ``العيون الحارة`` is safe when
+    the original query already names the springs topic.  Checking only literal
+    membership in the original query incorrectly discarded that equivalent
+    and made paraphrased retrieval fall back to a weaker query.
+    """
     orig_norm = normalize_arabic(original_question)
-    allowed_entities = [e for e in _PILOT_TOPIC_ENTITIES if normalize_arabic(e) in orig_norm]
+    equivalent_entities = {orig_norm}
+    changed = True
+    while changed:
+        changed = False
+        for left, right in _DETERMINISTIC_EQUIVALENTS:
+            left_norm = normalize_arabic(left)
+            right_norm = normalize_arabic(right)
+            for value in tuple(equivalent_entities):
+                for before, after in ((left_norm, right_norm), (right_norm, left_norm)):
+                    if before in value:
+                        replacement = value.replace(before, after)
+                        if replacement not in equivalent_entities:
+                            equivalent_entities.add(replacement)
+                            changed = True
 
     clean_variants = []
     for var in variants:
@@ -94,7 +113,11 @@ def _sanitize_search_variants(variants: list[str], original_question: str) -> li
         is_contaminated = False
         for entity in _PILOT_TOPIC_ENTITIES:
             entity_norm = normalize_arabic(entity)
-            if entity_norm in var_norm and entity not in allowed_entities and entity_norm not in orig_norm:
+            if (
+                entity_norm in var_norm
+                and entity_norm not in orig_norm
+                and not any(entity_norm in equivalent for equivalent in equivalent_entities)
+            ):
                 is_contaminated = True
                 break
         if not is_contaminated:

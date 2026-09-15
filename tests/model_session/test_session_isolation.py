@@ -141,23 +141,13 @@ def test_query_rewrite_cache_does_not_leak_pilot_entities_to_neutral():
     assert all("روبيان" not in v for v in result.search_variants), f"leaked pilot entity: {result.search_variants}"
 
 
-def test_deterministic_variants_allowlist_overfilter_documents_bug():
-    """Current deterministic expansion drops valid lexical variants (R4 over-filter).
-
-    This test documents the BUG: تجفيف الروبيان should expand to الروبيان المجفف
-    but sanitization rejects it because the variant surface was not verbatim in original.
-    Phase-2 should fix `_sanitize_search_variants` to allow deterministic equivalents.
-    """
+def test_deterministic_variants_allowlist_preserves_safe_equivalents():
+    """Deterministic equivalents survive sanitization without adding a new entity."""
     from sard.rag.query_rewriter import deterministic_query_variants
 
     variants = deterministic_query_variants("ما هي حرفة تجفيف الروبيان في تاروت؟")
-    # Current behavior: only original survives (over-filter)
-    # Expected after fix: should contain the lexical variant "الروبيان المجفف"
-    # We assert the BUG is present (so test passes now, fails after fix — flip it then).
-    assert len(variants) == 1, f"bug not reproduced: got {variants}"
+    assert any("الروبيان المجفف" in variant for variant in variants)
     assert variants[0].startswith("ما هي حرفة تجفيف الروبيان")
-    # Document expected post-fix assertion (commented, for Phase-2):
-    # assert any("الروبيان المجفف" in v for v in variants)
 
 
 def test_planner_locate_does_not_use_l3_as_ground_truth():

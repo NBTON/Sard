@@ -347,6 +347,27 @@ class GroundedRetriever:
                         except Exception as exc_dup:
                             logger.debug("Web cross-dedup skipped (%s).", type(exc_dup).__name__)
                     region = _infer_region_from_text(f"{title} {content}") or target_region or "unknown"
+                    # Pre-synthesis gate: live web records obey the same
+                    # entity/region/mandate policy as curated evidence. No
+                    # disallowed record may reach answer synthesis.
+                    try:
+                        from sard.rag.relevance import filter_relevant_evidence as _gate
+
+                        gate_candidate = {
+                            "title": title,
+                            "chunk": content,
+                            "metadata": {
+                                "topic": "",
+                                "sector": "",
+                                "region": "" if region == "unknown" else str(region),
+                                "region_code": "" if region == "unknown" else str(region),
+                            },
+                        }
+                        if not _gate(query, [gate_candidate]):
+                            retrieval_logs.append(f"مصدر ويب مرفوض لبوابة الصلة: {title or url}")
+                            continue
+                    except Exception as exc:
+                        logger.debug("Web relevance gate skipped (%s)", type(exc).__name__)
                     origin = title or url
                     stype = _classify_source_type(url, origin)
 

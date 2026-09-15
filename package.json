@@ -8,7 +8,7 @@
     "start": "next start --port 3000",
     "lint": "eslint src --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/test_sse_parser.mjs"
+    "test": "node --test tests/test_sse_parser.mjs tests/test_vercel_contract.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

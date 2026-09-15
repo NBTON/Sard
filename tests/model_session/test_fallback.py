@@ -74,23 +74,20 @@ class _FakeModelForRewrite:
 
 
 def test_hardcoded_fallback_qatar_not_eastern():
-    """R1 fix: 'برنامج سياحي في قطر يومين' must NOT return Eastern itinerary.
-
-    After Phase-2 fix, the heuristic is narrowed to honest hedge for generic
-    program queries; Eastern itinerary only for springs/shrimp legit queries.
-    """
+    """A generic fallback must not return an Eastern itinerary or factual pitch."""
     text = _generate_cultural_fallback_answer("برنامج سياحي في قطر يومين")
     # This query is about Qatar, not Eastern Province — should not contain Ahsa/Qatif itinerary
     has_eastern_itinerary = "اليوم الأول" in text and "الأحساء" in text
     assert has_eastern_itinerary is False, "fixed: generic Qatar program should not leak Eastern itinerary"
-    assert "قطر" in text or "سرد" in text
+    assert "قطر" in text
+    assert "مصدر موثوق" in text
 
 
-def test_hardcoded_fallback_shrimp_expected():
-    """Shrimp query legitimately about eastern may contain shrimp/tarout."""
+def test_hardcoded_fallback_shrimp_is_uncertainty_only():
+    """A shrimp query is not answered from a degraded fallback."""
     text = _generate_cultural_fallback_answer("ما هي حرفة تجفيف الروبيان في تاروت؟")
-    assert "روبيان" in text or "الروبيان" in text
-    assert "تاروت" in text
+    assert "مصدر موثوق" in text
+    assert "مراحل الحرفة" not in text
 
 
 def test_hardcoded_fallback_generic_does_not_leak_shrimp():

@@ -66,14 +66,15 @@ def test_fallback_does_not_inject_shrimp_for_neutral_query():
     assert "روبيان" not in out
     assert "تاروت" not in out
     assert "الأحساء" not in out
-    # must be generic hedge, Arabic friendly, mentions Sard capabilities
-    assert "سرد" in out or "وزارة الثقافة" in out
+    # must be a transparent uncertainty hedge, not an unrelated capability pitch
+    assert "مصدر موثوق" in out
 
 
-def test_fallback_preserves_shrimp_for_legit_query():
+def test_fallback_does_not_claim_shrimp_without_evidence():
     out = _generate_cultural_fallback_answer("ما هي حرفة تجفيف الروبيان في تاروت؟")
-    assert "روبيان" in out
-    assert "تاروت" in out
+    assert "مصدر موثوق" in out
+    assert "تُعد حرفة" not in out
+    assert "مراحل الحرفة" not in out
 
 
 def test_fallback_generic_hedge_for_program_qatar_not_eastern():
@@ -82,16 +83,15 @@ def test_fallback_generic_hedge_for_program_qatar_not_eastern():
     assert "الأحساء" not in out
     assert "جبل القارة" not in out
     assert "إثراء" not in out
-    # Generic hedge must mention query snippet or Sard
-    assert "قطر" in out or "تعذّر" in out
-    assert "سرد" in out or "وزارة الثقافة" in out
+    # Generic hedge must mention the query context without a canned itinerary
+    assert "قطر" in out
+    assert "مصدر موثوق" in out
 
 
-def test_fallback_springs_legit_branch():
+def test_fallback_does_not_claim_springs_without_evidence():
     out = _generate_cultural_fallback_answer("أريد معلومات عن الينابيع الحارة والعيون الحارة")
-    # legit springs query should not inject shrimp itinerary either
-    assert "روبيان" not in out
-    assert "الينابيع" in out or "العيون" in out
+    assert "مصدر موثوق" in out
+    assert "جزءاً من التراث الطبيعي" not in out
 
 
 # ---------------------------------------------------------------------------
