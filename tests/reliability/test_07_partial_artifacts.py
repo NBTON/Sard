@@ -4,10 +4,9 @@ Spec:
   HTML ok + PDF fail -> return HTML (failure explicit, not hidden)
   PDF ok + PPTX fail -> PDF + explicit PPTX failure (not hidden)
 
-Production validates 9 formats (pdf/docx/pptx/ics/svg/png/json/csv/txt);
-`html` is not a stored format today, so the HTML-ok half is proven by the
-spec harness while the prod integration asserts HTML surfaces as an
-explicit unsupported_format failure (never silent, never fabricated).
+Production validates 10 formats (pdf/docx/pptx/ics/svg/png/json/csv/txt/html);
+`html` is a stored format (bug #3), so the HTML-ok half is proven both by the
+spec harness and the prod integration below (never silent, never fabricated).
 """
 from __future__ import annotations
 
@@ -77,12 +76,16 @@ def test_09c_prod_pdf_ok_pptx_fail_is_explicit_not_hidden(tmp_path, monkeypatch)
     assert {pdf.status, pptx.status} == {"created", "failed"}
 
 
-def test_09d_prod_html_surfaces_explicit_unsupported_not_fabricated(tmp_path):
-    """HTML is not a stored format in prod; it must fail loudly, not silently."""
+def test_09d_prod_html_is_stored_not_fabricated(tmp_path):
+    """HTML is a stored format in prod (bug #3); it must create real bytes."""
+    from sard.outputs.validation import validate_artifact_bytes
+
     store = FileSystemArtifactStore(tmp_path)
     orch = ArtifactOrchestrator(store)
     res = orch.generate_artifact(artifact_request("html"))
-    assert res.status == "failed"
-    assert res.error_category == "unsupported_format"
-    assert res.download_url is None
-    assert list(tmp_path.glob("*.html")) == []
+    assert res.status == "created", res.error
+    assert res.download_url is not None
+    assert res.size_bytes > 0 and res.data
+    assert validate_artifact_bytes("html", res.data).format == "html"
+    assert res.preview is not None
+    assert list(tmp_path.glob("*.html")) != []

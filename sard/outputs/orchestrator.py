@@ -1546,6 +1546,17 @@ class ArtifactGeneratorRegistry:
         data = (req.raw_text or req.topic or req.title).encode("utf-8")
         return data, ARTIFACT_MIME_TYPES["txt"], {"type": "text", "characters": len(data)}
 
+    @staticmethod
+    def render_html(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:
+        from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+        from sard.outputs.html import render_html_document
+
+        doc = _ArtifactDocument.from_request(req)
+        html_text = render_html_document(doc)
+        data = html_text.encode("utf-8")
+        preview = doc.to_preview()
+        return data, ARTIFACT_MIME_TYPES["html"], preview
+
 
 class ArtifactOrchestrator:
     """Central orchestrator managing intent -> rendering -> storage -> public verification."""
@@ -1640,6 +1651,8 @@ class ArtifactOrchestrator:
                 raw_bytes, mime_type, preview = self.registry.render_csv(request)
             elif fmt == "txt":
                 raw_bytes, mime_type, preview = self.registry.render_txt(request)
+            elif fmt == "html":
+                raw_bytes, mime_type, preview = self.registry.render_html(request)
             else:
                 raise ArtifactValidationError("unsupported_format")
 
