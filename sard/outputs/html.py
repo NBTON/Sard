@@ -48,7 +48,7 @@ TOKENS = {
 
 _SAFE_URL_RE = re.compile(r"^(https?://|mailto:)[^\s<>\"]+$", re.IGNORECASE)
 _SAFE_IMG_RE = re.compile(
-    r"^(https?://[^\s<>\"]+|data:image/(png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+)$"
+    r"^(https://[^\s<>\"]+|data:image/(png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+)$"
 )
 
 _STYLES = """:root{--paper:%(paper)s;--paper2:%(paper2)s;--ink:%(ink)s;--clay:%(clay)s;--date:%(date)s;--olive:%(olive)s;--gold:%(gold)s;--card:%(card)s;--border:%(border)s;--muted:%(muted)s}
@@ -111,12 +111,13 @@ def _dir_attr(text: str) -> str:
     return ' dir="rtl" lang="ar"' if contains_arabic(text or "") else ' dir="ltr"'
 
 
-def _render_table(rows: Sequence[Sequence[object]]) -> str:
+def _render_table(rows: Sequence[Sequence[object]], direction: str = "rtl") -> str:
     if not rows:
         return ""
     cleaned = [[_esc(c or "") for c in row] for row in rows]
     head, body = cleaned[0], cleaned[1:]
-    parts = ['<div dir="rtl"><table class="sard-table">']
+    doc_dir = direction if direction in {"rtl", "ltr"} else "rtl"
+    parts = [f'<div dir="{doc_dir}"><table class="sard-table">']
     parts.append(
         "<thead><tr>" + "".join(f"<th scope=\"col\">{c}</th>" for c in head) + "</tr></thead>"
     )
@@ -170,7 +171,10 @@ def _block_image(block: ArtifactBlock) -> tuple[str, str] | None:
     return src, alt
 
 
-def _render_block(block: ArtifactBlock) -> str:
+_LIST_BLOCK_TYPES = {"bullet", "item", "point", "takeaway"}
+
+
+def _render_block(block: ArtifactBlock, table_direction: str = "rtl") -> str:
     btype = str(block.kind if hasattr(block, "kind") else block.block_type or "").lower().strip()
     text = block.text or ""
     if btype == "heading":
@@ -186,7 +190,9 @@ def _render_block(block: ArtifactBlock) -> str:
         if btype == "summary":
             return f"<p{_dir_attr(text)}><strong>{_esc(text)}</strong></p>"
         return f"<p{_dir_attr(text)}>{_esc(text)}</p>"
-    if btype in {"bullet", "item", "point", "takeaway"}:
+    if btype in _LIST_BLOCK_TYPES:
+        # Single blocks still render a valid list; contiguous runs are
+        # coalesced into one <ul> by _render_section (HTML-Q1).
         return f"<ul class=\"sard-list\"{_dir_attr(text)}><li>{_esc(text)}</li></ul>"
     if btype in {"quote", "callout"}:
         cls = "sard-quote" if btype == "quote" else "sard-callout"
@@ -199,7 +205,7 @@ def _render_block(block: ArtifactBlock) -> str:
     if btype in {"table", "table_row", "row"}:
         rows = _block_table_rows(block)
         if rows:
-            return _render_table(rows)
+            return _render_table(rows, table_direction)
         return f"<p{_dir_attr(text)}>{_esc(text)}</p>" if text.strip() else ""
     if btype in {"image", "diagram", "card"}:
         image = _block_image(block)
@@ -226,9 +232,30 @@ def _render_block(block: ArtifactBlock) -> str:
     return f"<p{_dir_attr(text)}>{_esc(text)}</p>" if text.strip() else ""
 
 
-def _render_section(section: ArtifactSection, index: int) -> str:
+def _render_section(section: ArtifactSection, index: int, table_direction: str = "rtl") -> str:
     anchor = f"sard-sec-{index}"
-    rendered_blocks = "".join(_render_block(b) for b in section.blocks)
+    # HTML-B1: honor the fail-closed evidence rule — only renderable blocks
+    # reach downloaded HTML, matching the UI preview.
+    blocks = section.renderable_blocks()
+    # HTML-Q1: coalesce contiguous list blocks into a single <ul>.
+    chunks: list[str] = []
+    pending_items: list[str] = []
+
+    def _flush_list() -> None:
+        if not pending_items:
+            return
+        chunks.append(f'<ul class="sard-list">{"".join(pending_items)}</ul>')
+        pending_items.clear()
+
+    for block in blocks:
+        btype = str(block.block_type or "").lower().strip()
+        if btype in _LIST_BLOCK_TYPES:
+            pending_items.append(f"<li{_dir_attr(block.text or '')}>{_esc(block.text or '')}</li>")
+            continue
+        _flush_list()
+        chunks.append(_render_block(block, table_direction))
+    _flush_list()
+    rendered_blocks = "".join(chunks)
     if not section.title.strip() and not rendered_blocks.strip():
         return ""
     badge = ""
@@ -298,20 +325,30 @@ def render_html_document(doc: ArtifactDocument) -> str:
                 f'<div class="sard-notice" role="status"><strong>تنبيهات:</strong><ul class="sard-list">{items}</ul></div>'
             )
     for index, section in enumerate(doc.sections, 1):
-        parts.append(_render_section(section, index))
+        parts.append(_render_section(section, index, doc_dir))
 
     if doc.sources:
         items = []
         for source in doc.sources:
             safe = _safe_url(source.url or "")
             label = _esc(source.title or source.citation_id)
+            # HTML-Q4: surface citation metadata (page/section/date) when present.
+            details: list[str] = []
+            if getattr(source, "page", None):
+                details.append(f"صفحة {_esc(source.page)}")
+            if getattr(source, "section", None):
+                details.append(_esc(source.section))
+            pub_date = getattr(source, "publication_date", None)
+            if pub_date:
+                details.append(_esc(str(pub_date)))
+            suffix = f" ({'، '.join(details)})" if details else ""
             if safe:
                 items.append(
-                    f"<li>[{_esc(source.citation_id)}] {label} — "
+                    f"<li>[{_esc(source.citation_id)}] {label}{suffix} — "
                     f"<a href=\"{_esc(safe)}\" rel=\"noopener noreferrer\">{_esc(safe)}</a></li>"
                 )
             else:
-                items.append(f"<li>[{_esc(source.citation_id)}] {label}</li>")
+                items.append(f"<li>[{_esc(source.citation_id)}] {label}{suffix}</li>")
         parts.append(
             '<section class="sard-sources" aria-label="sources">'
             f'<h2{_dir_attr("المراجع")}>المراجع والتوثيق [{len(items)}]</h2>'

@@ -31,6 +31,28 @@ def _as_tuple(values: Any) -> tuple:
     return tuple(values)
 
 
+def stable_artifact_id(run_id: str, fmt: str, topic: str) -> str:
+    """Deterministic idempotent artifact identity for one run+format+topic.
+
+    Retries with the same ``run_id`` reuse the same stable ID instead of
+    minting duplicates; distinct runs/topics stay distinct.
+    """
+    import hashlib as _hashlib
+
+    seed = f"{(run_id or '').strip()}|{(fmt or '').strip().lower()}|{(topic or '').strip()[:200]}"
+    digest = _hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+    return f"art-{digest}"
+
+
+def stable_run_key(session_id: str, query: str, formats: Any) -> str:
+    """Deterministic idempotent run key for chat retries (session+query+formats)."""
+    import hashlib as _hashlib
+
+    fmts = ",".join(sorted(str(f or "").lower() for f in (formats or ()))) if formats else "text"
+    seed = f"{(session_id or '').strip()}|{(query or '').strip()[:500]}|{fmts}"
+    return f"chat-{_hashlib.sha256(seed.encode('utf-8')).hexdigest()[:10]}"
+
+
 @dataclass(frozen=True)
 class ArtifactBlock:
     """One renderable unit inside a section."""
@@ -104,6 +126,8 @@ class ArtifactTheme:
 class ArtifactMetadata:
     artifact_id: str = ""
     run_id: str = ""
+    version: int = 1
+    status: str = "created"
     format: str = ""
     kind: str = ""
     title: str = ""
@@ -114,9 +138,22 @@ class ArtifactMetadata:
     model_fallback_used: bool = False
     warnings: tuple[str, ...] = ()
     checksum: Optional[str] = None
+    provenance: tuple[str, ...] = ()
+    evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "warnings", _as_tuple(self.warnings))
+        object.__setattr__(self, "provenance", _as_tuple(self.provenance))
+        object.__setattr__(self, "evidence_ids", _as_tuple(self.evidence_ids))
+        try:
+            version = int(self.version or 1)
+        except (TypeError, ValueError):
+            version = 1
+        if version < 1:
+            version = 1
+        object.__setattr__(self, "version", version)
+        if not str(self.status or "").strip():
+            object.__setattr__(self, "status", "created")
 
 
 @dataclass(frozen=True)
@@ -545,6 +582,8 @@ class ArtifactDocument:
         *,
         artifact_id: str = "",
         run_id: str = "",
+        version: int = 0,
+        status: str = "",
         verification_status: str = "verified",
         retrieval_mode: str = "",
         model_fallback_used: bool = False,
@@ -552,8 +591,15 @@ class ArtifactDocument:
         preview: Optional[Dict[str, Any]] = None,
         theme: Optional[ArtifactTheme] = None,
         checksum: Optional[str] = None,
+        provenance: Any = (),
+        evidence_ids: Any = (),
     ) -> "ArtifactDocument":
-        """Build a document from an orchestrator ArtifactRequest (or duck-typed equiv)."""
+        """Build a document from an orchestrator ArtifactRequest (or duck-typed equiv).
+
+        Preserves run_id/artifact_id/version/format/status/metadata/provenance/
+        evidence IDs across chat -> request -> document -> renderer -> store.
+        Explicit kwargs win; otherwise values fall back to ``request.metadata``.
+        """
         content = getattr(request, "content_data", None) or {}
         raw_text = str(getattr(request, "raw_text", "") or "")
         fmt = str(getattr(request, "format", "") or "")
@@ -562,7 +608,33 @@ class ArtifactDocument:
         topic = str(getattr(request, "topic", "") or "")
         region = str(getattr(request, "region", "") or "المملكة العربية السعودية")
         meta_dict = getattr(request, "metadata", None) or {}
+        if not isinstance(meta_dict, dict):
+            meta_dict = {}
         resolved_run = run_id or str(meta_dict.get("run_id", "") or "")
+        resolved_artifact = artifact_id or str(meta_dict.get("artifact_id", "") or "")
+        try:
+            resolved_version = int(version or meta_dict.get("version", 1) or 1)
+        except (TypeError, ValueError):
+            resolved_version = 1
+        if resolved_version < 1:
+            resolved_version = 1
+        resolved_status = str(status or meta_dict.get("status", "") or "created")
+        resolved_provenance = tuple(provenance or ()) or tuple(meta_dict.get("provenance", ()) or ())
+        resolved_evidence: List[str] = []
+        seen_ev: set[str] = set()
+        for value in (*tuple(evidence_ids or ()), *tuple(meta_dict.get("evidence_ids", ()) or ())):
+            text = str(value or "").strip()
+            if text and text not in seen_ev:
+                seen_ev.add(text)
+                resolved_evidence.append(text)
+        # Carry per-source evidence IDs from request sources when present.
+        for entry in (getattr(request, "sources", ()) or ()):
+            if isinstance(entry, dict):
+                for key in ("evidence_id", "chunk_id", "source_id"):
+                    text = str(entry.get(key, "") or "").strip()
+                    if text and text not in seen_ev:
+                        seen_ev.add(text)
+                        resolved_evidence.append(text)
 
         sources: List[CitationSource] = []
         for entry in (getattr(request, "sources", ()) or ()):
@@ -696,20 +768,169 @@ class ArtifactDocument:
             pass  # takeaways already folded into items when present
 
         metadata = ArtifactMetadata(
-            artifact_id=artifact_id,
+            artifact_id=resolved_artifact,
             run_id=resolved_run,
+            version=resolved_version,
+            status=resolved_status,
             format=fmt,
             kind=kind,
             title=title,
             topic=topic,
             region=region,
             verification_status=verification_status if verification_status in _ALLOWED_BLOCK_STATUS else "verified",
-            retrieval_mode=retrieval_mode,
-            model_fallback_used=model_fallback_used,
-            warnings=request_warnings,
-            checksum=checksum,
+            retrieval_mode=retrieval_mode or str(meta_dict.get("retrieval_mode", "") or ""),
+            model_fallback_used=model_fallback_used or bool(meta_dict.get("model_fallback_used", False)),
+            warnings=request_warnings or tuple(meta_dict.get("warnings", ()) or ()),
+            checksum=checksum or (str(meta_dict.get("checksum", "") or "") or None),
+            provenance=resolved_provenance,
+            evidence_ids=tuple(resolved_evidence),
         )
         return cls(metadata=metadata, theme=theme or ArtifactTheme(), sections=tuple(sections), sources=tuple(sources))
+
+
+    # -- persistence (revision / conversion source of truth) ------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the canonical document for durable versioned storage."""
+        return {
+            "metadata": {
+                "artifact_id": self.metadata.artifact_id,
+                "run_id": self.metadata.run_id,
+                "version": int(self.metadata.version or 1),
+                "status": self.metadata.status,
+                "format": self.metadata.format,
+                "kind": self.metadata.kind,
+                "title": self.metadata.title,
+                "topic": self.metadata.topic,
+                "region": self.metadata.region,
+                "verification_status": self.metadata.verification_status,
+                "retrieval_mode": self.metadata.retrieval_mode,
+                "model_fallback_used": bool(self.metadata.model_fallback_used),
+                "warnings": list(self.metadata.warnings),
+                "checksum": self.metadata.checksum,
+                "provenance": list(self.metadata.provenance),
+                "evidence_ids": list(self.metadata.evidence_ids),
+            },
+            "theme": {
+                "palette": self.theme.palette,
+                "direction": self.theme.direction,
+                "locale": self.theme.locale,
+                "variant": self.theme.variant,
+            },
+            "sections": [
+                {
+                    "section_id": section.section_id,
+                    "title": section.title,
+                    "source_ids": list(section.source_ids),
+                    "evidence_ids": list(section.evidence_ids),
+                    "verification_status": section.verification_status,
+                    "blocks": [
+                        {
+                            "block_id": block.block_id,
+                            "block_type": block.block_type,
+                            "text": block.text,
+                            "data": dict(block.data) if isinstance(block.data, dict) else block.data,
+                            "source_ids": list(block.source_ids),
+                            "evidence_ids": list(block.evidence_ids),
+                            "verification_status": block.verification_status,
+                        }
+                        for block in section.blocks
+                    ],
+                }
+                for section in self.sections
+            ],
+            "sources": [
+                {
+                    "citation_id": source.citation_id,
+                    "title": source.title,
+                    "url": source.url,
+                }
+                for source in self.sources
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "ArtifactDocument":
+        """Rehydrate a persisted canonical document (unknown fields ignored)."""
+        from sard.outputs.schemas import CitationSource as _CitationSource
+
+        data = dict(payload or {})
+        meta = dict(data.get("metadata", {}) or {})
+        theme_data = dict(data.get("theme", {}) or {})
+        sections: List[ArtifactSection] = []
+        for sec in (data.get("sections", []) or []):
+            if not isinstance(sec, dict):
+                continue
+            blocks: List[ArtifactBlock] = []
+            for item in (sec.get("blocks", []) or []):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    blocks.append(
+                        ArtifactBlock(
+                            block_id=str(item.get("block_id") or item.get("id") or "block"),
+                            block_type=str(item.get("block_type") or item.get("type") or "paragraph"),
+                            text=str(item.get("text", "") or ""),
+                            data=item.get("data") if isinstance(item.get("data"), dict) else None,
+                            source_ids=tuple(item.get("source_ids", ()) or ()),
+                            evidence_ids=tuple(item.get("evidence_ids", ()) or ()),
+                            verification_status=str(item.get("verification_status", "verified") or "verified"),
+                        )
+                    )
+                except ValueError:
+                    continue
+            try:
+                sections.append(
+                    ArtifactSection(
+                        section_id=str(sec.get("section_id") or sec.get("id") or "section"),
+                        title=str(sec.get("title", "") or ""),
+                        blocks=tuple(blocks),
+                        source_ids=tuple(sec.get("source_ids", ()) or ()),
+                        evidence_ids=tuple(sec.get("evidence_ids", ()) or ()),
+                        verification_status=str(sec.get("verification_status", "verified") or "verified"),
+                    )
+                )
+            except ValueError:
+                continue
+        sources: List[Any] = []
+        for entry in (data.get("sources", []) or []):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                sources.append(
+                    _CitationSource(
+                        citation_id=str(entry.get("citation_id", "")),
+                        title=str(entry.get("title", "")),
+                        url=str(entry.get("url", "")),
+                    )
+                )
+            except ValueError:
+                continue
+        metadata = ArtifactMetadata(
+            artifact_id=str(meta.get("artifact_id", "") or ""),
+            run_id=str(meta.get("run_id", "") or ""),
+            version=int(meta.get("version", 1) or 1),
+            status=str(meta.get("status", "") or "created"),
+            format=str(meta.get("format", "") or ""),
+            kind=str(meta.get("kind", "") or ""),
+            title=str(meta.get("title", "") or ""),
+            topic=str(meta.get("topic", "") or ""),
+            region=str(meta.get("region", "") or "المملكة العربية السعودية"),
+            verification_status=str(meta.get("verification_status", "") or "verified"),
+            retrieval_mode=str(meta.get("retrieval_mode", "") or ""),
+            model_fallback_used=bool(meta.get("model_fallback_used", False)),
+            warnings=tuple(meta.get("warnings", ()) or ()),
+            checksum=meta.get("checksum"),
+            provenance=tuple(meta.get("provenance", ()) or ()),
+            evidence_ids=tuple(meta.get("evidence_ids", ()) or ()),
+        )
+        theme = ArtifactTheme(
+            palette=str(theme_data.get("palette", "") or "sard-warm"),
+            direction=str(theme_data.get("direction", "") or "rtl"),
+            locale=str(theme_data.get("locale", "") or "ar-SA"),
+            variant=str(theme_data.get("variant", "") or "default"),
+        )
+        return cls(metadata=metadata, theme=theme, sections=tuple(sections), sources=tuple(sources))
 
 
 __all__ = [
@@ -718,4 +939,6 @@ __all__ = [
     "ArtifactTheme",
     "ArtifactMetadata",
     "ArtifactDocument",
+    "stable_artifact_id",
+    "stable_run_key",
 ]

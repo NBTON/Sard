@@ -221,6 +221,11 @@ def _validate_html(data: bytes) -> tuple[str, ...]:
     lowered = text.lower()
     if "<html" not in lowered or "</html>" not in lowered:
         _invalid("invalid_structure", "Generated HTML is missing document structure.")
+    # Production boundary: model text is untrusted — renderer output must stay
+    # CSP-friendly (single inline <style>, no script/active content). Reject
+    # live script vectors even when document structure is present.
+    if re.search(r"<\s*script\b|javascript\s*:|\son\w+\s*=|<\s*iframe\b|<\s*object\b|<\s*embed\b|<\s*form\b", text, re.I):
+        _invalid("unsafe_html", "Generated HTML contains unsafe active content.")
     return ()
 
 

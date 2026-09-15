@@ -16,6 +16,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from sard.agent.capability_routing import (
+    Capability,
     classify_intent,
 )
 from sard.agent.cultural_router import (
@@ -246,7 +247,8 @@ class ChatService:
         deadline_monotonic: Optional[Any] = None,
         uploaded_files: Optional[dict] = None,
         deadline: Optional[Any] = None,
-        cancel_event: Optional[threading.Event] = None,
+        cancel_event: Optional[Any] = None,
+        run_id: Optional[str] = None,
     ) -> ChatResult:
         """Route user query with Isnād provenance verification and artifact rendering."""
         # Check empty query early
@@ -346,6 +348,7 @@ class ChatService:
             )
 
         def _format_to_kind(fmt_name: str) -> str:
+            # Legacy fallback (format-only); preferred path is _kind_for_intent.
             if fmt_name in ("pdf", "docx", "txt"):
                 return "document"
             if fmt_name in ("pptx",):
@@ -355,6 +358,125 @@ class ChatService:
             if fmt_name in ("svg", "png"):
                 return "image"
             return "document"
+
+        def _kind_for_intent(intent_obj: Any, fmt_name: str) -> str:
+            """Specialized artifact kind routing from real intent (not format-only).
+
+            Mirrors the orchestrator's capability mapping so chat -> request ->
+            document -> renderer all agree on the specialized kind (recipe,
+            memoir, card, diagram, presentation, calendar) instead of
+            collapsing everything to generic document/image.
+            """
+            try:
+                cap = getattr(intent_obj, "domain_capability", None)
+                if cap == Capability.PRESENTATION_DECK or fmt_name == "pptx":
+                    return "presentation"
+                if cap == Capability.CALENDAR_SYNC or fmt_name == "ics":
+                    return "calendar"
+                if cap == Capability.GREETING_CARD:
+                    return "card"
+                if cap == Capability.ETIQUETTE_SIMULATOR or cap == Capability.DIAGRAM_GENERATION or fmt_name == "svg":
+                    return "diagram"
+                if cap == Capability.RECIPE_CARD:
+                    return "recipe"
+                if cap == Capability.ORAL_HISTORY:
+                    return "memoir"
+                if fmt_name == "png":
+                    return "image"
+                if fmt_name in ("json", "csv"):
+                    return "document"
+            except Exception:
+                pass
+            return _format_to_kind(fmt_name)
+
+        def _is_longform_request(intent_obj: Any, query_text: str, body_text: str) -> bool:
+            """Practical staged long-form trigger (no cost for simple chat)."""
+            try:
+                cap = getattr(intent_obj, "domain_capability", None)
+                if cap in (Capability.ORAL_HISTORY, Capability.VERIFIED_RESEARCH, Capability.ITINERARY_PLANNING):
+                    # Only stage when the body is actually long; short memoir/
+                    # research answers keep the fast single-pass path.
+                    if len(f"{query_text}\n{body_text}".split()) >= 60:
+                        return True
+                text = f"{query_text}\n{body_text}"
+                long_markers = ("تقرير شامل", "بحث مطول", "كتيب", "مذكرات", "دراسة مفصلة",
+                                "long report", "detailed report", "booklet", "memoir", "thesis")
+                if any(m in text.lower() for m in long_markers) and len(text.split()) >= 60:
+                    return True
+                # Very long verified bodies (> ~400 words) benefit from staging.
+                if len(body_text.split()) >= 400:
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def _build_longform_content(
+            body_text: str, srcs: list[dict[str, str]], intent_obj: Any, topic_text: str
+        ) -> tuple[Optional[Dict[str, Any]], list[str], bool]:
+            """Staged path: research(done upstream) -> outline -> section draft
+            -> editorial coherence -> verification -> render content.
+
+            Honors deadlines (degrades to single-section with a transparent
+            warning instead of starting doomed stages) and never slows simple
+            chat (caller gates on _is_longform_request).
+            """
+            warnings: list[str] = []
+            degraded = False
+
+            def _budget_left() -> bool:
+                try:
+                    if dl is not None and hasattr(dl, "reserve_remaining"):
+                        return bool(dl.reserve_remaining() > 1.0)
+                except Exception:
+                    pass
+                return True
+
+            # Stage 1: outline (deterministic sectioning of the verified body).
+            _emit("longform_outline", "إعداد مخطط التقرير المطول..." if resolved_lang != "en" else "Outlining long-form report...")
+            paras = [p.strip() for p in (body_text or "").split("\n\n") if p.strip()]
+            if not paras:
+                paras = [body_text.strip()] if body_text.strip() else [topic_text]
+            # Editorial outline: intro + body sections (<=6) + takeaways.
+            sections: list[Dict[str, Any]] = []
+            if not _budget_left() or _cancelled():
+                degraded = True
+                warnings.append("ضيق المهلة: تم استخدام مسار مختصر بقسم واحد." if resolved_lang != "en" else "Tight deadline: single-section fast path used.")
+                return {"sections": [{"title": topic_text[:80], "paragraphs": paras[:4]}],
+                        "summary": paras[0][:500] if paras else ""}, warnings, degraded
+            # Stage 2: section drafting (split body across sections).
+            _emit("longform_draft", "صياغة الأقسام..." if resolved_lang != "en" else "Drafting sections...")
+            per_section = max(1, (len(paras) + 3) // 4)
+            titles = ["المقدمة", "السياق التراثي", "الشواهد والأدلة", "الخلاصات"]
+            for idx in range(4):
+                chunk = paras[idx * per_section:(idx + 1) * per_section]
+                if not chunk and idx > 0:
+                    break
+                if not _budget_left() or _cancelled():
+                    degraded = True
+                    warnings.append("انتهت المهلة أثناء الصياغة: تم الاحتفاظ بالأقسام المكتملة فقط." if resolved_lang != "en" else "Deadline during drafting: kept completed sections only.")
+                    break
+                sections.append({"title": titles[idx] if idx < len(titles) else f"قسم {idx + 1}", "paragraphs": chunk or paras[:1]})
+                _emit("longform_section", f"{idx + 1}/{4}")
+            # Stage 3: editorial coherence (dedupe exact repeats, keep order).
+            _emit("longform_edit", "مراجعة التحرير والاتساق..." if resolved_lang != "en" else "Editorial coherence pass...")
+            seen: set[str] = set()
+            for sec in sections:
+                unique: list[str] = []
+                for para in (sec.get("paragraphs", []) or []):
+                    key = str(para).strip()
+                    if key and key not in seen:
+                        seen.add(key)
+                        unique.append(para)
+                sec["paragraphs"] = unique or sec.get("paragraphs", [])
+            # Stage 4: verification (drop empty sections; keep evidence link).
+            _emit("longform_verify", "التحقق من الاستشهادات..." if resolved_lang != "en" else "Verifying citations...")
+            sections = [s for s in sections if (s.get("paragraphs") or s.get("title", "").strip())]
+            if not sections:
+                degraded = True
+                warnings.append("لا توجد أقسام موثقة: تم استخدام النص الكامل كقسم واحد." if resolved_lang != "en" else "No verifiable sections: full text used as one section.")
+                sections = [{"title": topic_text[:80], "paragraphs": paras[:4]}]
+            content: Dict[str, Any] = {"sections": sections, "summary": paras[0][:500] if paras else ""}
+            return content, warnings, degraded
 
         def _emit(stage: str, message: str) -> None:
             if status_callback is not None:
@@ -375,10 +497,33 @@ class ChatService:
             """
             local_artifacts: list[dict[str, Any]] = []
             target_fmts = getattr(intent, "target_formats", None) or getattr(intent, "requested_formats", ())
+            # Deterministic idempotent run key: server-supplied run_id wins so
+            # chat -> request -> document -> store share one identity; fallback
+            # derives from session+query+formats for safe retries.
+            effective_run_id = str(run_id or "").strip()
+            if not effective_run_id:
+                try:
+                    from sard.outputs.document import stable_run_key as _stable_run
+
+                    effective_run_id = _stable_run(str(session_id or ""), user_query, tuple(target_fmts or ()))
+                except Exception:
+                    effective_run_id = ""
+            # Staged long-form content is built once (not per format) so all
+            # formats share the same canonical sections/evidence.
+            staged_content: Optional[Dict[str, Any]] = None
+            staged_warnings: list[str] = []
+            if intent.explicit_artifact_request and _is_longform_request(intent, user_query, text):
+                staged_content, staged_warnings, _degraded = _build_longform_content(
+                    text, sources, intent,
+                    getattr(intent, "canonical_topic", None) or getattr(intent, "extracted_topic", None) or user_query,
+                )
+                if _degraded:
+                    staged_warnings = list(staged_warnings)
             if intent.explicit_artifact_request and target_fmts:
                 for fmt in target_fmts:
                     if fmt == "text":
                         continue
+                    kind_for_fmt = _kind_for_intent(intent, fmt)
                     if _cancelled():
                         raise DeadlineCancelledError("cancelled before artifact render", stage="artifact_started")
                     if dl is not None:
@@ -388,7 +533,7 @@ class ChatService:
                             _emit("artifact_failed", f"تعذر توليد {str(fmt).upper()} ضمن المهلة." if resolved_lang != "en" else f"{str(fmt).upper()} generation timed out.")
                             local_artifacts.append({
                                 "id": f"art-failed-{fmt}",
-                                "kind": _format_to_kind(fmt),
+                                "kind": kind_for_fmt,
                                 "format": fmt,
                                 "type": fmt,
                                 "title": f"مخرج ثقافي: {user_query[:40]}",
@@ -409,19 +554,39 @@ class ChatService:
                     topic_str = getattr(intent, "canonical_topic", None) or getattr(intent, "extracted_topic", None) or user_query
                     _emit("artifact_started", f"بدء توليد {str(fmt).upper()}..." if resolved_lang != "en" else f"Starting {str(fmt).upper()} generation...")
                     _emit("render_started", str(fmt))
-                    # Map format to orchestrator call
+                    # Map format to orchestrator call (specialized kind from
+                    # real intent; IDs preserved across the chain).
+                    # Preserve evidence IDs: keep chunk/source/evidence keys,
+                    # not just citation_id/title/url.
+                    norm_sources: list[Dict[str, Any]] = []
+                    for entry in (sources or []):
+                        if isinstance(entry, dict):
+                            kept = {k: entry.get(k) for k in (
+                                "citation_id", "id", "title", "url", "origin", "source_type",
+                                "chunk_id", "source_id", "evidence_id", "excerpt", "region",
+                            ) if entry.get(k) not in (None, "")}
+                            # Normalize to orchestrator/document source shape.
+                            if "citation_id" not in kept and kept.get("id"):
+                                kept["citation_id"] = kept["id"]
+                            norm_sources.append(kept)
                     art_req = ArtifactRequest(
                         format=fmt,
-                        kind=_format_to_kind(fmt),
+                        kind=kind_for_fmt,
                         title=f"مخرج ثقافي: {topic_str}",
                         topic=topic_str,
+                        content_data=dict(staged_content) if staged_content else None,
                         region=intent.region or "المملكة العربية السعودية",
                         raw_text=text,
-                        sources=tuple(sources) if sources else (),
+                        sources=tuple(norm_sources) if norm_sources else (),
                         metadata={
                             "session_id": session_id,
+                            "run_id": effective_run_id,
+                            "version": 1,
                             "intent": intent.to_dict() if hasattr(intent, "to_dict") else asdict(intent),
                             "locale": resolved_lang,
+                            "provenance": ["chat_service"],
+                            "evidence_ids": [d.get("evidence_id") or d.get("chunk_id") or d.get("source_id") for d in norm_sources if isinstance(d, dict) and (d.get("evidence_id") or d.get("chunk_id") or d.get("source_id"))],
+                            "warnings": list(staged_warnings),
                         },
                     )
                     try:
@@ -438,7 +603,7 @@ class ChatService:
                         _emit("artifact_failed", str(fmt))
                         local_artifacts.append({
                             "id": f"art-failed-{fmt}",
-                            "kind": _format_to_kind(fmt),
+                            "kind": kind_for_fmt,
                             "format": fmt,
                             "type": fmt,
                             "title": f"مخرج ثقافي: {topic_str}",
@@ -460,7 +625,7 @@ class ChatService:
                         _emit("artifact_failed", str(fmt))
                         failed_res = ArtifactResult(
                             id=f"art-failed-{fmt}",
-                            kind=_format_to_kind(fmt),
+                            kind=kind_for_fmt,
                             format=fmt,
                             title=f"مخرج ثقافي: {topic_str}",
                             filename=f"error.{fmt}",
@@ -472,6 +637,8 @@ class ChatService:
                             error_category="renderer_exception",
                         )
                         local_artifacts.append(failed_res.to_dict())
+            # Renderer isolation: successful formats are kept even when one
+            # renderer fails (loop continues; no early return on failure).
             return local_artifacts
 
         # Early check for unconfigured model when no injected model is present

@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -76,9 +77,26 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Accept-Language"],
 )
+
+
+@app.middleware("http")
+async def _security_headers_middleware(request: Request, call_next):
+    """Safe response security headers (no credential/secret leakage)."""
+    response = await call_next(request)
+    try:
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        # API/SSE payloads are dynamic; downloads opt into attachment disposition.
+        if str(request.url.path or "").startswith("/api/"):
+            response.headers.setdefault("Cache-Control", "no-store")
+    except Exception:
+        pass
+    return response
 
 OUTPUT_DIR = output_root(default=_PROJECT_ROOT / "output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -129,10 +147,19 @@ def _persist_attachment_index() -> None:
         logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
 
 
+_SAFE_ATTACHMENT_ID_RE = re.compile(r"^att_[0-9a-f]{12}$")
+_SAFE_DOWNLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
 def _resolve_attachment_meta(att_id: str) -> Optional[Dict[str, Any]]:
-    """Resolve attachment across processes: memory → index file → glob fallback."""
+    """Resolve attachment across processes: memory → index file → exact fallback.
+
+    Glob-wildcard IDOR fix: the attachment ID must match the full generated
+    shape (``att_<12 hex>``); prefix/wildcard lookups (``att_*``) are rejected
+    instead of globbing other users' files.
+    """
     safe = Path(str(att_id or "")).name
-    if not safe:
+    if not safe or not _SAFE_ATTACHMENT_ID_RE.fullmatch(safe):
         return None
     meta = _ATTACHMENTS.get(safe)
     if meta and meta.get("path") and Path(meta["path"]).exists():
@@ -142,11 +169,13 @@ def _resolve_attachment_meta(att_id: str) -> Optional[Dict[str, Any]]:
     meta = _ATTACHMENTS.get(safe)
     if meta and meta.get("path") and Path(meta["path"]).exists():
         return meta
-    # Glob fallback: files are stored as {att_id}_{stem}{ext}
+    # Exact fallback: files are stored as {att_id}_{stem}{ext}; only the
+    # fully-qualified prefix may match (no bare "*" expansion).
     try:
-        matches = list(UPLOAD_DIR.glob(f"{safe}*"))
-        if matches and matches[0].is_file():
-            return {"attachment_id": safe, "filename": matches[0].name, "path": str(matches[0]), "mime_type": "application/octet-stream", "size_bytes": matches[0].stat().st_size}
+        for candidate in UPLOAD_DIR.iterdir():
+            name = candidate.name
+            if candidate.is_file() and name.startswith(f"{safe}_"):
+                return {"attachment_id": safe, "filename": name, "path": str(candidate), "mime_type": "application/octet-stream", "size_bytes": candidate.stat().st_size}
     except Exception as exc:
         logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
     return None
@@ -678,17 +707,12 @@ async def upload_file(file: UploadFile = File(...)):
 @app.get("/api/attachments/{attachment_id}")
 @app.get("/attachments/{attachment_id}")
 async def get_attachment_file(attachment_id: str):
-    """Download an uploaded attachment by ID."""
+    """Download an uploaded attachment by ID (exact match only, no wildcards)."""
     _evict_expired_attachments()
     safe_id = Path(attachment_id).name
     meta = _resolve_attachment_meta(safe_id)
     if meta and Path(meta["path"]).exists():
         return FileResponse(path=meta["path"], filename=meta.get("filename", safe_id), media_type=meta.get("mime_type", "application/octet-stream"))
-
-    # Fallback search in UPLOAD_DIR
-    matches = list(UPLOAD_DIR.glob(f"{safe_id}*"))
-    if matches and matches[0].is_file():
-        return FileResponse(path=matches[0], filename=matches[0].name, media_type="application/octet-stream")
 
     raise HTTPException(status_code=404, detail="الملف المرفق غير موجود.")
 
@@ -701,8 +725,42 @@ async def get_attachment_file(attachment_id: str):
 @app.get("/api/artifacts/{filename}")
 @app.get("/artifacts/{filename}")
 async def get_artifact_file(filename: str):
-    """Securely download a generated artifact file (PDF, DOCX, PPTX, ICS, SVG, JSON)."""
-    safe_name = Path(filename).name
+    """Securely download a generated artifact file (PDF, DOCX, PPTX, HTML, ICS, SVG, JSON).
+
+    Glob-wildcard IDOR fix: the filename must be an exact safe name (no
+    ``*?[]{}`` expansion, no recursive ``**/`` search). Private blob
+    URLs/tokens stay server-side; browsers only ever see this proxy.
+    """
+    raw_name = Path(filename).name
+    # Reject glob metacharacters outright (no wildcard expansion).
+    if any(ch in raw_name for ch in ("*", "?", "[", "]", "{", "}")) or not _SAFE_DOWNLOAD_NAME_RE.fullmatch(raw_name):
+        raise HTTPException(status_code=404, detail="الملف المطلوب غير موجود.")
+    safe_name = raw_name
+
+    def _mime_for_download(name: str) -> str:
+        fn_lower = name.lower()
+        if fn_lower.endswith(".pdf"):
+            return "application/pdf"
+        elif fn_lower.endswith(".docx"):
+            return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fn_lower.endswith(".pptx"):
+            return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        elif fn_lower.endswith((".html", ".htm")):
+            return "text/html; charset=utf-8"
+        elif fn_lower.endswith(".ics"):
+            return "text/calendar; charset=utf-8"
+        elif fn_lower.endswith(".svg"):
+            return "image/svg+xml"
+        elif fn_lower.endswith(".png"):
+            return "image/png"
+        elif fn_lower.endswith(".json"):
+            return "application/json"
+        elif fn_lower.endswith(".csv"):
+            return "text/csv; charset=utf-8"
+        elif fn_lower.endswith(".txt"):
+            return "text/plain; charset=utf-8"
+        else:
+            return "application/octet-stream"
 
     store = get_artifact_store()
     file_path = None
@@ -714,28 +772,7 @@ async def get_artifact_file(filename: str):
 
     if file_path is not None and file_path.exists():
         # Local fast path (FS dev / same-process blob mirror).
-        fn_lower = safe_name.lower()
-        if fn_lower.endswith(".pdf"):
-            media_type = "application/pdf"
-        elif fn_lower.endswith(".docx"):
-            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        elif fn_lower.endswith(".pptx"):
-            media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        elif fn_lower.endswith(".ics"):
-            media_type = "text/calendar; charset=utf-8"
-        elif fn_lower.endswith(".svg"):
-            media_type = "image/svg+xml"
-        elif fn_lower.endswith(".png"):
-            media_type = "image/png"
-        elif fn_lower.endswith(".json"):
-            media_type = "application/json"
-        elif fn_lower.endswith(".csv"):
-            media_type = "text/csv; charset=utf-8"
-        elif fn_lower.endswith(".txt"):
-            media_type = "text/plain; charset=utf-8"
-        else:
-            media_type = "application/octet-stream"
-
+        media_type = _mime_for_download(safe_name)
         return FileResponse(
             path=file_path,
             filename=safe_name,
@@ -753,48 +790,192 @@ async def get_artifact_file(filename: str):
     if streamed is not None:
         data, resolved_name, mime = streamed
         resolved = Path(str(resolved_name or safe_name)).name or safe_name
+        if any(ch in resolved for ch in ("*", "?", "[", "]", "{", "}")) or not _SAFE_DOWNLOAD_NAME_RE.fullmatch(resolved):
+            resolved = safe_name
         return Response(
             content=data,
-            media_type=mime or "application/octet-stream",
+            media_type=mime or _mime_for_download(resolved),
             headers={"Content-Disposition": f'attachment; filename="{resolved}"'},
         )
 
-    # Check output root fallback
-    matches = list(OUTPUT_DIR.glob(f"**/{safe_name}"))
-    if matches and matches[0].is_file():
-        file_path = matches[0]
-    else:
-        raise HTTPException(status_code=404, detail="الملف المطلوب غير موجود.")
+    raise HTTPException(status_code=404, detail="الملف المطلوب غير موجود.")
 
-    # Determine MIME
-    fn_lower = safe_name.lower()
-    if fn_lower.endswith(".pdf"):
-        media_type = "application/pdf"
-    elif fn_lower.endswith(".docx"):
-        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    elif fn_lower.endswith(".pptx"):
-        media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    elif fn_lower.endswith(".ics"):
-        media_type = "text/calendar; charset=utf-8"
-    elif fn_lower.endswith(".svg"):
-        media_type = "image/svg+xml"
-    elif fn_lower.endswith(".png"):
-        media_type = "image/png"
-    elif fn_lower.endswith(".json"):
-        media_type = "application/json"
-    elif fn_lower.endswith(".csv"):
-        media_type = "text/csv; charset=utf-8"
-    elif fn_lower.endswith(".txt"):
-        media_type = "text/plain; charset=utf-8"
-    else:
-        media_type = "application/octet-stream"
 
-    return FileResponse(
-        path=file_path,
-        filename=safe_name,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+# ---------------------------------------------------------------------------
+# Artifact revision & format conversion (stable identity, version+1).
+# ---------------------------------------------------------------------------
+
+
+class ArtifactReviseRequest(BaseModel):
+    artifact_id: str = Field(..., description="Stable artifact identity to revise")
+    updated_text: Optional[str] = Field(None, description="Replacement body text (paragraphs split on blank lines)")
+    updated_content_data: Optional[Dict[str, Any]] = Field(None, description="Structured section replacement")
+    run_id: Optional[str] = Field(None, description="Calling run ID (preserved into version metadata)")
+    idempotency_key: Optional[str] = Field(None, description="Deterministic retry key (same key reuses the version)")
+
+
+class ArtifactConvertRequest(BaseModel):
+    artifact_id: str = Field(..., description="Stable artifact identity to convert")
+    target_format: str = Field(..., description="Target format (pdf, docx, pptx, html, txt, json, csv, png, svg, ics)")
+    run_id: Optional[str] = Field(None, description="Calling run ID (preserved into version metadata)")
+    idempotency_key: Optional[str] = Field(None, description="Deterministic retry key (same key reuses the version)")
+
+
+@app.get("/api/artifacts/versions/{artifact_id}")
+@app.get("/artifacts/versions/{artifact_id}")
+async def list_artifact_versions(artifact_id: str):
+    """List retained versions for one stable artifact identity (oldest-first)."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(artifact_id or ""))[:128]
+    if not safe:
+        raise HTTPException(status_code=400, detail="artifact_id غير صالح.")
+    store = get_artifact_store()
+    list_versions = getattr(store, "list_versions", None)
+    versions = list_versions(safe) if callable(list_versions) else []
+    return {"artifact_id": safe, "versions": versions, "count": len(versions)}
+
+
+@app.get("/api/artifacts/version/{artifact_id}/{version}")
+@app.get("/artifacts/version/{artifact_id}/{version}")
+async def get_artifact_version(artifact_id: str, version: int):
+    """Download one exact retained version (prior versions stay retrievable)."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(artifact_id or ""))[:128]
+    if not safe or int(version or 0) < 1:
+        raise HTTPException(status_code=400, detail="artifact_id/version غير صالح.")
+    store = get_artifact_store()
+    get_version = getattr(store, "get_version_bytes", None)
+    payload = get_version(safe, int(version)) if callable(get_version) else None
+    if payload is None:
+        # Fallback: latest alias only matches when the requested version is active.
+        meta = store.get_metadata(safe) if hasattr(store, "get_metadata") else None
+        if meta and int(meta.get("version", 0) or 0) == int(version):
+            payload = store.get_bytes(safe)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="إصدار المخرج غير موجود.")
+    data, resolved_name, mime = payload
+    resolved = Path(str(resolved_name or safe)).name or safe
+    return Response(
+        content=data,
+        media_type=mime or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{resolved}"'},
     )
+
+
+@app.post("/api/artifacts/revise")
+@app.post("/artifacts/revise")
+async def revise_artifact_endpoint(req: ArtifactReviseRequest):
+    """Create version+1 under the same stable artifact identity (prior intact on failure)."""
+    orchestrator = get_artifact_orchestrator()
+    result = orchestrator.revise_artifact(
+        req.artifact_id,
+        updated_text=req.updated_text,
+        updated_content_data=req.updated_content_data,
+        run_id=req.run_id or "",
+        idempotency_key=req.idempotency_key or "",
+    )
+    payload = result.to_dict()
+    if result.status != "created":
+        raise HTTPException(status_code=422, detail=payload)
+    return payload
+
+
+@app.post("/api/artifacts/convert")
+@app.post("/artifacts/convert")
+async def convert_artifact_endpoint(req: ArtifactConvertRequest):
+    """Convert the active version's canonical document to another format (version+1)."""
+    orchestrator = get_artifact_orchestrator()
+    result = orchestrator.convert_artifact(
+        req.artifact_id,
+        req.target_format,
+        run_id=req.run_id or "",
+        idempotency_key=req.idempotency_key or "",
+    )
+    payload = result.to_dict()
+    if result.status != "created":
+        raise HTTPException(status_code=422, detail=payload)
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Coordinator revision contract: instruction-driven revisions + version views.
+# ---------------------------------------------------------------------------
+
+
+class ArtifactRevisionInstruction(BaseModel):
+    instruction: str = Field(..., description="Free-text revision directive applied to the active version")
+    format: Optional[str] = Field(None, description="Optional target format (same-format revision when omitted)")
+    run_id: Optional[str] = Field(None, description="Calling run ID (preserved into version metadata)")
+    idempotency_key: Optional[str] = Field(None, description="Deterministic retry key (same key reuses the version)")
+
+
+# Per-artifact locks so concurrent revisions allocate next versions safely
+# (no lost updates / duplicate version numbers).
+_REVISION_LOCKS: Dict[str, threading.Lock] = {}
+_REVISION_LOCKS_GUARD = threading.Lock()
+
+
+def _revision_lock(artifact_id: str) -> threading.Lock:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(artifact_id or ""))[:128]
+    with _REVISION_LOCKS_GUARD:
+        lock = _REVISION_LOCKS.get(safe)
+        if lock is None:
+            lock = threading.Lock()
+            _REVISION_LOCKS[safe] = lock
+        return lock
+
+
+def _artifact_result_envelope(store: Any, result: Any) -> Dict[str, Any]:
+    """ArtifactResult dict plus stable-identity/version/run metadata."""
+    payload = dict(result.to_dict())
+    try:
+        meta = store.get_metadata(result.id) if hasattr(store, "get_metadata") else None
+    except Exception:
+        meta = None
+    payload["artifact_id"] = result.id
+    payload["version"] = int((meta or {}).get("version", 1) or 1)
+    payload["run_id"] = str((meta or {}).get("run_id", "") or "")
+    return payload
+
+
+@app.post("/api/artifacts/{artifact_id}/revisions")
+@app.post("/artifacts/{artifact_id}/revisions")
+async def create_artifact_revision(artifact_id: str, req: ArtifactRevisionInstruction):
+    """Apply an instruction to the active version; persist version+1, same ID.
+
+    Returns the created ArtifactResult (with ``artifact_id``/``version``/
+    ``run_id`` envelope keys). Failures return 422 and leave the prior
+    version intact.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(artifact_id or ""))[:128]
+    if not safe:
+        raise HTTPException(status_code=400, detail="artifact_id غير صالح.")
+    store = get_artifact_store()
+    orchestrator = get_artifact_orchestrator()
+    with _revision_lock(safe):
+        result = orchestrator.revise_artifact_from_instruction(
+            safe,
+            req.instruction,
+            req.format,
+            run_id=req.run_id or "",
+            idempotency_key=req.idempotency_key or "",
+        )
+        payload = _artifact_result_envelope(store, result)
+    if result.status != "created":
+        raise HTTPException(status_code=422, detail=payload)
+    return payload
+
+
+@app.get("/api/artifacts/{artifact_id}/versions")
+@app.get("/artifacts/{artifact_id}/versions")
+async def get_artifact_version_history(artifact_id: str):
+    """Return every retained version with per-version preview + download URL."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", str(artifact_id or ""))[:128]
+    if not safe:
+        raise HTTPException(status_code=400, detail="artifact_id غير صالح.")
+    orchestrator = get_artifact_orchestrator()
+    views = orchestrator.list_version_views(safe)
+    if not views:
+        raise HTTPException(status_code=404, detail="المخرج المطلوب غير موجود.")
+    return {"artifact_id": safe, "versions": views, "count": len(views)}
 
 
 # ---------------------------------------------------------------------------
@@ -1213,6 +1394,11 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                 return False
 
         _terminal_status: list[str] = []
+        # SSE terminal contract: exactly one terminal event per stream
+        # (done on success/partial, error on cancel/failure — never both).
+        # Truncated/partial semantics ride on done {partial, truncated}.
+        _partial = False
+        _truncated = False
 
         try:
             # 1. Initial Status Event (language-aware). run_id is emitted in
@@ -1284,6 +1470,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                             lang=resolved_lang,
                             deadline=chat_dl,
                             cancel_event=chat_cancel,
+                            run_id=run_id,
                         ),
                     )
 
@@ -1439,7 +1626,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                     try:
                         future2 = loop.run_in_executor(
                             None,
-                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id, lang=resolved_lang, deadline=chat_dl, cancel_event=chat_cancel),
+                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id, lang=resolved_lang, deadline=chat_dl, cancel_event=chat_cancel, run_id=run_id),
                         )
                         # Bounded wait for direct fallback: reserve-preserving budget
                         remaining = chat_dl.remaining()
@@ -1567,14 +1754,20 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                         "data": json.dumps({"artifacts": artifacts_sent}, ensure_ascii=False)
                     }
 
+            # Any failed artifact makes the stream partial (degraded but terminal).
+            if any(isinstance(a, dict) and a.get("status") == "failed" for a in artifacts_sent):
+                _partial = True
             # Stream delta tokens smoothly (preserve current query text, not stale history).
             # Internal hard stop (request-2s): if the flush budget is gone,
-            # skip remaining deltas so done still beats the platform kill.
+            # truncate remaining deltas and mark done {partial, truncated} so
+            # the terminal event stays truthful instead of silently short.
             chunk_size = 4
             words = full_response_text.split(" ")
             for i in range(0, len(words), chunk_size):
                 if time.monotonic() >= hard_end:
                     logger.warning("Chat SSE hard stop reached (run_id=%s). Truncating delta to preserve done.", run_id)
+                    _partial = True
+                    _truncated = True
                     break
                 chunk = " ".join(words[i : i + chunk_size])
                 if i + chunk_size < len(words):
@@ -1593,8 +1786,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                 pass
             _terminal_status.append("cancelled")
             _run_record_put(run_id, "cancelled", list(artifacts_sent), True, {"session_id": session_id_out})
-            # Ensure downstream knows it was cancelled: emit error then done if not already sent
-            # EventSourceResponse will close; we still attempt to yield a done with error flag if possible
+            # Single terminal event: error only (no done after error).
             try:
                 yield {
                     "event": "error",
@@ -1607,7 +1799,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
             logger.exception("Unexpected SSE error (run_id=%s): %s", run_id, type(exc).__name__)
             _terminal_status.append("failed")
             _run_record_put(run_id, "failed", list(artifacts_sent), True, {"session_id": session_id_out})
-            # Emit error event but still guarantee done (contract)
+            # Single terminal event: error only (no done after error).
             try:
                 yield {
                     "event": "error",
@@ -1616,32 +1808,39 @@ async def chat_endpoint(req: ChatRequest, request: Request):
             except Exception as exc:
                 logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
         finally:
-            # 5. Final Done Event — always emitted even on empty/error (contract). Includes run_id, no secrets.
-            total_time_ms = (time.monotonic() - t_start) * 1000
+            # Single terminal done: emitted only when no error terminal was
+            # sent above (exactly one terminal per stream). Includes
+            # truncated/partial semantics and run_id, no secrets.
+            # (No `return` inside finally: it would swallow in-flight errors.)
             if not _terminal_status:
+                total_time_ms = (time.monotonic() - t_start) * 1000
                 try:
-                    _run_record_put(run_id, "succeeded", list(artifacts_sent), True, {"session_id": session_id_out})
+                    _run_record_put(run_id, "succeeded", list(artifacts_sent), True, {
+                        "session_id": session_id_out, "partial": bool(_partial), "truncated": bool(_truncated),
+                    })
                 except Exception:
                     pass
-            try:
-                yield {
-                    "event": "done",
-                    "data": json.dumps({
-                        "verified": bool(verified),
-                        "sources_count": len(citations_sent),
-                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        "timings_ms": {
-                            "total_ms": round(total_time_ms, 1),
-                        },
-                        "artifacts_count": len(artifacts_sent),
-                        "session_id": session_id_out,
-                        "run_id": run_id,
-                    }, ensure_ascii=False)
-                }
-            except Exception as exc:
-                logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
-            logger.info("SSE done (run_id=%s, session_id=%s, verified=%s, artifacts=%d, sources=%d, total_ms=%.1f)",
-                        run_id, session_id_out[:8] if len(session_id_out) > 8 else session_id_out, verified, len(artifacts_sent), len(citations_sent), total_time_ms)
+                try:
+                    yield {
+                        "event": "done",
+                        "data": json.dumps({
+                            "verified": bool(verified),
+                            "sources_count": len(citations_sent),
+                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "timings_ms": {
+                                "total_ms": round(total_time_ms, 1),
+                            },
+                            "artifacts_count": len(artifacts_sent),
+                            "session_id": session_id_out,
+                            "run_id": run_id,
+                            "partial": bool(_partial),
+                            "truncated": bool(_truncated),
+                        }, ensure_ascii=False)
+                    }
+                except Exception as exc:
+                    logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
+                logger.info("SSE done (run_id=%s, session_id=%s, verified=%s, artifacts=%d, sources=%d, total_ms=%.1f)",
+                            run_id, session_id_out[:8] if len(session_id_out) > 8 else session_id_out, verified, len(artifacts_sent), len(citations_sent), total_time_ms)
 
     return EventSourceResponse(sse_generator())
 

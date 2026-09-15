@@ -110,7 +110,7 @@ class ArtifactManager:
         if not data:
             raise ArtifactError("empty_output", "Generated artifact is empty.")
         fmt = cls._format_for(filename, artifact_type)
-        if fmt in {"pdf", "docx", "pptx", "ics", "svg", "png", "json", "csv", "txt"}:
+        if fmt in {"pdf", "docx", "pptx", "ics", "svg", "png", "json", "csv", "txt", "html"}:
             try:
                 validate_artifact_bytes(fmt, data)
             except ArtifactValidationError as exc:

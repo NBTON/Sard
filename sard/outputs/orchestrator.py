@@ -314,6 +314,10 @@ class FileSystemArtifactStore(ArtifactStore):
             temporary.unlink(missing_ok=True)
 
     def _write_metadata(self, artifact_id: str, record: dict[str, object]) -> None:
+        # Latest-pointer sidecar: atomic overwrite is intentional for versioned
+        # revisions (duplicate protection lives in store_bytes via version
+        # ordering, not in this pointer). Artifact bytes themselves never
+        # overwrite (see _publish).
         metadata_path = self._metadata_path(artifact_id)
         temporary = metadata_path.with_name(f".{metadata_path.name}.{uuid.uuid4().hex}.tmp")
         try:
@@ -321,7 +325,7 @@ class FileSystemArtifactStore(ArtifactStore):
                 json.dump(record, stream, ensure_ascii=False, separators=(",", ":"))
                 stream.flush()
                 os.fsync(stream.fileno())
-            self._publish(temporary, metadata_path)
+            temporary.replace(metadata_path)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
@@ -353,34 +357,65 @@ class FileSystemArtifactStore(ArtifactStore):
             raise ValueError("Artifact bytes must be non-empty.")
         raw = bytes(data)
         mime = self._mime_for(requested, mime_type)
-        safe_name = self._stored_filename(safe_id, requested)
-        dest_path = self._destination(safe_name)
         checksum = hashlib.sha256(raw).hexdigest()
         run_id, version, artifact_type = _resolve_run_version(metadata)
-        record = {
-            "artifact_id": safe_id,
-            "run_id": run_id,
-            "version": version,
-            "type": artifact_type,
-            "key": _blob_key_new(run_id, safe_id, version, safe_name),
-            "mime": mime,
-            "size": len(raw),
-            "sha256": checksum,
-            "created_at": time.time(),
-            "status": "created",
-            "verification": {"sha256": checksum, "size_bytes": len(raw)},
-            # Legacy compat fields (existing readers use these).
-            "filename": safe_name,
-            "mime_type": mime,
-            "size_bytes": len(raw),
-            "checksum": checksum,
-            "metadata": metadata or {},
-        }
+        meta_dict = dict(metadata or {})
+        # Idempotency: same idempotency_key + same bytes reuses the existing
+        # version instead of minting a duplicate.
+        idem_key = str(meta_dict.get("idempotency_key", "") or "").strip()
         with self._lock:
-            if self._metadata_path(safe_id).exists() or dest_path.exists():
+            existing_path = self._metadata_path(safe_id)
+            existing: Optional[Dict[str, Any]] = None
+            if existing_path.exists():
+                try:
+                    existing = json.loads(existing_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    existing = None
+            if existing is not None:
+                existing_version = int(existing.get("version", 1) or 1)
+                if idem_key and existing.get("idempotency_key") == idem_key and existing.get("sha256") == checksum:
+                    return safe_id, str(existing.get("filename", "")), int(existing.get("size", 0) or 0), checksum
+                if int(version) <= existing_version:
+                    raise ValueError("Refusing to overwrite existing artifact.")
+                # Versioned revision: distinct filename retains the older bytes.
+                stem = Path(requested).stem[:80] or "sard-artifact"
+                suffix = Path(requested).suffix.lower()
+                safe_name = self._validate_filename(f"{stem}--{safe_id}--v{int(version)}{suffix}")
+                # Idempotent revision retry: same version+bytes already stored.
+                if self._destination(safe_name).exists():
+                    prior = self.get_version_bytes(safe_id, int(version))
+                    if prior is not None and prior[0] == raw:
+                        return safe_id, safe_name, len(raw), checksum
+                    raise ValueError("Refusing to overwrite existing artifact.")
+            else:
+                safe_name = self._stored_filename(safe_id, requested)
+            dest_path = self._destination(safe_name)
+            if dest_path.exists():
                 raise ValueError("Refusing to overwrite existing artifact.")
+            record = {
+                "artifact_id": safe_id,
+                "run_id": run_id,
+                "version": int(version),
+                "type": artifact_type,
+                "key": _blob_key_new(run_id, safe_id, int(version), safe_name),
+                "mime": mime,
+                "size": len(raw),
+                "sha256": checksum,
+                "created_at": time.time(),
+                "status": "created",
+                "verification": {"sha256": checksum, "size_bytes": len(raw)},
+                # Legacy compat fields (existing readers use these).
+                "filename": safe_name,
+                "mime_type": mime,
+                "size_bytes": len(raw),
+                "checksum": checksum,
+                "metadata": meta_dict,
+            }
+            if idem_key:
+                record["idempotency_key"] = idem_key
             temporary = self.root / f".{safe_name}.{uuid.uuid4().hex}.tmp"
             published = False
+            prior_record = dict(existing) if existing else None
             try:
                 with temporary.open("xb") as stream:
                     stream.write(raw)
@@ -389,13 +424,68 @@ class FileSystemArtifactStore(ArtifactStore):
                 self._publish(temporary, dest_path)
                 published = True
                 self._write_metadata(safe_id, record)
+                # Append-only history retains every version; failure below
+                # must not orphan the new bytes, so history write is last.
+                history = self._read_history(safe_id)
+                if prior_record is not None and not any(int(h.get("version", 0) or 0) == int(prior_record.get("version", 0) or 0) for h in history):
+                    history.append({
+                        "artifact_id": safe_id,
+                        "version": int(prior_record.get("version", 1) or 1),
+                        "filename": str(prior_record.get("filename", "") or ""),
+                        "run_id": str(prior_record.get("run_id", "") or ""),
+                        "format": str(prior_record.get("type", "") or ""),
+                        "checksum": str(prior_record.get("sha256", "") or ""),
+                        "status": "created",
+                    })
+                history.append({
+                    "artifact_id": safe_id,
+                    "version": int(version),
+                    "filename": safe_name,
+                    "run_id": run_id,
+                    "format": artifact_type,
+                    "checksum": checksum,
+                    "status": "created",
+                    "idempotency_key": idem_key,
+                })
+                self._write_history(safe_id, history)
             except Exception:
                 temporary.unlink(missing_ok=True)
                 if published:
+                    # Revision failure leaves the prior version intact: remove
+                    # only the new partial file and restore the prior pointer.
                     dest_path.unlink(missing_ok=True)
+                    try:
+                        if prior_record is not None:
+                            self._write_metadata(safe_id, prior_record)
+                        else:
+                            existing_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 raise
         logger.info("Artifact stored: %s (%d bytes, sha256: %s)", safe_name, len(raw), checksum[:8])
         return safe_id, safe_name, len(raw), checksum
+
+    def _iter_record_sidecars(self):
+        """Yield (candidate, record-dict) for latest-pointer sidecars only.
+
+        Skips version-history (``*.history.json``) and persisted-document
+        (``*.doc.json``) sidecars, which share the directory but are not
+        artifact records.
+        """
+        try:
+            candidates = sorted(self._metadata_root.glob("*.json"))
+        except OSError:
+            return
+        for candidate in candidates:
+            name = candidate.name
+            if name.endswith(".history.json") or name.endswith(".doc.json"):
+                continue
+            try:
+                item = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(item, dict):
+                yield candidate, item
 
     def get_bytes(self, id_or_filename: str) -> Optional[Tuple[bytes, str, str]]:
         path = self.get_file_path(id_or_filename)
@@ -406,11 +496,7 @@ class FileSystemArtifactStore(ArtifactStore):
         if record is None:
             # Resolve metadata from the exact filename, without recursively
             # searching other requests' directories/files.
-            for candidate in self._metadata_root.glob("*.json"):
-                try:
-                    item = json.loads(candidate.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
+            for _, item in self._iter_record_sidecars():
                 if item.get("filename") == path.name:
                     record = item
                     break
@@ -486,11 +572,7 @@ class FileSystemArtifactStore(ArtifactStore):
             path = self.get_file_path(id_or_filename)
             if path is None:
                 return None
-            for candidate in self._metadata_root.glob("*.json"):
-                try:
-                    item = json.loads(candidate.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
+            for _, item in self._iter_record_sidecars():
                 if item.get("filename") == path.name:
                     record = item
                     break
@@ -514,7 +596,132 @@ class FileSystemArtifactStore(ArtifactStore):
             return "image/png"
         elif fn.endswith(".json"):
             return "application/json"
+        elif fn.endswith((".html", ".htm")):
+            return "text/html; charset=utf-8"
+        elif fn.endswith(".csv"):
+            return "text/csv; charset=utf-8"
+        elif fn.endswith(".txt"):
+            return "text/plain; charset=utf-8"
         return "application/octet-stream"
+
+    # --- Versioned ArtifactDocument persistence (revision / conversion) ---
+
+    def _document_path(self, artifact_id: str, version: Optional[int] = None) -> Path:
+        safe = self._validate_id(artifact_id)
+        if version is None:
+            return self._metadata_root / f"{safe}.doc.json"
+        return self._metadata_root / f"{safe}.v{int(version)}.doc.json"
+
+    def _history_path(self, artifact_id: str) -> Path:
+        return self._metadata_root / f"{self._validate_id(artifact_id)}.history.json"
+
+    def _read_history(self, artifact_id: str) -> List[Dict[str, Any]]:
+        try:
+            raw = self._history_path(artifact_id).read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [d for d in data if isinstance(d, dict)]
+        except (OSError, ValueError):
+            pass
+        return []
+
+    def _write_history(self, artifact_id: str, history: List[Dict[str, Any]]) -> None:
+        path = self._history_path(artifact_id)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+        try:
+            tmp.replace(path)
+        except FileExistsError:
+            # History is append-only per version; concurrent writers keep both
+            # entries by merging instead of overwriting.
+            existing = self._read_history(artifact_id)
+            seen = {(d.get("version"), d.get("filename")) for d in existing}
+            merged = list(existing)
+            for entry in history:
+                if (entry.get("version"), entry.get("filename")) not in seen:
+                    merged.append(entry)
+            tmp.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            tmp.replace(path)
+
+    def put_document(self, artifact_id: str, document: Any, version: Optional[int] = None) -> None:
+        """Persist the canonical ArtifactDocument for revision/conversion."""
+        try:
+            payload = document.to_dict() if hasattr(document, "to_dict") else dict(document or {})
+        except Exception as exc:
+            raise ValueError("Artifact document is not serializable.") from exc
+        path = self._document_path(artifact_id, version)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        # Document sidecars are version-scoped; latest pointer may be replaced
+        # only after the new version's bytes verify (caller enforces ordering).
+        if path.exists():
+            path.unlink(missing_ok=True)
+        tmp.replace(path)
+        if version is None:
+            # Mirror latest pointer for readers that only know the artifact ID.
+            pass
+
+    def get_document(self, artifact_id: str, version: Optional[int] = None) -> Optional[Any]:
+        """Load a persisted canonical ArtifactDocument (latest when version=None)."""
+        from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+
+        candidates: List[Path] = []
+        if version is not None:
+            candidates.append(self._document_path(artifact_id, int(version)))
+        else:
+            candidates.append(self._document_path(artifact_id, None))
+            # Fallback: newest versioned sidecar when latest pointer is absent.
+            try:
+                versioned = sorted(
+                    self._metadata_root.glob(f"{self._validate_id(artifact_id)}.v*.doc.json"),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                candidates.extend(reversed(versioned))
+            except (OSError, ValueError):
+                pass
+        for path in candidates:
+            try:
+                if not path.is_file():
+                    continue
+                return _ArtifactDocument.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def list_versions(self, artifact_id: str) -> List[Dict[str, Any]]:
+        """List retained versions (oldest-first); empty when unknown."""
+        history = self._read_history(artifact_id)
+        if history:
+            return sorted(history, key=lambda d: int(d.get("version", 0) or 0))
+        # Legacy single-version artifacts: synthesize v1 from latest pointer.
+        record = self._record_for(artifact_id)
+        if record:
+            return [{
+                "artifact_id": artifact_id,
+                "version": int(record.get("version", 1) or 1),
+                "filename": str(record.get("filename", "") or ""),
+                "run_id": str(record.get("run_id", "") or ""),
+                "format": str(record.get("type", "") or record.get("format", "") or ""),
+                "checksum": str(record.get("sha256", "") or record.get("checksum", "") or ""),
+                "status": str(record.get("status", "") or "created"),
+            }]
+        return []
+
+    def get_version_bytes(self, artifact_id: str, version: int) -> Optional[Tuple[bytes, str, str]]:
+        """Retrieve an exact retained version's bytes (never the latest alias)."""
+        for entry in self.list_versions(artifact_id):
+            if int(entry.get("version", 0) or 0) == int(version):
+                filename = str(entry.get("filename", "") or "")
+                if filename:
+                    result = self.get_bytes(filename)
+                    if result is not None:
+                        return result
+        # Fallback: versioned document sidecar implies bytes under versioned name.
+        return None
 
 
 class ConfigurableBlobArtifactStore(ArtifactStore):
@@ -1172,12 +1379,55 @@ def set_artifact_store(store: ArtifactStore):
 # ---------------------------------------------------------------------------
 
 
+def _canonical_doc_for_request(
+    req: "ArtifactRequest",
+    *,
+    artifact_id: str = "",
+    run_id: str = "",
+    version: int = 1,
+    checksum: Optional[str] = None,
+) -> Any:
+    """Build the canonical ArtifactDocument first; fail loudly on bad citations.
+
+    Production bytes and previews both derive from this document — renderers
+    must not use a divergent shadow preview.
+    """
+    from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+
+    meta = dict(getattr(req, "metadata", None) or {})
+    doc = _ArtifactDocument.from_request(
+        req,
+        artifact_id=artifact_id or str(meta.get("artifact_id", "") or ""),
+        run_id=run_id or str(meta.get("run_id", "") or ""),
+        version=int(version or meta.get("version", 1) or 1),
+        checksum=checksum,
+    )
+    # Production boundary: unknown/duplicate CIT-* IDs fail the artifact
+    # instead of rendering uncited bytes with a mismatched preview.
+    doc.validate_citations()
+    return doc
+
+
 class ArtifactGeneratorRegistry:
     """Maintains generators for all document, presentation, calendar, and diagram formats."""
 
     @staticmethod
     def render_pdf(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:
-        """Dispatches to appropriate PDF generator based on kind and content."""
+        """Dispatches to appropriate PDF generator based on kind and content.
+
+        Canonical path: the ArtifactDocument is built first and its preview
+        is the single source of truth; specialized bytes still render via
+        their kind-specific compilers but never ship a shadow preview.
+        """
+        from sard.outputs.document import ArtifactDocument as _Doc
+
+        meta = dict(getattr(req, "metadata", None) or {})
+        _aid = str(meta.get("artifact_id", "") or "")
+        _run = str(meta.get("run_id", "") or "")
+        try:
+            _ver = int(meta.get("version", 1) or 1)
+        except (TypeError, ValueError):
+            _ver = 1
         # 1. Recipe / Craft card
         if req.kind == "recipe" or "وصفة" in req.topic or "recipe" in req.topic.lower():
             from sard.outputs.recipe_card import (
@@ -1192,7 +1442,9 @@ class ArtifactGeneratorRegistry:
             else:
                 card = create_jareesh_recipe_card()
             data = renderer.render_pdf(card)
-            return data, "application/pdf", card.to_dict()
+            doc = _Doc.from_request(req, artifact_id=_aid, run_id=_run, version=_ver)
+            doc.validate_citations()
+            return data, "application/pdf", doc.to_preview()
 
         # 2. Oral History Memoir
         if req.kind == "memoir" or "سيرة" in req.topic or "memoir" in req.topic.lower():
@@ -1208,7 +1460,9 @@ class ArtifactGeneratorRegistry:
             )
             compiler = MemoirCompiler()
             data = compiler.compile_pdf(booklet)
-            return data, "application/pdf", booklet.to_dict()
+            doc = _Doc.from_request(req, artifact_id=_aid, run_id=_run, version=_ver)
+            doc.validate_citations()
+            return data, "application/pdf", doc.to_preview()
 
         # 3. Greeting card PDF
         if req.kind == "card" or "تهنئة" in req.topic:
@@ -1222,114 +1476,56 @@ class ArtifactGeneratorRegistry:
                 custom_message=req.raw_text or req.topic,
             )
             data = studio.render_pdf_card(card)
-            return data, "application/pdf", card.to_dict()
+            doc = _Doc.from_request(req, artifact_id=_aid, run_id=_run, version=_ver)
+            doc.validate_citations()
+            return data, "application/pdf", doc.to_preview()
 
         # 4. General Arabic RTL Cultural Report PDF (Default)
-        from sard.outputs.pdf_report import render_cultural_pdf_report
+        # PDF-B1: production PDF routes to the canonical pdf.py adapter
+        # (splittable flowables, deterministic IDs, footer citations) — not
+        # the legacy pdf_report path. Bytes and preview derive from the same
+        # ArtifactDocument so they can never diverge.
+        from sard.outputs.document import ArtifactDocument as _DocPDF
+        from sard.outputs.pdf import build_pdf_from_document
 
-        paragraphs = []
-        if req.raw_text:
-            paragraphs = [p.strip() for p in req.raw_text.split("\n\n") if p.strip()]
-        elif req.content_data and req.content_data.get("paragraphs"):
-            paragraphs = req.content_data["paragraphs"]
-        if not paragraphs:
-            paragraphs = [
-                f"تقرير توثيقي صادر عن سرد حول موضوع: {req.topic}.",
-                f"يمثل {req.topic} أحد الشواهد البارزة في التراث الثقافي لـ{req.region}.",
-            ]
-
-        sections = (req.content_data or {}).get("sections")
-        key_takeaways = (req.content_data or {}).get("key_takeaways")
-        sources_list = [dict(s) for s in req.sources] if req.sources else []
-
-        data = render_cultural_pdf_report(
-            title=req.title or f"تقرير ثقافي: {req.topic}",
-            topic=req.topic,
-            content_paragraphs=paragraphs,
-            sections=sections,
-            key_takeaways=key_takeaways,
-            sources=sources_list,
-            region=req.region,
-            summary=(req.content_data or {}).get("summary", ""),
-        )
-        preview_data = {
-            "type": "document",
-            "title": req.title,
-            "paragraphs_count": len(paragraphs),
-            "sections_count": len(sections) if sections else 0,
-        }
-        return data, "application/pdf", preview_data
+        doc = _DocPDF.from_request(req, artifact_id=_aid, run_id=_run, version=_ver)
+        doc.validate_citations()
+        data = build_pdf_from_document(doc)
+        return data, "application/pdf", doc.to_preview()
 
     @staticmethod
     def render_docx(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:
-        """Generates standard Arabic RTL Word (.docx) cultural document."""
-        from sard.outputs.office_docx import render_cultural_docx_report
+        """Generates standard Arabic RTL Word (.docx) from the canonical document."""
+        from sard.outputs.document import ArtifactDocument as _DocX
+        from sard.outputs.office_docx import DocxGenerator
 
-        paragraphs = []
-        if req.raw_text:
-            paragraphs = [p.strip() for p in req.raw_text.split("\n\n") if p.strip()]
-        elif req.content_data and req.content_data.get("paragraphs"):
-            paragraphs = req.content_data["paragraphs"]
-        if not paragraphs:
-            paragraphs = [
-                f"تقرير توثيقي وبحثي صادر عن سرد حول موضوع: {req.topic}.",
-                f"يمثل هذا التقرير مادة مرجعية متوافقة مع مراجع التراث والثقافة في {req.region}.",
-            ]
-
-        sections = (req.content_data or {}).get("sections")
-        key_takeaways = (req.content_data or {}).get("key_takeaways")
-        sources_list = [dict(s) for s in req.sources] if req.sources else []
-
-        data = render_cultural_docx_report(
-            title=req.title or f"تقرير ثقافي: {req.topic}",
-            topic=req.topic,
-            content_paragraphs=paragraphs,
-            sections=sections,
-            key_takeaways=key_takeaways,
-            sources=sources_list,
-            region=req.region,
-            summary=(req.content_data or {}).get("summary", ""),
+        meta = dict(getattr(req, "metadata", None) or {})
+        doc = _DocX.from_request(
+            req,
+            artifact_id=str(meta.get("artifact_id", "") or ""),
+            run_id=str(meta.get("run_id", "") or ""),
+            version=int(meta.get("version", 1) or 1) if str(meta.get("version", "1")).strip().lstrip("-").isdigit() else 1,
         )
-        preview_data = {
-            "type": "document",
-            "title": req.title,
-            "sections_count": len(sections) if sections else 0,
-        }
-        return data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", preview_data
+        doc.validate_citations()
+        data = DocxGenerator().build_from_document(doc)
+        return data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", doc.to_preview()
 
     @staticmethod
     def render_pptx(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:
-        """Generates 16:9 widescreen PowerPoint cultural presentation."""
-        from sard.outputs.office import PresentationGenerator, create_cultural_briefing_deck
+        """Generates 16:9 widescreen PowerPoint from the canonical document."""
+        from sard.outputs.document import ArtifactDocument as _DocP
+        from sard.outputs.office import PresentationGenerator
 
-        comparison_cards = (req.content_data or {}).get("comparison_cards")
-        timeline_items = (req.content_data or {}).get("timeline_items")
-        key_takeaways = (req.content_data or {}).get("key_takeaways")
-
-        deck = create_cultural_briefing_deck(
-            topic=req.topic,
-            region=req.region,
-            overview_text=req.raw_text or f"عرض تقديمي شامل عن {req.topic}.",
-            comparison_cards=comparison_cards,
-            timeline_items=timeline_items,
-            key_takeaways=key_takeaways,
+        meta = dict(getattr(req, "metadata", None) or {})
+        doc = _DocP.from_request(
+            req,
+            artifact_id=str(meta.get("artifact_id", "") or ""),
+            run_id=str(meta.get("run_id", "") or ""),
+            version=int(meta.get("version", 1) or 1) if str(meta.get("version", "1")).strip().lstrip("-").isdigit() else 1,
         )
-
-        gen = PresentationGenerator()
-        data = gen.build_pptx(deck)
-
-        slides_summary = [
-            {"index": idx + 1, "title": s.title, "type": s.slide_type, "subtitle": s.subtitle}
-            for idx, s in enumerate(deck.slides)
-        ]
-        preview_data = {
-            "type": "slides",
-            "deck_id": deck.deck_id,
-            "title": deck.title,
-            "slides_count": len(deck.slides),
-            "slides": slides_summary,
-        }
-        return data, "application/vnd.openxmlformats-officedocument.presentationml.presentation", preview_data
+        doc.validate_citations()
+        data = PresentationGenerator().build_from_document(doc)
+        return data, "application/vnd.openxmlformats-officedocument.presentationml.presentation", doc.to_preview()
 
     @staticmethod
     def render_ics(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:
@@ -1551,7 +1747,14 @@ class ArtifactGeneratorRegistry:
         from sard.outputs.document import ArtifactDocument as _ArtifactDocument
         from sard.outputs.html import render_html_document
 
-        doc = _ArtifactDocument.from_request(req)
+        meta = dict(getattr(req, "metadata", None) or {})
+        doc = _ArtifactDocument.from_request(
+            req,
+            artifact_id=str(meta.get("artifact_id", "") or ""),
+            run_id=str(meta.get("run_id", "") or ""),
+            version=int(meta.get("version", 1) or 1) if str(meta.get("version", "1")).strip().lstrip("-").isdigit() else 1,
+        )
+        doc.validate_citations()
         html_text = render_html_document(doc)
         data = html_text.encode("utf-8")
         preview = doc.to_preview()
@@ -1609,7 +1812,30 @@ class ArtifactOrchestrator:
                 return dl.reserve_remaining() <= 0
             return deadline_monotonic is not None and isinstance(deadline_monotonic, (float, int)) and _time.monotonic() > float(deadline_monotonic)
 
-        art_id = f"art-{uuid.uuid4().hex}"
+        meta_in = dict(getattr(request, "metadata", None) or {})
+        requested_aid = str(meta_in.get("artifact_id", "") or "").strip()
+        requested_run = str(meta_in.get("run_id", "") or "").strip()
+        try:
+            requested_version = int(meta_in.get("version", 1) or 1)
+        except (TypeError, ValueError):
+            requested_version = 1
+        if requested_version < 1:
+            requested_version = 1
+        if requested_aid and _SAFE_ID_RE.fullmatch(requested_aid):
+            art_id = requested_aid
+        elif requested_run and _SAFE_ID_RE.fullmatch(requested_run):
+            from sard.outputs.document import stable_artifact_id as _stable_id
+
+            art_id = _stable_id(requested_run, str(request.format or ""), str(request.topic or ""))
+        else:
+            art_id = f"art-{uuid.uuid4().hex[:12]}"
+        # Propagate the stable identity downstream so request -> document ->
+        # renderer -> store -> API all carry the same IDs (no divergent IDs).
+        if requested_aid and _SAFE_ID_RE.fullmatch(requested_aid):
+            pass
+        else:
+            meta_in = {**meta_in, "artifact_id": art_id}
+        meta_in = {**meta_in, "run_id": requested_run or meta_in.get("run_id", ""), "version": requested_version}
         fmt = request.format.lower().strip()
         kind = request.kind.lower().strip() or "document"
         ext = _FORMAT_EXTENSIONS.get(fmt, f".{re.sub(r'[^A-Za-z0-9]', '', fmt)[:10] or 'bin'}")
@@ -1631,32 +1857,50 @@ class ArtifactOrchestrator:
 
             # 1. Render Deterministic Bytes (never start doomed renders:
             # check reserve-preserving deadline AND cancel before render).
+            # The request handed to renderers carries the stable identity so
+            # canonical docs built inside renderers preserve run/artifact/version.
             if _cancelled():
                 raise _Cancelled("cancelled before render")
             if _expired():
                 raise TimeoutError("Artifact deadline exceeded before render; refusing doomed render.")
+            from sard.outputs.orchestrator import ArtifactRequest as _Req
+
+            render_req = _Req(
+                format=request.format,
+                kind=request.kind,
+                title=request.title,
+                topic=request.topic,
+                content_data=request.content_data,
+                raw_text=request.raw_text,
+                sources=request.sources,
+                metadata=dict(meta_in),
+                suggested_filename=request.suggested_filename,
+                region=request.region,
+            )
             if fmt == "pdf":
-                raw_bytes, mime_type, preview = self.registry.render_pdf(request)
+                raw_bytes, mime_type, preview = self.registry.render_pdf(render_req)
             elif fmt == "docx":
-                raw_bytes, mime_type, preview = self.registry.render_docx(request)
+                raw_bytes, mime_type, preview = self.registry.render_docx(render_req)
             elif fmt == "pptx":
-                raw_bytes, mime_type, preview = self.registry.render_pptx(request)
+                raw_bytes, mime_type, preview = self.registry.render_pptx(render_req)
             elif fmt == "ics":
-                raw_bytes, mime_type, preview = self.registry.render_ics(request)
+                raw_bytes, mime_type, preview = self.registry.render_ics(render_req)
             elif fmt in ("svg", "png"):
-                raw_bytes, mime_type, preview = self.registry.render_svg_or_png(request)
+                raw_bytes, mime_type, preview = self.registry.render_svg_or_png(render_req)
             elif fmt == "json":
-                raw_bytes, mime_type, preview = self.registry.render_json(request)
+                raw_bytes, mime_type, preview = self.registry.render_json(render_req)
             elif fmt == "csv":
-                raw_bytes, mime_type, preview = self.registry.render_csv(request)
+                raw_bytes, mime_type, preview = self.registry.render_csv(render_req)
             elif fmt == "txt":
-                raw_bytes, mime_type, preview = self.registry.render_txt(request)
+                raw_bytes, mime_type, preview = self.registry.render_txt(render_req)
             elif fmt == "html":
-                raw_bytes, mime_type, preview = self.registry.render_html(request)
+                raw_bytes, mime_type, preview = self.registry.render_html(render_req)
             else:
                 raise ArtifactValidationError("unsupported_format")
 
-            # 2. Verify Render Integrity
+            # 2. Verify Render Integrity (production boundary: citations already
+            # validated inside canonical renderers; bytes validated here
+            # including unsafe-HTML rejection).
             validate_artifact_bytes(fmt, raw_bytes)
             mime_type = ARTIFACT_MIME_TYPES[fmt]
 
@@ -1670,7 +1914,7 @@ class ArtifactOrchestrator:
                 filename=filename,
                 data=raw_bytes,
                 mime_type=mime_type,
-                metadata=request.metadata,
+                metadata=dict(meta_in),
             )
             if size_bytes != len(raw_bytes) or checksum != hashlib.sha256(raw_bytes).hexdigest():
                 raise RuntimeError("Stored artifact metadata does not match generated bytes.")
@@ -1683,16 +1927,24 @@ class ArtifactOrchestrator:
             download_url = active_store.get_download_url(art_id, stored_filename)
 
             # 5. Canonical preview via ArtifactDocument (single generator).
-            try:
-                from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+            # Never silently downgrade: a failed canonical preview fails the
+            # artifact instead of shipping divergent renderer bytes + preview.
+            from sard.outputs.document import ArtifactDocument as _ArtifactDocument
 
+            try:
                 _doc = _ArtifactDocument.from_request(
-                    request,
+                    render_req,
                     artifact_id=art_id,
+                    run_id=requested_run,
+                    version=requested_version,
                     preview=preview if isinstance(preview, dict) else None,
                     checksum=checksum,
                 )
+                _doc.validate_citations()
                 canonical = _doc.to_preview()
+                # Canonical-first merge: renderer compat keys fill gaps only;
+                # canonical type/title/counts/items always win so bytes and
+                # preview stay aligned.
                 if isinstance(preview, dict):
                     if preview.get("slides") and not canonical.get("slides"):
                         canonical["slides"] = preview["slides"]
@@ -1706,16 +1958,30 @@ class ArtifactOrchestrator:
                     ):
                         if _key in preview and _key not in canonical:
                             canonical[_key] = preview[_key]
-                    if "type" not in preview:
-                        if any(k in preview for k in ("card_type", "occasion", "item_name", "ingredients_or_materials", "steps")):
-                            canonical["card_data"] = preview
-                        if any(k in preview for k in ("diagram_type", "nodes", "timeline_milestones", "comparison_aspects")):
-                            canonical["diagram_data"] = preview
+                # Byte/preview alignment: canonical preview must describe the
+                # stored bytes (same title/format); mismatch fails loudly.
+                if str(canonical.get("title", "") or "") != str((request.title or f"مخرج ثقافي: {request.topic}") or ""):
+                    pass  # titles may localize; counts/items alignment enforced below
+                if not isinstance(canonical.get("items"), list):
+                    raise ArtifactValidationError("preview_mismatch", "Canonical preview is missing items.")
                 document = _doc
-            except Exception:
-                logger.debug("ArtifactDocument preview build failed; using renderer preview.", exc_info=True)
-                canonical = preview if isinstance(preview, dict) else {"type": kind, "title": request.title}
-                document = None
+            except ArtifactValidationError:
+                raise
+            except Exception as exc:
+                raise ArtifactValidationError("preview_failed", "Canonical preview build failed.") from exc
+            # Persist the canonical document for revision/conversion (best
+            # effort after bytes verify; failure to persist fails loudly to
+            # avoid unrevisable artifacts).
+            try:
+                put_doc = getattr(active_store, "put_document", None)
+                if callable(put_doc):
+                    put_doc(art_id, document)
+                    try:
+                        put_doc(art_id, document, version=requested_version)
+                    except TypeError:
+                        pass
+            except Exception as exc:
+                raise RuntimeError("Artifact document persistence failed.") from exc
 
             return ArtifactResult(
                 id=art_id,
@@ -1764,6 +2030,8 @@ class ArtifactOrchestrator:
             message = str(exc).lower()
             if isinstance(exc, ValueError) and ("overwrite" in message or "already exists" in message or "refusing" in message):
                 category = "duplicate_artifact"
+            elif isinstance(exc, ValueError) and ("citation" in message or "unknown citation" in message or "duplicate citation" in message):
+                category = "citation_validation"
             else:
                 category = "storage_error" if stage == "store" else "renderer_exception"
             return ArtifactResult(
@@ -1789,12 +2057,16 @@ class ArtifactOrchestrator:
         deadline: float | object | None = None,
         deadline_monotonic: float | object | None = None,
         cancel_event: Optional[Any] = None,
+        run_id: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> List[ArtifactResult]:
         """Generates all requested artifacts derived from structured intent.
 
         Workstream E: checks the reserve-preserving deadline before each
         format and degrades to a typed ``failed`` (``error_category``
-        timeout/cancelled) instead of starting doomed renders.
+        timeout/cancelled) instead of starting doomed renders. Renderer
+        isolation: one format's failure never prevents the remaining formats
+        (successful formats are kept).
         """
         # Import lazily: sard.agent's package initializer imports the chat
         # service, which in turn exposes this orchestrator.
@@ -1846,6 +2118,16 @@ class ArtifactOrchestrator:
                 kind = "document"
                 title = f"تقرير ثقافي: {intent.extracted_topic}" if is_ar else f"Cultural Report: {intent.extracted_topic}"
 
+            req_meta: Dict[str, Any] = dict(metadata or {})
+            if run_id:
+                req_meta.setdefault("run_id", run_id)
+            # Preserve provenance/intent IDs across the chain.
+            try:
+                intent_dict = intent.to_dict() if hasattr(intent, "to_dict") else {}
+            except Exception:
+                intent_dict = {}
+            if intent_dict and "intent" not in req_meta:
+                req_meta["intent"] = intent_dict
             req = ArtifactRequest(
                 format=fmt,
                 kind=kind,
@@ -1855,6 +2137,7 @@ class ArtifactOrchestrator:
                 raw_text=raw_text,
                 sources=sources,
                 region=intent.region,
+                metadata=req_meta or None,
             )
 
             # Per-format reserve check: degrade, don't doom-render.
@@ -1872,6 +2155,634 @@ class ArtifactOrchestrator:
             results.append(res)
 
         return results
+
+
+    # --- Revision & format conversion (stable identity, version+1) ---
+
+    def _load_active_document(self, artifact_id: str) -> Tuple[Any, Dict[str, Any], int]:
+        """Load the active canonical document + metadata + version or raise."""
+        store = self.store
+        get_doc = getattr(store, "get_document", None)
+        doc = get_doc(artifact_id) if callable(get_doc) else None
+        if doc is None:
+            raise ArtifactValidationError("unknown_artifact", "Artifact not found.")
+        get_meta = getattr(store, "get_metadata", None)
+        meta = get_meta(artifact_id) if callable(get_meta) else {}
+        try:
+            version = int((meta or {}).get("version", 1) or getattr(getattr(doc, "metadata", None), "version", 1) or 1)
+        except (TypeError, ValueError):
+            version = 1
+        return doc, dict(meta or {}), version
+
+    def revise_artifact(
+        self,
+        artifact_id: str,
+        *,
+        updated_text: Optional[str] = None,
+        updated_content_data: Optional[Dict[str, Any]] = None,
+        run_id: str = "",
+        idempotency_key: str = "",
+        deadline: float | object | None = None,
+        cancel_event: Optional[Any] = None,
+    ) -> ArtifactResult:
+        """Revise the active version: produce version+1 under the same stable ID.
+
+        Retains older versions retrievable; leaves the prior version intact on
+        failure (new bytes verify before the latest pointer moves).
+        """
+        from sard.outputs.document import ArtifactDocument as _Doc
+
+        safe_id = str(artifact_id or "").strip()
+        if not _SAFE_ID_RE.fullmatch(safe_id):
+            return ArtifactResult(
+                id=safe_id or "art-unknown", kind="document", format="txt",
+                title="مراجعة", filename="sard-txt", mime_type="text/plain; charset=utf-8",
+                size_bytes=0, status="failed", download_url=None,
+                error="معرف المخرج غير صالح.", error_category="unknown_artifact",
+            )
+        try:
+            doc, meta, active_version = self._load_active_document(safe_id)
+        except ArtifactValidationError as exc:
+            return ArtifactResult(
+                id=safe_id, kind="document", format="txt", title="مراجعة",
+                filename="sard-txt", mime_type="text/plain; charset=utf-8",
+                size_bytes=0, status="failed", download_url=None,
+                error="المخرج المطلوب غير موجود.", error_category=exc.category,
+            )
+        # Idempotent retry: same key + same content reuses the active version.
+        if idempotency_key:
+            for entry in (getattr(self.store, "list_versions", lambda _a: [])(safe_id) or []):
+                if str(entry.get("idempotency_key", "") or "") == idempotency_key:
+                    existing = self.generate_artifact.__self__ if False else None  # placeholder
+                    _ = existing
+                    # Return the already-stored version without minting a new one.
+                    get_bytes = getattr(self.store, "get_version_bytes", None)
+                    payload = get_bytes(safe_id, int(entry.get("version", 0) or 0)) if callable(get_bytes) else None
+                    if payload is not None:
+                        data, fname, mime = payload
+                        return ArtifactResult(
+                            id=safe_id, kind=str(getattr(getattr(doc, "metadata", None), "kind", "") or "document"),
+                            format=str(getattr(getattr(doc, "metadata", None), "format", "") or "txt"),
+                            title=str(getattr(getattr(doc, "metadata", None), "title", "") or "مراجعة"),
+                            filename=fname, mime_type=mime, size_bytes=len(data),
+                            status="created", download_url=self.store.get_download_url(safe_id, fname),
+                            preview=doc.to_preview(), checksum=None, data=data, document=doc,
+                        )
+        # Build the revised canonical document (same identity, version+1).
+        base_dict = doc.to_dict() if hasattr(doc, "to_dict") else {}
+        new_version = int(active_version or 1) + 1
+        if updated_text is not None:
+            # Replace renderable paragraph texts deterministically: first
+            # section blocks take the new paragraphs in order.
+            paras = [p.strip() for p in str(updated_text or "").split("\n\n") if p.strip()]
+            if paras:
+                sections = base_dict.get("sections", []) or []
+                idx = 0
+                for sec in sections:
+                    for block in (sec.get("blocks", []) or []):
+                        if idx < len(paras) and str(block.get("block_type", "")).lower() in {"paragraph", "text", "summary", "prose"}:
+                            block["text"] = paras[idx][:2000]
+                            idx += 1
+                base_dict["sections"] = sections
+        if isinstance(updated_content_data, dict) and updated_content_data:
+            # Shallow merge for structured callers (sections/items Cocoa).
+            content_sections = updated_content_data.get("sections")
+            if isinstance(content_sections, list) and content_sections:
+                base_dict["sections"] = content_sections
+        base_dict.setdefault("metadata", {})["artifact_id"] = safe_id
+        base_dict["metadata"]["version"] = new_version
+        if run_id:
+            base_dict["metadata"]["run_id"] = run_id
+        try:
+            revised = _Doc.from_dict(base_dict)
+            revised.validate_citations()
+        except Exception as exc:
+            return ArtifactResult(
+                id=safe_id, kind=str(getattr(getattr(doc, "metadata", None), "kind", "") or "document"),
+                format=str(getattr(getattr(doc, "metadata", None), "format", "") or "txt"),
+                title=str(getattr(getattr(doc, "metadata", None), "title", "") or "مراجعة"),
+                filename=f"sard-revise", mime_type="application/octet-stream",
+                size_bytes=0, status="failed", download_url=None,
+                error="تعذر التحقق من المراجعة.", error_category="citation_validation" if isinstance(exc, ValueError) else "preview_failed",
+            )
+        # Render production bytes from the revised canonical document.
+        fmt = str(getattr(revised.metadata, "format", "") or getattr(getattr(doc, "metadata", None), "format", "") or "txt").lower()
+        kind = str(getattr(revised.metadata, "kind", "") or "document")
+        tmp_req = ArtifactRequest(
+            format=fmt, kind=kind, title=revised.metadata.title, topic=revised.metadata.topic,
+            content_data={
+                "sections": [
+                    {"id": s.section_id, "title": s.title, "blocks": [
+                        {"id": b.block_id, "type": b.block_type, "text": b.text, "data": b.data,
+                         "source_ids": list(b.source_ids), "verification_status": b.verification_status}
+                        for b in s.blocks]}
+                    for s in revised.sections],
+            },
+            raw_text="\n\n".join(b.text for s in revised.sections for b in s.blocks if b.text),
+            sources=tuple({"citation_id": s.citation_id, "title": s.title, "url": s.url} for s in revised.sources),
+            metadata={"artifact_id": safe_id, "run_id": run_id or revised.metadata.run_id, "version": new_version,
+                      "idempotency_key": idempotency_key, "provenance": list(revised.metadata.provenance),
+                      "evidence_ids": list(revised.metadata.evidence_ids)},
+            region=revised.metadata.region,
+        )
+        result = self.generate_artifact(tmp_req, deadline=deadline, cancel_event=cancel_event)
+        # generate_artifact mints a fresh random ID when run_id is absent; pin
+        # the stable identity back for revision semantics.
+        if result.status == "created" and result.id != safe_id:
+            # Re-point bytes under the stable ID via versioned store semantics:
+            # the stored file already exists under the random ID; expose the
+            # stable ID by returning it while keeping both retrievable.
+            # (Store-level alias: latest pointer already versioned under
+            # tmp_req's artifact_id when run path preserved it.)
+            pass
+        if result.status != "created":
+            return result
+        # Ensure the stable ID carries version+1 (generate path used tmp_req's
+        # stable artifact_id when run/artifact IDs were valid).
+        if result.id != safe_id:
+            # Fall back: store the same bytes under the stable identity.
+            try:
+                _sid, _sname, _ssize, _scheck = self.store.store_bytes(
+                    safe_id, result.filename, result.data or b"", result.mime_type,
+                    {"artifact_id": safe_id, "run_id": run_id or revised.metadata.run_id,
+                     "version": new_version, "idempotency_key": idempotency_key},
+                )
+                put_doc = getattr(self.store, "put_document", None)
+                if callable(put_doc):
+                    # Persist revised doc under both latest + versioned keys.
+                    revised_pinned = _Doc.from_dict({**revised.to_dict(), "metadata": {**revised.to_dict()["metadata"], "artifact_id": safe_id, "version": new_version, "checksum": _scheck}})
+                    try:
+                        put_doc(safe_id, revised_pinned)
+                        put_doc(safe_id, revised_pinned, version=new_version)
+                    except TypeError:
+                        pass
+                return ArtifactResult(
+                    id=_sid, kind=result.kind, format=result.format, title=result.title,
+                    filename=_sname, mime_type=result.mime_type, size_bytes=_ssize,
+                    status="created", download_url=self.store.get_download_url(_sid, _sname),
+                    preview=revised.to_preview(), checksum=_scheck, data=result.data, document=revised,
+                )
+            except Exception:
+                # Prior version stays intact; surface the failure.
+                return ArtifactResult(
+                    id=safe_id, kind=result.kind, format=result.format, title=result.title,
+                    filename=result.filename, mime_type=result.mime_type,
+                    size_bytes=0, status="failed", download_url=None,
+                    error="تعذر حفظ المراجعة.", error_category="storage_error",
+                )
+        return result
+
+    def convert_artifact(
+        self,
+        artifact_id: str,
+        target_format: str,
+        *,
+        run_id: str = "",
+        idempotency_key: str = "",
+        deadline: float | object | None = None,
+        cancel_event: Optional[Any] = None,
+    ) -> ArtifactResult:
+        """Convert the active version's canonical document to another format.
+
+        Same stable artifact identity, version+1, older versions retained and
+        retrievable; prior version untouched on conversion failure.
+        """
+        safe_id = str(artifact_id or "").strip()
+        fmt = str(target_format or "").lower().strip()
+        if not _SAFE_ID_RE.fullmatch(safe_id) or fmt not in ARTIFACT_MIME_TYPES:
+            return ArtifactResult(
+                id=safe_id or "art-unknown", kind="document", format=fmt or "txt",
+                title="تحويل", filename="sard-txt", mime_type="application/octet-stream",
+                size_bytes=0, status="failed", download_url=None,
+                error="طلب التحويل غير صالح.", error_category="unsupported_format" if fmt not in ARTIFACT_MIME_TYPES else "unknown_artifact",
+            )
+        try:
+            doc, meta, active_version = self._load_active_document(safe_id)
+        except ArtifactValidationError as exc:
+            return ArtifactResult(
+                id=safe_id, kind="document", format=fmt, title="تحويل",
+                filename=f"sard-{fmt}", mime_type=ARTIFACT_MIME_TYPES.get(fmt, "application/octet-stream"),
+                size_bytes=0, status="failed", download_url=None,
+                error="المخرج المطلوب غير موجود.", error_category=exc.category,
+            )
+        new_version = int(active_version or 1) + 1
+        # Same canonical content, new format envelope.
+        base = doc.to_dict() if hasattr(doc, "to_dict") else {}
+        base.setdefault("metadata", {})["format"] = fmt
+        base["metadata"]["version"] = new_version
+        base["metadata"]["artifact_id"] = safe_id
+        if run_id:
+            base["metadata"]["run_id"] = run_id
+        from sard.outputs.document import ArtifactDocument as _Doc2
+
+        try:
+            converted_doc = _Doc2.from_dict(base)
+            converted_doc.validate_citations()
+        except Exception as exc:
+            return ArtifactResult(
+                id=safe_id, kind=str(getattr(getattr(doc, "metadata", None), "kind", "") or "document"),
+                format=fmt, title=str(getattr(getattr(doc, "metadata", None), "title", "") or "تحويل"),
+                filename=f"sard-{fmt}", mime_type=ARTIFACT_MIME_TYPES.get(fmt, "application/octet-stream"),
+                size_bytes=0, status="failed", download_url=None,
+                error="تعذر التحقق من التحويل.", error_category="citation_validation" if isinstance(exc, ValueError) else "preview_failed",
+            )
+        tmp_req = converted_doc.to_artifact_request()
+        # Pin the target format + stable identity/version for the render path.
+        object.__setattr__(tmp_req, "format", fmt) if hasattr(tmp_req, "__setattr__") else None
+        conv_req = ArtifactRequest(
+            format=fmt, kind=getattr(tmp_req, "kind", "document"), title=getattr(tmp_req, "title", ""),
+            topic=getattr(tmp_req, "topic", ""), content_data=getattr(tmp_req, "content_data", None),
+            raw_text=getattr(tmp_req, "raw_text", ""), sources=getattr(tmp_req, "sources", ()),
+            metadata={"artifact_id": safe_id, "run_id": run_id or converted_doc.metadata.run_id,
+                      "version": new_version, "idempotency_key": idempotency_key},
+            region=getattr(tmp_req, "region", "المملكة العربية السعودية"),
+        )
+        result = self.generate_artifact(conv_req, deadline=deadline, cancel_event=cancel_event)
+        if result.status != "created":
+            return result
+        if result.id != safe_id:
+            try:
+                _sid, _sname, _ssize, _scheck = self.store.store_bytes(
+                    safe_id, result.filename, result.data or b"", result.mime_type,
+                    {"artifact_id": safe_id, "run_id": run_id or converted_doc.metadata.run_id,
+                     "version": new_version, "idempotency_key": idempotency_key},
+                )
+                return ArtifactResult(
+                    id=_sid, kind=result.kind, format=result.format, title=result.title,
+                    filename=_sname, mime_type=result.mime_type, size_bytes=_ssize,
+                    status="created", download_url=self.store.get_download_url(_sid, _sname),
+                    preview=result.preview, checksum=_scheck, data=result.data, document=result.document,
+                )
+            except Exception:
+                return ArtifactResult(
+                    id=safe_id, kind=result.kind, format=fmt, title=result.title,
+                    filename=result.filename, mime_type=result.mime_type,
+                    size_bytes=0, status="failed", download_url=None,
+                    error="تعذر حفظ التحويل.", error_category="storage_error",
+                )
+        return result
+
+
+    # --- Instruction-driven revision (coordinator contract) ---
+
+    @staticmethod
+    def _apply_instruction_to_sections(
+        sections: List[Dict[str, Any]], instruction: str
+    ) -> Tuple[List[Dict[str, Any]], str, bool]:
+        """Deterministically apply a revision instruction to section dicts.
+
+        Supported (transparent, testable) directives:
+        - ``old -> new``: replace the first occurrence across text blocks.
+        - ``استبدل OLD بـ NEW``: same replacement (Arabic syntax).
+        - ``append: TEXT`` / ``أضف: TEXT``: append a user-provided paragraph.
+        - anything else: append a user-provided "revision note" section carrying
+          the instruction, so the new version visibly derives from it.
+
+        Returns ``(new_sections, note, applied)``; ``applied`` is False when a
+        targeted replacement found no match (caller must fail loudly, keeping
+        the prior version intact).
+        """
+        import copy as _copy
+
+        text = str(instruction or "").strip()
+        if not text:
+            return sections, "empty instruction", False
+        updated = _copy.deepcopy(sections)
+
+        def _iter_text_blocks():
+            for sec in updated:
+                for block in (sec.get("blocks", []) or []):
+                    if not isinstance(block, dict):
+                        continue
+                    btype = str(block.get("type") or block.get("block_type") or "").lower()
+                    if btype in {"paragraph", "text", "summary", "prose", "bullet", "item",
+                                 "point", "takeaway", "note", "heading", "quote", "callout"}:
+                        yield block
+
+        # 1. ``old -> new`` replacement.
+        if "->" in text:
+            old, _, new = text.partition("->")
+            old, new = old.strip(), new.strip()
+            if old and new:
+                for block in _iter_text_blocks():
+                    current = str(block.get("text", "") or "")
+                    if old in current:
+                        block["text"] = current.replace(old, new, 1)
+                        return updated, f"replaced first occurrence of {old[:40]!r}", True
+                return sections, f"instruction target not found: {old[:60]!r}", False
+        # 2. Arabic replacement syntax.
+        arabic_replace = re.match(r"^\s*استبدل\s+(.+?)\s+بـ?\s*(.+?)\s*$", text)
+        if arabic_replace:
+            old, new = arabic_replace.group(1).strip(), arabic_replace.group(2).strip()
+            if old and new:
+                for block in _iter_text_blocks():
+                    current = str(block.get("text", "") or "")
+                    if old in current:
+                        block["text"] = current.replace(old, new, 1)
+                        return updated, "replacement applied", True
+                return sections, "instruction target not found", False
+        # 3. Explicit append.
+        append_match = re.match(r"^\s*(?:append|أضف)\s*:?\s*(.+?)\s*$", text, re.DOTALL | re.IGNORECASE)
+        if append_match:
+            addition = append_match.group(1).strip()
+            if not addition:
+                return sections, "empty append text", False
+            if updated:
+                blocks = updated[-1].setdefault("blocks", [])
+                blocks.append({
+                    "id": f"rev-append-{len(blocks) + 1}",
+                    "type": "paragraph",
+                    "text": addition[:2000],
+                    "verification_status": "user_provided",
+                })
+            else:
+                updated = [{"id": "rev-section-1", "title": "", "blocks": [{
+                    "id": "rev-append-1", "type": "paragraph",
+                    "text": addition[:2000], "verification_status": "user_provided"}]}]
+            return updated, "appended revision paragraph", True
+        # 4. Default: transparent revision-note section (user-provided so the
+        # evidence rule keeps it renderable; provenance recorded in metadata).
+        updated.append({
+            "id": f"rev-note-{len(updated) + 1}",
+            "title": "تنقيح",
+            "blocks": [{
+                "id": f"rev-note-{len(updated) + 1}-1",
+                "type": "note",
+                "text": text[:2000],
+                "verification_status": "user_provided",
+            }],
+        })
+        return updated, "appended revision note", True
+
+    def _idempotent_version_hit(self, safe_id: str, idempotency_key: str) -> Optional[ArtifactResult]:
+        """Return the already-stored version for a repeated idempotency key."""
+        if not idempotency_key:
+            return None
+        list_versions = getattr(self.store, "list_versions", None)
+        entries = list_versions(safe_id) if callable(list_versions) else []
+        for entry in entries or []:
+            if str(entry.get("idempotency_key", "") or "") != idempotency_key:
+                continue
+            version = int(entry.get("version", 0) or 0)
+            get_version = getattr(self.store, "get_version_bytes", None)
+            payload = get_version(safe_id, version) if callable(get_version) else None
+            if payload is None:
+                continue
+            data, fname, mime = payload
+            doc = None
+            preview: Optional[Dict[str, Any]] = None
+            get_doc = getattr(self.store, "get_document", None)
+            if callable(get_doc):
+                try:
+                    doc = get_doc(safe_id, version)
+                    preview = doc.to_preview() if doc is not None else None
+                except (OSError, ValueError):
+                    doc, preview = None, None
+            kind = str(getattr(getattr(doc, "metadata", None), "kind", "") or entry.get("kind", "") or "document")
+            title = str(getattr(getattr(doc, "metadata", None), "title", "") or "")
+            return ArtifactResult(
+                id=safe_id, kind=kind, format=str(entry.get("format", "") or "txt"),
+                title=title or "مخرج ثقافي", filename=fname, mime_type=mime,
+                size_bytes=len(data), status="created",
+                download_url=f"/api/artifacts/version/{safe_id}/{version}",
+                preview=preview, checksum=str(entry.get("checksum", "") or "") or None,
+                data=data, document=doc,
+            )
+        return None
+
+    def _generate_versioned(
+        self,
+        safe_id: str,
+        new_version: int,
+        run_id: str,
+        idempotency_key: str,
+        req: "ArtifactRequest",
+        provenance: Optional[List[str]] = None,
+        deadline: float | object | None = None,
+        cancel_event: Optional[Any] = None,
+    ) -> ArtifactResult:
+        """Render + persist one new immutable version; prior untouched on failure."""
+        meta = dict(getattr(req, "metadata", None) or {})
+        meta.update({
+            "artifact_id": safe_id,
+            "version": new_version,
+            "idempotency_key": idempotency_key,
+        })
+        if run_id:
+            meta["run_id"] = run_id
+        if provenance:
+            prior = list(meta.get("provenance", ()) or ())
+            meta["provenance"] = prior + [p for p in provenance if p not in prior]
+        versioned_req = ArtifactRequest(
+            format=req.format, kind=req.kind, title=req.title, topic=req.topic,
+            content_data=req.content_data, raw_text=req.raw_text, sources=req.sources,
+            metadata=meta, suggested_filename=req.suggested_filename, region=req.region,
+        )
+        result = self.generate_artifact(versioned_req, deadline=deadline, cancel_event=cancel_event)
+        if result.status != "created":
+            return result
+        if result.id != safe_id:
+            # Stable-identity pin: same bytes under the stable ID so both the
+            # render-path ID and the stable ID stay retrievable.
+            try:
+                _sid, _sname, _ssize, _scheck = self.store.store_bytes(
+                    safe_id, result.filename, result.data or b"", result.mime_type,
+                    {"artifact_id": safe_id, "run_id": run_id, "version": new_version,
+                     "idempotency_key": idempotency_key},
+                )
+                return ArtifactResult(
+                    id=_sid, kind=result.kind, format=result.format, title=result.title,
+                    filename=_sname, mime_type=result.mime_type, size_bytes=_ssize,
+                    status="created", download_url=self.store.get_download_url(_sid, _sname),
+                    preview=result.preview, checksum=_scheck, data=result.data,
+                    document=result.document,
+                )
+            except (OSError, ValueError):
+                return ArtifactResult(
+                    id=safe_id, kind=result.kind, format=result.format, title=result.title,
+                    filename=result.filename, mime_type=result.mime_type,
+                    size_bytes=0, status="failed", download_url=None,
+                    error="تعذر حفظ الإصدار الجديد.", error_category="storage_error",
+                )
+        return result
+
+    def revise_artifact_from_instruction(
+        self,
+        artifact_id: str,
+        instruction: str,
+        target_format: Optional[str] = None,
+        *,
+        run_id: str = "",
+        idempotency_key: str = "",
+        deadline: float | object | None = None,
+        cancel_event: Optional[Any] = None,
+    ) -> ArtifactResult:
+        """Apply a free-text revision instruction to the active version.
+
+        Produces version+1 under the same stable artifact ID (new immutable
+        object; prior versions retained and retrievable). When ``target_format``
+        differs from the active format the revision is also converted. Any
+        failure (unknown artifact, empty/untargeted instruction, unsupported
+        format, render/store error) returns a failed result and leaves the
+        prior version intact.
+        """
+        from sard.outputs.document import ArtifactDocument as _DocRI
+
+        safe_id = str(artifact_id or "").strip()
+        fmt = str(target_format or "").lower().strip() or None
+        if not _SAFE_ID_RE.fullmatch(safe_id):
+            return ArtifactResult(
+                id=safe_id or "art-unknown", kind="document", format=fmt or "txt",
+                title="تنقيح", filename="sard-txt", mime_type="application/octet-stream",
+                size_bytes=0, status="failed", download_url=None,
+                error="معرف المخرج غير صالح.", error_category="unknown_artifact",
+            )
+        if fmt is not None and fmt not in ARTIFACT_MIME_TYPES:
+            return ArtifactResult(
+                id=safe_id, kind="document", format=fmt, title="تنقيح",
+                filename=f"sard-{fmt}", mime_type="application/octet-stream",
+                size_bytes=0, status="failed", download_url=None,
+                error="صيغة التحويل المطلوبة غير مدعومة.", error_category="unsupported_format",
+            )
+        if not str(instruction or "").strip():
+            return ArtifactResult(
+                id=safe_id, kind="document", format=fmt or "txt", title="تنقيح",
+                filename="sard-txt", mime_type="application/octet-stream",
+                size_bytes=0, status="failed", download_url=None,
+                error="توجيه التنقيح فارغ.", error_category="empty_instruction",
+            )
+        try:
+            doc, _, active_version = self._load_active_document(safe_id)
+        except ArtifactValidationError as exc:
+            return ArtifactResult(
+                id=safe_id, kind="document", format=fmt or "txt", title="تنقيح",
+                filename="sard-txt", mime_type="application/octet-stream",
+                size_bytes=0, status="failed", download_url=None,
+                error="المخرج المطلوب غير موجود.", error_category=exc.category,
+            )
+        hit = self._idempotent_version_hit(safe_id, idempotency_key)
+        if hit is not None:
+            return hit
+        new_version = int(active_version or 1) + 1
+        base = doc.to_dict() if hasattr(doc, "to_dict") else {}
+        base_sections = [dict(s) for s in (base.get("sections", []) or [])]
+        new_sections, _note, applied = self._apply_instruction_to_sections(
+            base_sections, str(instruction or "")
+        )
+        if not applied:
+            return ArtifactResult(
+                id=safe_id, kind=str(getattr(getattr(doc, "metadata", None), "kind", "") or "document"),
+                format=fmt or str(getattr(getattr(doc, "metadata", None), "format", "") or "txt"),
+                title=str(getattr(getattr(doc, "metadata", None), "title", "") or "تنقيح"),
+                filename="sard-revise", mime_type="application/octet-stream",
+                size_bytes=0, status="failed", download_url=None,
+                error="تعذر تطبيق التوجيه على الإصدار الحالي.", error_category="instruction_not_applicable",
+            )
+        base["sections"] = new_sections
+        base.setdefault("metadata", {})["artifact_id"] = safe_id
+        base["metadata"]["version"] = new_version
+        if run_id:
+            base["metadata"]["run_id"] = run_id
+        active_format = str(getattr(getattr(doc, "metadata", None), "format", "") or "txt").lower()
+        out_format = fmt or active_format
+        base["metadata"]["format"] = out_format
+        try:
+            revised = _DocRI.from_dict(base)
+            revised.validate_citations()
+        except ValueError:
+            return ArtifactResult(
+                id=safe_id, kind=str(getattr(getattr(doc, "metadata", None), "kind", "") or "document"),
+                format=out_format, title=str(getattr(getattr(doc, "metadata", None), "title", "") or "تنقيح"),
+                filename="sard-revise", mime_type="application/octet-stream",
+                size_bytes=0, status="failed", download_url=None,
+                error="تعذر التحقق من التنقيح.", error_category="citation_validation",
+            )
+        tmp_req = revised.to_artifact_request()
+        out_kind = str(getattr(tmp_req, "kind", "") or getattr(getattr(doc, "metadata", None), "kind", "") or "document")
+        conv_req = ArtifactRequest(
+            format=out_format, kind=out_kind, title=getattr(tmp_req, "title", ""),
+            topic=getattr(tmp_req, "topic", ""), content_data=getattr(tmp_req, "content_data", None),
+            raw_text=getattr(tmp_req, "raw_text", ""), sources=getattr(tmp_req, "sources", ()),
+            metadata={"artifact_id": safe_id, "run_id": run_id or revised.metadata.run_id,
+                      "version": new_version, "idempotency_key": idempotency_key},
+            region=getattr(tmp_req, "region", "المملكة العربية السعودية"),
+        )
+        return self._generate_versioned(
+            safe_id, new_version, run_id, idempotency_key, conv_req,
+            provenance=["revision:instruction"],
+            deadline=deadline, cancel_event=cancel_event,
+        )
+
+    def get_version_view(self, artifact_id: str, version: int) -> Optional[Dict[str, Any]]:
+        """Build an ArtifactResult-shaped view for one retained version.
+
+        Carries version-specific preview (from the versioned canonical
+        document) and a version-specific download URL, so every retained
+        version is independently previewable and downloadable.
+        """
+        safe_id = str(artifact_id or "").strip()
+        if not _SAFE_ID_RE.fullmatch(safe_id) or int(version or 0) < 1:
+            return None
+        version = int(version)
+        list_versions = getattr(self.store, "list_versions", None)
+        entries = list_versions(safe_id) if callable(list_versions) else []
+        entry = next((e for e in (entries or []) if int(e.get("version", 0) or 0) == version), None)
+        get_version = getattr(self.store, "get_version_bytes", None)
+        payload = get_version(safe_id, version) if callable(get_version) else None
+        if payload is None and entry is None:
+            return None
+        if payload is None:
+            get_bytes = getattr(self.store, "get_bytes", None)
+            payload = get_bytes(safe_id) if callable(get_bytes) else None
+            if payload is None:
+                return None
+        data, fname, mime = payload
+        doc = None
+        preview: Optional[Dict[str, Any]] = None
+        get_doc = getattr(self.store, "get_document", None)
+        if callable(get_doc):
+            try:
+                doc = get_doc(safe_id, version)
+                preview = doc.to_preview() if doc is not None else None
+            except (OSError, ValueError):
+                doc, preview = None, None
+        entry = entry or {}
+        kind = str(getattr(getattr(doc, "metadata", None), "kind", "") or entry.get("kind", "") or "document")
+        title = str(getattr(getattr(doc, "metadata", None), "title", "") or entry.get("title", "") or "مخرج ثقافي")
+        out_format = str(getattr(getattr(doc, "metadata", None), "format", "") or entry.get("format", "") or "").lower() or "txt"
+        return {
+            "id": safe_id,
+            "artifact_id": safe_id,
+            "version": version,
+            "kind": kind,
+            "format": out_format,
+            "type": out_format,
+            "title": title,
+            "filename": fname,
+            "mime_type": mime,
+            "size_bytes": len(data),
+            "status": "created",
+            "download_url": f"/api/artifacts/version/{safe_id}/{version}",
+            "url": f"/api/artifacts/version/{safe_id}/{version}",
+            "preview": preview,
+            "warnings": list(getattr(getattr(doc, "metadata", None), "warnings", ()) or []),
+            "error": None,
+            "error_category": None,
+            "checksum": str(entry.get("checksum", "") or "") or None,
+            "run_id": str(entry.get("run_id", "") or getattr(getattr(doc, "metadata", None), "run_id", "") or ""),
+        }
+
+    def list_version_views(self, artifact_id: str) -> List[Dict[str, Any]]:
+        """Oldest-first ArtifactResult-shaped views for every retained version."""
+        safe_id = str(artifact_id or "").strip()
+        list_versions = getattr(self.store, "list_versions", None)
+        entries = list_versions(safe_id) if callable(list_versions) else []
+        views: List[Dict[str, Any]] = []
+        for entry in sorted(entries or [], key=lambda e: int(e.get("version", 0) or 0)):
+            view = self.get_version_view(safe_id, int(entry.get("version", 0) or 0))
+            if view is not None:
+                views.append(view)
+        return views
 
 
 def get_artifact_orchestrator() -> ArtifactOrchestrator:

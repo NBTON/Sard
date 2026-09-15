@@ -83,9 +83,11 @@ def clean_pdf_text(text: str) -> str:
     if not text:
         return text
     cleaned = text
-    # Preserve link text, drop URL wrapper (URL is rendered separately in sources)
+    # PDF-Q2: preserve hyperlink targets visibly as "text (url)" — the custom
+    # draw-boundary flowables cannot carry ReportLab link annotations, so the
+    # URL must survive as text instead of being dropped silently.
     cleaned = _MARKDOWN_IMAGE_RE.sub(r"\1", cleaned)
-    cleaned = _MARKDOWN_LINK_RE.sub(r"\1", cleaned)
+    cleaned = _MARKDOWN_LINK_RE.sub(r"\1 (\2)", cleaned)
     cleaned = _MARKDOWN_LINK_BARE_RE.sub(r"\1", cleaned)
     cleaned = _INTERNAL_TAG_RE.sub("", cleaned)
     cleaned = _MD_CODE_RE.sub(r"\1", cleaned)
@@ -778,6 +780,9 @@ def markdown_to_flowables(
             table_accum.append(content.split("\u0001"))
             continue
         flush_table()
+        # PDF-B5: thread inline citation IDs into every flowable so the page
+        # footer shows real per-page citations instead of "لا توجد إحالات".
+        block_citations = tuple(INLINE_CITATION_RE.findall(content))
         if kind == "heading":
             size = {1: 20, 2: 17, 3: 14}.get(level, 15)
             flowables.append(
@@ -788,12 +793,13 @@ def markdown_to_flowables(
                     size=size,
                     leading=size + 8,
                     color=colors.HexColor("#6E1F1F"),
+                    citation_ids=block_citations,
                     top_padding=8,
                     bottom_padding=6,
                 )
             )
         elif kind == "bullet":
-            flowables.append(_block_flowable_text(f"• {content}", font, latin_font))
+            flowables.append(_block_flowable_text(f"• {content}", font, latin_font, block_citations))
         elif kind == "quote":
             flowables.append(
                 _TextFlowable(
@@ -803,6 +809,7 @@ def markdown_to_flowables(
                     size=11,
                     leading=18,
                     color=colors.HexColor("#6E1F1F"),
+                    citation_ids=block_citations,
                     bottom_padding=5,
                 )
             )
@@ -820,18 +827,45 @@ def markdown_to_flowables(
                 )
             )
         else:
-            flowables.append(_block_flowable_text(content, font, latin_font))
+            flowables.append(_block_flowable_text(content, font, latin_font, block_citations))
     flush_table()
     return flowables
 
 
-def _block_flowable_text(text: str, font: str, latin_font: str) -> _TextFlowable:
+def _chunk_text_for_cell(text: str, max_chars: int = 1500) -> list[str]:
+    """Split very long text into page-fitting chunks for single-cell tables.
+
+    Platypus cannot split a one-row table whose cell exceeds the frame, so
+    callout boxes carry one row per chunk and paginate by rows instead of
+    raising LayoutError.
+    """
+
+    clean = (text or "").strip()
+    if len(clean) <= max_chars:
+        return [clean] if clean else []
+    chunks: list[str] = []
+    current = ""
+    for word in clean.split():
+        if current and len(current) + 1 + len(word) > max_chars:
+            chunks.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        chunks.append(current)
+    return chunks or [clean]
+
+
+def _block_flowable_text(
+    text: str, font: str, latin_font: str, citation_ids: Sequence[str] = ()
+) -> _TextFlowable:
     return _TextFlowable(
         text,
         font=font,
         latin_font=latin_font,
         size=11,
         leading=18,
+        citation_ids=tuple(citation_ids),
         bottom_padding=5,
     )
 
@@ -1022,7 +1056,10 @@ def render_document_pdf(
 
     if summary.strip() or paragraphs:
         summary_text = summary.strip() or paragraphs[0]
-        summary_body = [_block_flowable_text(summary_text, font_name, latin_font_name)]
+        summary_body = [
+            _block_flowable_text(chunk, font_name, latin_font_name)
+            for chunk in _chunk_text_for_cell(summary_text)
+        ]
         story.append(
             _callout_table("ملخص التقرير", summary_body, font_name, latin_font_name)
         )
@@ -1109,7 +1146,8 @@ def render_document_pdf(
         story.append(Spacer(1, 12))
         takeaway_flows: list[Flowable] = []
         for item in takeaways:
-            takeaway_flows.append(_block_flowable_text(f"• {item}", font_name, latin_font_name))
+            for chunk in _chunk_text_for_cell(f"• {item}"):
+                takeaway_flows.append(_block_flowable_text(chunk, font_name, latin_font_name))
         story.append(
             _callout_table(
                 "الخلاصات المعرفية",
@@ -1217,3 +1255,100 @@ def render_document_pdf(
         size_bytes=destination.stat().st_size,
         warnings=(),
     )
+
+
+def build_pdf_from_document(doc) -> bytes:
+    """Render production PDF bytes from a canonical ArtifactDocument (PDF-B2).
+
+    The single canonical PDF path: only evidence-rule-renderable blocks are
+    translated (unverified blocks never reach the file), long paragraphs flow
+    across pages via the splittable _TextFlowable, and inline citations ride
+    into the page footers. Raises ValueError on missing title/topic/content
+    (never filler).
+    """
+
+    from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+
+    if not isinstance(doc, _ArtifactDocument):
+        raise ValueError("build_pdf_from_document requires an ArtifactDocument.")
+    meta = doc.metadata
+    title = (meta.title or "").strip()
+    topic = (meta.topic or "").strip()
+    if not title:
+        raise ValueError("PDF report requires a title; refusing to render filler.")
+    if not topic:
+        raise ValueError("PDF report requires a topic; refusing to render filler.")
+
+    paragraphs: list[str] = []
+    sections: list[dict] = []
+    takeaways: list[str] = []
+    summary = ""
+    for section in doc.sections:
+        blocks = section.renderable_blocks()
+        if not blocks and not section.title.strip():
+            continue
+        sec_paras: list[str] = []
+        sec_bullets: list[str] = []
+        table_data: list[list[str]] | None = None
+        image_src = ""
+        for block in blocks:
+            btype = str(getattr(block, "block_type", "") or "").lower()
+            text = (getattr(block, "text", "") or "").strip()
+            data = getattr(block, "data", None)
+            data = data if isinstance(data, dict) else {}
+            if btype in {"takeaway"}:
+                if text:
+                    takeaways.append(text)
+            elif btype in {"bullet", "item", "point"}:
+                if text:
+                    sec_bullets.append(text)
+            elif btype in {"table", "table_row", "row"}:
+                rows = data.get("rows") or data.get("table_data") or data.get("table")
+                if isinstance(rows, (list, tuple)) and rows:
+                    table_data = [
+                        [str(c or "") for c in r] if isinstance(r, (list, tuple)) else [str(r)]
+                        for r in rows
+                    ]
+                elif text:
+                    sec_paras.append(text)
+            elif btype in {"image", "diagram"}:
+                src = str(data.get("src") or data.get("url") or "").strip()
+                if src and "://" not in src:
+                    image_src = image_src or src
+                elif text:
+                    sec_paras.append(text)
+            elif btype == "summary":
+                if text and not summary:
+                    summary = text
+                if text:
+                    sec_paras.append(text)
+            elif btype == "attachment":
+                continue
+            elif text:
+                sec_paras.append(text)
+        paragraphs.extend(sec_paras)
+        if section.title.strip() or sec_paras or sec_bullets or table_data:
+            entry: dict = {"title": section.title.strip(), "content": "\n\n".join(sec_paras)}
+            if sec_bullets:
+                entry["bullets"] = sec_bullets
+            if table_data:
+                entry["table_data"] = table_data
+            if image_src:
+                entry["image"] = image_src
+            sections.append(entry)
+    if not paragraphs and not sections and not takeaways and not summary.strip():
+        raise ValueError("PDF report content is missing; refusing to render filler.")
+    sources = [
+        {"citation_id": s.citation_id, "title": s.title, "url": s.url} for s in doc.sources
+    ]
+    result = render_document_pdf(
+        title=title,
+        topic=topic,
+        content_paragraphs=paragraphs,
+        sections=sections,
+        key_takeaways=takeaways,
+        sources=sources,
+        region=meta.region,
+        summary=summary,
+    )
+    return result if isinstance(result, bytes) else bytes(result)

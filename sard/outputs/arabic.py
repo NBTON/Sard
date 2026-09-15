@@ -28,8 +28,16 @@ from bidi.algorithm import get_display
 
 
 ARABIC_RE = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]")
+# Atomic LTR units stashed before bidi so python-bidi cannot tear brackets or
+# swap year/era-suffix positions. Order matters: specific shapes first.
+# - URLs, CIT-* IDs, numeric citations ([1], [12])
+# - parenthesized Latin phrases: "(Salwa Palace)" stays one run so both
+#   parens survive shaping (RTL-B1)
+# - Hijri/Gregorian years with era suffix: "1727م" / "1447هـ" (RTL-Q1)
 PROTECTED_RE = re.compile(
-    r"https?://[^\s<>]+|\[CIT-[A-Za-z0-9_-]+\]|[%+\-]\d+(?:[.,]\d+)?|"
+    r"https?://[^\s<>]+|\[CIT-[A-Za-z0-9_-]+\]|\[\d+\]|"
+    r"\([A-Za-z0-9\s.,_/\-]{1,80}\)|"
+    r"\d+\s*(?:م|هـ)|[%+\-]\d+(?:[.,]\d+)?|"
     r"[A-Za-z0-9][A-Za-z0-9._:/?&=%+\-]*"
 )
 

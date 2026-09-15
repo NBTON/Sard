@@ -48,6 +48,8 @@ MAX_CARDS_PER_SLIDE = 3
 MAX_TIMELINE_PER_SLIDE = 4
 MAX_BULLETS_PER_SLIDE = 6
 MAX_CHARS_PER_SLIDE = 900
+MAX_TABLE_ROWS_PER_SLIDE = 12
+MAX_SOURCES_PER_SLIDE = 6
 MIN_BODY_PT = 13
 
 
@@ -58,6 +60,27 @@ class DeckBuildError(ValueError):
 
 def _chunk_items(items: list, size: int) -> list[list]:
     return [items[i : i + size] for i in range(0, len(items), size)] or [[]]
+
+
+def _chunk_bullets(
+    bullets: list[str],
+    max_count: int = MAX_BULLETS_PER_SLIDE,
+    max_chars: int = MAX_CHARS_PER_SLIDE,
+) -> list[list[str]]:
+    """Chunk bullets by count AND character budget, never dropping text."""
+
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for bullet in bullets:
+        if current and (len(current) >= max_count or current_len + len(bullet) > max_chars):
+            chunks.append(current)
+            current, current_len = [], 0
+        current.append(bullet)
+        current_len += len(bullet)
+    if current:
+        chunks.append(current)
+    return chunks or [[]]
 
 
 def _chunk_paragraphs(paragraphs: list[str], max_chars: int = MAX_CHARS_PER_SLIDE) -> list[list[str]]:
@@ -223,11 +246,24 @@ class PresentationGenerator:
                 for idx, chunk in enumerate(_chunk_items(list(slide_data.timeline), MAX_TIMELINE_PER_SLIDE)):
                     title = slide_data.title if idx == 0 else f"{slide_data.title} (تابع)"
                     expanded.append(replace(slide_data, title=title, timeline=chunk))
+            elif slide_data.slide_type == "table" and len(slide_data.table_rows) > MAX_TABLE_ROWS_PER_SLIDE:
+                # PPTX-B2: paginate wide tables instead of silently truncating.
+                header = slide_data.table_rows[:1]
+                body = slide_data.table_rows[1:]
+                for idx, chunk in enumerate(_chunk_items(body, MAX_TABLE_ROWS_PER_SLIDE - 1) or [[]]):
+                    title = slide_data.title if idx == 0 else f"{slide_data.title} (تابع)"
+                    table_slide = replace(slide_data, title=title, table_rows=header + chunk)
+                    expanded.append(table_slide)
+            elif slide_data.slide_type == "sources" and len(slide_data.bullets) > MAX_SOURCES_PER_SLIDE:
+                # PPTX-Q2: paginate long bibliographies instead of overflowing.
+                for idx, chunk in enumerate(_chunk_items(list(slide_data.bullets), MAX_SOURCES_PER_SLIDE)):
+                    title = slide_data.title if idx == 0 else f"{slide_data.title} (تابع)"
+                    expanded.append(replace(slide_data, title=title, bullets=chunk))
             elif slide_data.slide_type in {"briefing", "summary", "content"} and (
                 len(slide_data.bullets) > MAX_BULLETS_PER_SLIDE
-                or sum(len(p) for p in slide_data.body_paragraphs) > MAX_CHARS_PER_SLIDE
+                or sum(len(p) for p in (*slide_data.body_paragraphs, *slide_data.bullets, slide_data.quote)) > MAX_CHARS_PER_SLIDE
             ):
-                bullet_chunks = _chunk_items(list(slide_data.bullets), MAX_BULLETS_PER_SLIDE) or [[]]
+                bullet_chunks = _chunk_bullets(list(slide_data.bullets)) or [[]]
                 para_chunks = _chunk_paragraphs(list(slide_data.body_paragraphs)) or [[]]
                 # Zip chunks: first slide keeps body+bullets head, rest continue.
                 total = max(len(bullet_chunks), len(para_chunks))
@@ -285,30 +321,29 @@ class PresentationGenerator:
             tables: list[list[list[str]]] = []
             images: list[str] = []
             quote = ""
-            for block in section.blocks:
+            # PPTX-B3: a heading titles the upcoming content group instead of
+            # emitting an empty slide; consecutive headings keep the last one.
+            pending_heading = ""
+            # PPTX-B4: honor the fail-closed evidence rule like the preview.
+            for block in section.renderable_blocks():
                 btype = str(getattr(block, "block_type", "") or "").lower()
                 text = (getattr(block, "text", "") or "").strip()
                 data = getattr(block, "data", None)
                 data = data if isinstance(data, dict) else {}
                 if btype == "heading":
-                    if paras or bullets:
+                    if paras or bullets or quote:
                         deck.slides.append(
                             SlideContent(
                                 slide_type="briefing",
-                                title=section.title or title,
+                                title=pending_heading or section.title or title,
                                 body_paragraphs=paras,
                                 bullets=bullets,
+                                quote=quote,
                                 region_badge=meta.region,
                             )
                         )
-                        paras, bullets = [], []
-                    deck.slides.append(
-                        SlideContent(
-                            slide_type="briefing",
-                            title=text or section.title,
-                            region_badge=meta.region,
-                        )
-                    )
+                        paras, bullets, quote = [], [], ""
+                    pending_heading = text or pending_heading
                 elif btype in {"bullet", "item", "point", "takeaway"}:
                     if text:
                         bullets.append(text)
@@ -334,10 +369,20 @@ class PresentationGenerator:
                 deck.slides.append(
                     SlideContent(
                         slide_type="briefing",
-                        title=section.title or title,
+                        title=pending_heading or section.title or title,
                         body_paragraphs=paras,
                         bullets=bullets,
                         quote=quote,
+                        region_badge=meta.region,
+                    )
+                )
+            elif pending_heading:
+                # A trailing heading with no body still yields its titled
+                # slide rather than vanishing silently.
+                deck.slides.append(
+                    SlideContent(
+                        slide_type="briefing",
+                        title=pending_heading,
                         region_badge=meta.region,
                     )
                 )
@@ -674,7 +719,9 @@ class PresentationGenerator:
             raise DeckBuildError(f"Table slide '{data.title}' has no rows; refusing filler.")
         width = max(len(r) for r in rows)
         normalized = [r + [""] * (width - len(r)) for r in rows]
-        rtl_rows = [list(reversed(r)) for r in normalized][:12]
+        # PPTX tables are LTR-positioned grids; _expand_pagination() splits
+        # overflow onto "(تابع)" slides, so render every row (never truncate).
+        rtl_rows = [list(reversed(r)) for r in normalized]
         left, top = Inches(0.8), Inches(1.8)
         table_width, table_height = Inches(11.733), Inches(4.6)
         shape = slide.shapes.add_table(len(rtl_rows), width, left, top, table_width, table_height)
@@ -703,6 +750,12 @@ class PresentationGenerator:
 
         self._add_slide_header(slide, data.title, data.region_badge or "صورة")
         src = (data.body_paragraphs[0] if data.body_paragraphs else "").strip()
+        if src and "://" in src:
+            # PPTX-B1: remote image URLs are not local files — render a styled
+            # reference card instead of crashing the whole deck.
+            self._render_remote_image_card(slide, data.title, src)
+            self._add_slide_footer(slide, data.footer_text)
+            return
         candidate = _Path(src)
         if not src or not candidate.is_file():
             raise DeckBuildError(f"Image slide '{data.title}' has no readable image; refusing filler.")
@@ -711,6 +764,30 @@ class PresentationGenerator:
         except Exception as exc:
             raise DeckBuildError(f"Image slide '{data.title}' could not embed image.") from exc
         self._add_slide_footer(slide, data.footer_text)
+
+    def _render_remote_image_card(self, slide, title: str, url: str) -> None:
+        """Styled placeholder card for web-hosted images (no download)."""
+        card = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.5), Inches(1.8), Inches(10.333), Inches(4.6)
+        )
+        card.fill.solid()
+        card.fill.fore_color.rgb = COLOR_CARD
+        card.line.color.rgb = COLOR_GOLD
+        card.line.width = Pt(1.5)
+        box = slide.shapes.add_textbox(Inches(1.9), Inches(2.2), Inches(9.533), Inches(3.8))
+        tf = box.text_frame
+        tf.word_wrap = True
+        first = True
+        for line in (title, url):
+            para = tf.paragraphs[0] if first else tf.add_paragraph()
+            first = False
+            _set_paragraph_rtl(para)
+            run = para.add_run()
+            run.text = line
+            run.font.name = FONT_BODY
+            run.font.size = Pt(16 if line == title else 12)
+            run.font.bold = line == title
+            run.font.color.rgb = COLOR_INK if line == title else COLOR_MUTED
 
     def _render_sources_slide(self, slide, data: SlideContent):
         """Renders the bibliography slide from caller-supplied sources only."""

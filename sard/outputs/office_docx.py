@@ -84,8 +84,6 @@ def _set_run_rtl(run, *, size: Optional[Pt] = None, bold: bool = False, color=No
         run.font.color.rgb = color
     r = run._r
     rPr = r.get_or_add_rPr()
-    rtl = OxmlElement("w:rtl")
-    rPr.append(rtl)
     rFonts = rPr.find(qn("w:rFonts"))
     if rFonts is None:
         rFonts = OxmlElement("w:rFonts")
@@ -93,9 +91,11 @@ def _set_run_rtl(run, *, size: Optional[Pt] = None, bold: bool = False, color=No
     rFonts.set(qn("w:cs"), FONT_ARABIC)
     rFonts.set(qn("w:ascii"), font or FONT_BODY)
     rFonts.set(qn("w:hAnsi"), font or FONT_BODY)
+    # DOCX-Q1: ECMA-376 CT_RPr order — w:szCs precedes w:rtl.
     szCs = OxmlElement("w:szCs")
     szCs.set(qn("w:val"), str(int((size.pt if size else 11) * 2)))
     rPr.append(szCs)
+    rPr.append(OxmlElement("w:rtl"))
 
 
 def _set_paragraph_rtl(paragraph, *, align: WD_ALIGN_PARAGRAPH = WD_ALIGN_PARAGRAPH.RIGHT) -> None:
@@ -123,6 +123,19 @@ def _add_bullet(doc: Document, text: str, *, style: str = "List Bullet") -> Any:
         paragraph = doc.add_paragraph()
         paragraph.style = doc.styles["Normal"]
     _set_paragraph_rtl(paragraph)
+    # DOCX-Q3: Word's List Bullet keeps an LTR hanging indent by default;
+    # mirror it to the right so Arabic bullets hang correctly in RTL.
+    try:
+        pPr = paragraph._p.get_or_add_pPr()
+        ind = pPr.find(qn("w:ind"))
+        if ind is None:
+            ind = OxmlElement("w:ind")
+            pPr.append(ind)
+        ind.set(qn("w:right"), "720")
+        ind.set(qn("w:hanging"), "360")
+        ind.set(qn("w:left"), "0")
+    except Exception as exc:
+        logger.debug("Could not set RTL bullet indent: %s", type(exc).__name__)
     run = paragraph.add_run(str(text or ""))
     _set_run_rtl(run, size=Pt(11))
     return paragraph
@@ -136,9 +149,10 @@ def _add_table(doc: Document, rows: Sequence[Sequence[str]]) -> Any:
         raise DocxRenderError("Cannot render an empty table.")
     width = max(len(row) for row in cleaned)
     normalized = [row + [""] * (width - len(row)) for row in cleaned]
-    # RTL visual order: reverse columns so logical-first is rightmost.
-    rtl_rows = [list(reversed(row)) for row in normalized]
-    table = doc.add_table(rows=len(rtl_rows), cols=width)
+    # DOCX-B1: keep logical column order in the XML; <w:bidiVisual/> alone
+    # instructs Word to display column 0 rightmost. Reversing here as well
+    # rendered every table backwards.
+    table = doc.add_table(rows=len(normalized), cols=width)
     table.style = "Light Grid Accent 1"
     try:
         tbl = table._tbl
@@ -147,7 +161,7 @@ def _add_table(doc: Document, rows: Sequence[Sequence[str]]) -> Any:
         tblPr.append(bidi)
     except Exception as exc:  # Non-fatal: table still renders LTR-grid.
         logger.debug("Could not set tblBidiVisual: %s", type(exc).__name__)
-    for row_idx, row in enumerate(rtl_rows):
+    for row_idx, row in enumerate(normalized):
         for col_idx, cell_text in enumerate(row):
             cell = table.cell(row_idx, col_idx)
             cell.text = ""
@@ -191,9 +205,20 @@ def _apply_page_setup(doc: Document) -> None:
         section.bottom_margin = Inches(1.0)
         section.left_margin = Inches(1.0)
         section.right_margin = Inches(1.0)
+        # DOCX-Q2: ECMA-376 CT_SectPr order — w:bidi precedes w:docGrid.
         sectPr = section._sectPr
         bidi = OxmlElement("w:bidi")
-        sectPr.append(bidi)
+        try:
+            doc_grid = sectPr.find(qn("w:docGrid"))
+            if doc_grid is not None:
+                doc_grid.addprevious(bidi)
+            else:
+                sectPr.append(bidi)
+        except Exception:
+            try:
+                sectPr.append(bidi)
+            except Exception as exc:
+                logger.debug("Could not set sectPr bidi: %s", type(exc).__name__)
 
 
 def _apply_header_footer(doc: Document, author: str) -> None:
@@ -249,7 +274,8 @@ class DocxGenerator:
         for section in doc.sections:
             if section.title.strip():
                 _add_paragraph(document, section.title.strip(), size=15, bold=True, color=COLOR_DATE, font=FONT_ARABIC, space_after=4)
-            for block in section.blocks:
+            # DOCX-B2: honor the fail-closed evidence rule like the preview.
+            for block in section.renderable_blocks():
                 self._render_block(document, block)
         if doc.sources:
             _add_paragraph(document, "المراجع والتوثيق المعتمد:", size=12, bold=True, color=COLOR_CLAY, space_after=4)

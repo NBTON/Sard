@@ -102,9 +102,15 @@ class _ArabicTextFlowable(Flowable):
         self.align = align
         self.bullet = bullet
         self._wrapped_lines: List[str] = []
+        self._lines_fixed = False
 
     def wrap(self, avail_width: float, avail_height: float) -> Tuple[float, float]:
         self.width = avail_width
+        if self._lines_fixed and self._wrapped_lines:
+            # Split fragment: platypus re-wraps after split(); keep the
+            # fragment's lines instead of recomputing from (empty) text.
+            self.height = len(self._wrapped_lines) * self.leading + 4
+            return self.width, self.height
         words = self.text.split()
         if not words:
             self._wrapped_lines = [""]
@@ -131,6 +137,30 @@ class _ArabicTextFlowable(Flowable):
         self._wrapped_lines = lines or [""]
         self.height = len(self._wrapped_lines) * self.leading + 4
         return self.width, self.height
+
+    def split(self, avail_width: float, avail_height: float):  # noqa: N802 - ReportLab API
+        """Split long text across pages instead of raising LayoutError (PDF-B3)."""
+
+        self.wrap(avail_width, avail_height)
+        usable = avail_height - 4
+        line_count = int(usable // self.leading)
+        if line_count <= 0 or line_count >= len(self._wrapped_lines):
+            return []
+        head = _ArabicTextFlowable(
+            "", self.font, self.latin_font, self.size, self.leading, self.color, self.align, self.bullet,
+        )
+        tail = _ArabicTextFlowable(
+            "", self.font, self.latin_font, self.size, self.leading, self.color, self.align, False,
+        )
+        head._wrapped_lines = self._wrapped_lines[:line_count]
+        head.height = len(head._wrapped_lines) * self.leading + 4
+        head.width = self.width
+        head._lines_fixed = True
+        tail._wrapped_lines = self._wrapped_lines[line_count:]
+        tail.height = len(tail._wrapped_lines) * self.leading + 4
+        tail.width = self.width
+        tail._lines_fixed = True
+        return [head, tail]
 
     def _measure_width(self, text: str) -> float:
         shaped = shape_rtl(text)
@@ -241,10 +271,38 @@ def _build_rtl_table(
     return table
 
 
+def _draw_mixed_line(
+    canvas: Canvas, text: str, x: float, y: float,
+    ar_font: str, lat_font: str, size: float, align: str = "right",
+) -> None:
+    """Draw one shaped line with per-run fonts (PDF-B4).
+
+    Noto Naskh Arabic lacks Latin/punctuation glyphs (em-dash, •); drawing
+    the whole line in the Arabic font emits NUL bytes for those codepoints.
+    Splitting into visual runs keeps every glyph in a font that owns it.
+    ``x`` is the right edge when align="right", the left edge otherwise.
+    """
+
+    shaped = shape_rtl(text)
+    runs = visual_runs(shaped)
+    total = sum(
+        pdfmetrics.stringWidth(run, ar_font if is_ar else lat_font, size)
+        for is_ar, run in runs
+    )
+    cursor = x - total if align == "right" else x
+    for is_ar, run in runs:
+        font = ar_font if is_ar else lat_font
+        canvas.setFont(font, size)
+        canvas.drawString(cursor, y, run)
+        cursor += pdfmetrics.stringWidth(run, font, size)
+
+
 class _NumberedCanvas(Canvas):
     """Adds header, footer, and page numbering to the document."""
 
     def __init__(self, *args, **kwargs):
+        # PDF-Q1: deterministic trailer IDs for identical inputs.
+        kwargs["invariant"] = 1
         super().__init__(*args, **kwargs)
         self._saved_page_states = []
 
@@ -270,23 +328,27 @@ class _NumberedCanvas(Canvas):
             self.setLineWidth(0.75)
             self.line(40, 800, 555, 800)
 
-            self.setFont(ar_font, 8.5)
             self.setFillColor(COLOR_MUTED)
-            hdr_text = shape_rtl("سرد — التوثيق والمعرفة الثقافية السعودية")
-            self.drawRightString(555, 806, hdr_text)
+            _draw_mixed_line(
+                self, "سرد — التوثيق والمعرفة الثقافية السعودية",
+                555, 806, ar_font, lat_font, 8.5,
+            )
 
         # Footer (all pages)
         self.setStrokeColor(COLOR_BORDER)
         self.setLineWidth(0.75)
         self.line(40, 45, 555, 45)
 
-        self.setFont(ar_font, 8)
         self.setFillColor(COLOR_MUTED)
-        brand = shape_rtl("وزارة الثقافة 2026 • منظومة سرد للذكاء الاصطناعي")
-        self.drawString(40, 32, brand)
+        _draw_mixed_line(
+            self, "وزارة الثقافة 2026 • منظومة سرد للذكاء الاصطناعي",
+            40, 32, ar_font, lat_font, 8, align="left",
+        )
 
-        pg_text = shape_rtl(f"صفحة {self._pageNumber} من {total_pages}")
-        self.drawRightString(555, 32, pg_text)
+        _draw_mixed_line(
+            self, f"صفحة {self._pageNumber} من {total_pages}",
+            555, 32, ar_font, lat_font, 8,
+        )
 
         self.restoreState()
 
@@ -311,7 +373,8 @@ def render_cultural_pdf_report(
         pagesize=A4,
         leftMargin=40,
         rightMargin=40,
-        topMargin=50,
+        # PDF-Q3: running header sits at y=800-806; keep content clear of it.
+        topMargin=72,
         bottomMargin=55,
     )
 
@@ -516,7 +579,8 @@ def render_cultural_pdf_report(
                 ("RIGHTPADDING", (0, 0), (-1, -1), 12),
             ])
         )
-        story.append(KeepTogether(tk_table))
+        # No KeepTogether: long takeaway lists flow across pages (PDF-B3).
+        story.append(tk_table)
 
     # 6. Citations and Sources
     if sources:
