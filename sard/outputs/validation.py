@@ -24,9 +24,31 @@ from sard.outputs.schemas import (
 )
 
 
-ACCEPTED_CLAIM_STATUSES = {"supported", "partially_supported", "user_provided", "explicitly_uncertain"}
-REMOVED_CLAIM_STATUSES = {"unsupported", "contradicted", "non_factual"}
+ACCEPTED_CLAIM_STATUSES = {"supported", "partially_supported", "user_provided", "explicitly_uncertain", "non_factual"}
+REMOVED_CLAIM_STATUSES = {"unsupported", "contradicted"}
 DEGRADED_RETRIEVAL_MODES = {"dense_only", "full_text_only", "unavailable"}
+
+
+def stable_evidence_id_for_validation(source_id: str, chunk_id: str, content: str) -> str:
+    """Stable evidence ID ``{source_id}:{chunk_id}:{hash}`` (validation-side copy).
+
+    Reorder of ``sources`` never invalidates ``citation_ids``; display ordinals
+    are derived render-time via :func:`evidence_ordinals_for_validation`.
+    """
+    import hashlib
+
+    digest = hashlib.sha1((content or "").encode("utf-8")).hexdigest()[:8]
+    return f"{source_id}:{chunk_id}:{digest}"
+
+
+def evidence_ordinals_for_validation(sources) -> dict[str, int]:
+    """Render-time ordinal map: citation_id -> [1],[2],[3] display number."""
+    ordinals: dict[str, int] = {}
+    for index, source in enumerate(sources or (), start=1):
+        cid = getattr(source, "citation_id", "") or ""
+        if cid and cid not in ordinals:
+            ordinals[cid] = index
+    return ordinals
 
 
 # These values are deliberately kept here, next to the byte validators, so a
@@ -331,6 +353,21 @@ def _validate_known_ids(ids: Iterable[str], source_map: dict[str, CitationSource
             raise CitationValidationError(f"Unknown citation ID on {label}: {citation_id}")
 
 
+def _strip_unsupported_markers(text: str, unsupported: set[str]) -> str:
+    """Remove ``[CIT-...]`` markers for unsupported IDs, collapse whitespace."""
+    cleaned = text
+    for cid in unsupported:
+        cleaned = cleaned.replace(f"[{cid}]", "")
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = [p.strip() for p in re.split(r"(?<=[.!؟؟\u2026])\s+|\n+", text or "") if p.strip()]
+    return parts or ([text.strip()] if (text or "").strip() else [])
+
+
 def _filter_blocks(
     blocks: Iterable[TextBlock],
     source_map: dict[str, CitationSource],
@@ -339,6 +376,12 @@ def _filter_blocks(
     field_citation_ids: tuple[str, ...] = (),
     allow_uncited: bool = False,
 ) -> tuple[TextBlock, ...]:
+    """Strip-claim keep-row-with-flag (never drop-block for partial failure).
+
+    Unsupported *claims* (sentences referencing only unaccepted IDs) are
+    stripped; surviving sentences keep the row alive with a flag surfaced by
+    the caller.  Unknown IDs still raise so schema violations stay fail-closed.
+    """
     kept: list[TextBlock] = []
     for block in blocks or ():
         inline = set(re.findall(r"\[(CIT-[A-Za-z0-9_-]{3,60})\]", block.text))
@@ -348,13 +391,53 @@ def _filter_blocks(
                 kept.append(block)
             continue
         _validate_known_ids(ids, source_map, label)
-        if any(cid not in accepted for cid in ids):
-            # A known source that failed verification cannot support this
-            # factual block.  Drop the whole block instead of retaining an
-            # unverified sentence with its citation stripped.
+        unsupported = {cid for cid in ids if cid not in accepted}
+        accepted_ids = tuple(cid for cid in ids if cid in accepted)
+        if not unsupported:
+            missing_inline = tuple(cid for cid in field_citation_ids if f"[{cid}]" not in block.text and cid not in block.citation_ids)
+            kept.append(replace(block, citation_ids=tuple(dict.fromkeys((*block.citation_ids, *inline, *missing_inline)))))
             continue
-        missing_inline = tuple(cid for cid in field_citation_ids if f"[{cid}]" not in block.text and cid not in block.citation_ids)
-        kept.append(replace(block, citation_ids=tuple(dict.fromkeys((*block.citation_ids, *inline, *missing_inline)))))
+        # Partial failure: strip only unsupported claim-sentences, keep the row.
+        surviving: list[str] = []
+        for sentence in _split_sentences(block.text):
+            sent_ids = set(re.findall(r"\[(CIT-[A-Za-z0-9_-]{3,60})\]", sentence))
+            if not sent_ids:
+                if allow_uncited:
+                    surviving.append(sentence)
+                continue
+            if sent_ids & set(accepted_ids):
+                surviving.append(_strip_unsupported_markers(sentence, unsupported))
+            # else: sentence references only unsupported IDs -> strip (drop sentence)
+        # Also consider field-level accepted IDs that may not be inline.
+        if not surviving and accepted_ids and field_citation_ids:
+            stripped = _strip_unsupported_markers(block.text, unsupported)
+            if stripped:
+                surviving.append(stripped)
+        if not surviving:
+            # No verifiable sentence in this block -> drop block, but the
+            # caller keeps the row if other blocks/fields survive.
+            continue
+        kept_text = " ".join(surviving).strip()
+        kept_cids = tuple(dict.fromkeys(
+            (*[c for c in block.citation_ids if c in accepted],
+             *[c for c in re.findall(r"\[(CIT-[A-Za-z0-9_-]{3,60})\]", kept_text) if c in accepted],
+             *[c for c in field_citation_ids if c in accepted and c in kept_text or (c in accepted and f"[{c}]" in block.text and c in kept_text)])))
+        # Ensure at least the accepted inline survivors are retained.
+        inline_kept = [c for c in re.findall(r"\[(CIT-[A-Za-z0-9_-]{3,60})\]", kept_text) if c in accepted]
+        kept_cids = tuple(dict.fromkeys((*[c for c in block.citation_ids if c in accepted and c in kept_text or c in accepted_ids and c in kept_text], *inline_kept)))
+        if not kept_cids:
+            kept_cids = tuple(c for c in accepted_ids if c in kept_text or f"[{c}]" in kept_text)
+            if not kept_cids and accepted_ids and allow_uncited:
+                kept_cids = ()
+            elif not kept_cids and not allow_uncited:
+                # Block has no surviving citation anchor; keep text only if the
+                # field itself is accepted via field_citation_ids overlap.
+                field_kept = tuple(c for c in field_citation_ids if c in accepted)
+                if field_kept:
+                    kept_cids = field_kept
+                else:
+                    continue
+        kept.append(replace(block, text=kept_text, citation_ids=kept_cids))
     return tuple(kept)
 
 
@@ -378,6 +461,12 @@ def _filter_supports(
 
 
 def _filter_stop(stop: ItineraryStop, source_map: dict[str, CitationSource], accepted: set[str], day_label: str, stop_index: int) -> ItineraryStop:
+    """Strip-claim keep-row-with-flag for one stop.
+
+    Unsupported claim-sentences are stripped from each field; the stop (row)
+    itself survives whenever any supported/user/uncertain field remains.  The
+    caller flags rows with partial stripping via warnings (row survival).
+    """
     label = f"{day_label}.stop{stop_index}"
     _validate_known_ids(stop.citation_ids, source_map, label)
     supports = _filter_supports(stop.field_support, source_map, accepted, label)
@@ -617,9 +706,36 @@ def build_verified_render_input(
                 field_support=itinerary_supports,
             )
             itinerary.validate_citations()
+            # Row/block survival: itinerary=None ONLY on zero verifiable rows
+            # or schema-invalid (handled in except).  Partial stripping keeps
+            # surviving rows with a flag warning instead of nulling the table.
+            total_surviving_stops = sum(len(day.stops) for day in filtered_days)
+            total_original_stops = sum(len(day.stops) for day in state.get("itinerary").days) if state.get("itinerary") is not None else 0
+            flagged = [c for c in (state.get("atomic_claims") or ()) if getattr(c, "flagged_row", False)]
+            if flagged:
+                warnings.append(f"تم تعليم {len(flagged)} صفوف عالية المخاطر غير مدعومة وحُفظت الصفوف الموثقة.")
+            if total_original_stops and total_surviving_stops < total_original_stops:
+                warnings.append(
+                    f"نجاة الصفوف: {total_surviving_stops}/{total_original_stops} صفوف موثقة حُفظت؛ "
+                    "أُزيلت الادعاءات غير المدعومة فقط (strip-claim keep-row)."
+                )
+            if total_surviving_stops == 0:
+                has_surviving_notes = bool(
+                    any(day.notes for day in filtered_days)
+                    or _filter_blocks(itinerary.notes, source_map, accepted, "itinerary.notes")
+                )
+                if not has_surviving_notes and not accepted:
+                    warnings.append("لا توجد صفوف موثقة قابلة للعرض — تم إسقاط الجدول المنظم.")
+                    itinerary = None
+                elif not has_surviving_notes and total_original_stops:
+                    # Zero verifiable rows: fail-closed to None (empty scope).
+                    warnings.append("تم استبعاد كل الصفوف غير الموثقة — لا توجد صفوف موثقة (empty_scope).")
+                    itinerary = None
     except Exception as exc:
         if not allow_partial:
             raise CitationValidationError(str(exc), raw_answer=answer) from exc
+        # Schema-invalid (unknown/duplicate citation, invalid structure) stays
+        # fail-closed to None; partial content failures above keep surviving rows.
         warnings.append(f"تم استبعاد الجدول المنظم بسبب فشل تحقق الاستشهادات: {type(exc).__name__}.")
         validation_error = validation_error or str(exc)
         itinerary = None

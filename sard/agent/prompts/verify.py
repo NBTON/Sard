@@ -1,32 +1,45 @@
-"""Semantic-fact-checking prompt for the verify node.
+"""Constrained-entailment prompt for the verify node (workstream G).
 
-Deterministic support checks remain authoritative; the model output here is
-only advisory (narrows to partially_supported or flags contradicted/unsupported).
+Deterministic layers (L1-L6) remain authoritative; the model (L7) is invoked
+ONLY for L4-L6 disagreements and for all high-risk claims, with temperature 0
+and no chain-of-thought.  Output is strict JSON per claim:
+
+    {"claims": [{"claim_id": "...", "verdict": "SUPPORTED|PARTIAL|UNSUPPORTED",
+                 "reason_codes": [...], "correction": "...?"}]}
+
+Reason codes: unknown_citation, missing_provenance, lexical_gap,
+entity_mismatch, contradiction, partial_scope, non_factual.
 """
 
 from __future__ import annotations
 
 VERIFY_SYSTEM_PROMPT = (
-    "أنت مدقق حقائق في مساعد «سرد». «التحقق الدلالي فقط» — تعتمد الحسم النهائي على "
-    "الفحوص الحتمية، وأنت تساعد في تحديد المواقف: استخدم حصرًا الأدلة المرفقة.\n"
-    "لكل ادعاء اختر حالة واحدة من:\n"
-    "supported, partially_supported, unsupported, contradicted, non_factual, "
-    "user_provided, explicitly_uncertain\n"
-    "وأعد JSON صالحًا دون أي نص إضافي بالشكل:\n"
-    '{{"claims": [{{"claim_id": "...", "status": "...", "correction": "...", "note": "..."}}]}}\n'
+    "أنت مدقق استلزام مقيّد في مساعد «سرد». درجة الحرارة 0 ولا تُخرج أي تفكير متسلسل.\n"
+    "الفحوص الحتمية (L1-L6) حاسمة؛ أنت طبقة L7 فقط لحالات الخلاف L4-L6 وكل الادعاءات عالية المخاطر.\n"
+    "لا توسّع الحكم أبدًا: يمكنك فقط التضييق (SUPPORTED→PARTIAL→UNSUPPORTED).\n"
+    "فئات الادعاءات: factual/high_risk_factual/non_factual/interpretive/user_provided/uncertain.\n"
     "القواعد:\n"
-    "1) supported: الأدلة تدعم الادعاء كاملًا.\n"
-    "2) partially_supported: الأدلة تدعم جزءًا فقط؛ اذكر التصحيح في correction.\n"
-    "3) unsupported/non_factual: لا يوجد دليل أو الادعاء خارج الأدلة.\n"
-    "4) contradicted: الأدلة تتعارض مباشرة مع الادعاء.\n"
-    "5) user_provided: الادعاء تفضيل/قصد/معلومة من المستخدم نفسه.\n"
-    "6) explicitly_uncertain: النص يصرح صراحة بعدم التأكد.\n"
+    "1) non_factual (انتقالات/صياغة تنظيمية/توصيات/أسلوب/رأي) لا يتطلب استشهادًا أبدًا.\n"
+    "2) interpretive يحتاج استشهادًا + صياغة متحفظة (قد/ربما/يبدو) لا إزالة.\n"
+    "3) high_risk (سلامة/ساعات/أسعار/قانوني/تأشيرة/طبي/مالي/ديني/تواريخ/مسمّيات) يتطلب L4+(أعلى-1 في L6 أو SUPPORTED في L7) وإلا UNSUPPORTED + تعليم الصف.\n"
+    "4) أعد JSON صالحًا فقط دون أي نص إضافي بالشكل:\n"
+    '\'{"claims": [{"claim_id": "...", "verdict": "SUPPORTED|PARTIAL|UNSUPPORTED", '
+    '"reason_codes": ["lexical_gap"], "correction": "..."}]}\n'
+    "رموز الأسباب المسموحة حصرًا: unknown_citation, missing_provenance, lexical_gap, "
+    "entity_mismatch, contradiction, partial_scope, non_factual.\n"
     "لا تُعدّل ادعاءً مدعومًا بحرية ولا تتجاهل أي claim_id.\n\n"
     "الأدلة:\n{evidence}"
 )
 
 VERIFY_USER_TEMPLATE = (
-    "يرجى التحقق من الادعاءات التالية:\n{claims}"
+    "تحقق من الادعاءات التالية باستلزام مقيّد (SUPPORTED|PARTIAL|UNSUPPORTED + reason_codes):\n{claims}"
 )
 
 VERIFY_OUTPUT_KEYS = ("claims",)
+
+# Back-compat: legacy callers map verdict<->status.
+VERDICT_TO_STATUS = {
+    "SUPPORTED": "supported",
+    "PARTIAL": "partially_supported",
+    "UNSUPPORTED": "unsupported",
+}

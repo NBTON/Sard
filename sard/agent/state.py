@@ -123,6 +123,13 @@ class ClaimRecord:
     status: ClaimStatus = ClaimStatus.UNSUPPORTED
     explanation: str = ""
     correction: str = ""
+    # Workstream G (claim-level verification): additive-only extensions.
+    # Existing fields and defaults are untouched for backward compatibility.
+    claim_class: str = "factual"
+    scope: str = "answer"
+    evidence_ids: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    flagged_row: bool = False
 
 
 @dataclass(frozen=True)

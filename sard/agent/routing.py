@@ -58,7 +58,26 @@ _ACCEPTED_STATUSES = {
     ClaimStatus.PARTIALLY_SUPPORTED,
     ClaimStatus.USER_PROVIDED,
     ClaimStatus.EXPLICITLY_UNCERTAIN,
+    ClaimStatus.NON_FACTUAL,
 }
+
+
+def stable_evidence_id_local(source_id: str, chunk_id: str, content: str) -> str:
+    """Stable evidence ID (routing-side copy to avoid a verify import cycle)."""
+    import hashlib
+
+    digest = hashlib.sha1((content or "").encode("utf-8")).hexdigest()[:8]
+    return f"{source_id}:{chunk_id}:{digest}"
+
+
+def evidence_ordinals_local(evidence) -> dict[str, int]:
+    """Render-time ordinal map (citation_id -> [1],[2],[3]) without mutating IDs."""
+    ordinals: dict[str, int] = {}
+    for index, item in enumerate(evidence or (), start=1):
+        cid = getattr(item, "citation_id", "") or ""
+        if cid and cid not in ordinals:
+            ordinals[cid] = index
+    return ordinals
 
 
 def collect_verified_claims(state: dict) -> list:
@@ -82,29 +101,56 @@ def collect_unsupported_claims(state: dict) -> list:
 
 
 def assemble_partial_answer(state: dict) -> str:
-    """Honest partial Arabic answer containing verified claims only."""
+    """Honest partial Arabic answer containing verified claims only, per-scope.
+
+    Claims are grouped by their ``scope`` (paragraph / table-row bucket from
+    the verify node) so a single unsupported claim strips only its own claim
+    text while its scope-mates survive.  Citation IDs stay stable; callers may
+    map them to render-time ordinals via :func:`evidence_ordinals_local`.
+    """
     verified = collect_verified_claims(state)
     if not verified:
         return (
             "لم تكتمل الصياغة النهائية: لا تتوفر حقائق مُتحقق منها من المصادر المدخلة. "
             "أُنشئت إجابة جزئية صريحة بدلاً من ادعاء غير مدعوم."
         )
+    scope_survival = state.get("scope_survival") or {}
+    by_scope: dict[str, list] = {}
+    for claim in verified:
+        scope = getattr(claim, "scope", "answer") or "answer"
+        by_scope.setdefault(scope, []).append(claim)
     lines = [
         "توفرت أدلة جزئية فقط. فيما يلي ما يمكن تأكيده من المصادر المتاحة:",
         "",
     ]
-    for claim in verified:
-        text = claim.text.strip()
-        citations = " ".join(f"[{cid}]" for cid in claim.citation_ids) if claim.citation_ids else ""
-        lines.append(f"- {text} {citations}".rstrip())
+    for scope in sorted(by_scope):
+        bucket = scope_survival.get(scope) if isinstance(scope_survival, dict) else None
+        claims = by_scope[scope]
+        if len(by_scope) > 1:
+            if bucket:
+                lines.append(f"[{scope}: نجاة {bucket.get('survived', len(claims))}/{bucket.get('total', len(claims))}]")
+            else:
+                lines.append(f"[{scope}]")
+        for claim in claims:
+            text = claim.text.strip()
+            citations = " ".join(f"[{cid}]" for cid in claim.citation_ids) if claim.citation_ids else ""
+            flagged = " (صف مُعلَّم عالي المخاطر)" if getattr(claim, "flagged_row", False) else ""
+            lines.append(f"- {text} {citations}{flagged}".rstrip())
+        lines.append("")
     unsupported = collect_unsupported_claims(state)
     if unsupported:
         dropped = len(unsupported)
-        lines.append("")
         lines.append(
             f"ملاحظة: تم استبعاد {dropped} ادعاءً لم تتوفر له تغطية موثوقة في المصادر."
         )
-    return "\n".join(lines)
+        per_scope = {}
+        for claim in unsupported:
+            scope = getattr(claim, "scope", "answer") or "answer"
+            per_scope[scope] = per_scope.get(scope, 0) + 1
+        if len(per_scope) > 1 or len(by_scope) > 1:
+            detail = "؛ ".join(f"{scope}: {count}" for scope, count in sorted(per_scope.items()))
+            lines.append(f"التوزيع per-scope للفقرات المستبعدة: {detail}.")
+    return "\n".join(lines).rstrip()
 
 
 def route_after_verification(state: dict) -> str:

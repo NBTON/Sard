@@ -200,18 +200,18 @@ def test_success_path_reaches_completed_with_full_coverage():
 
 
 def test_retry_path_recomposes_then_passes():
+    # Workstream G: deterministic layers are authoritative.  Trigger the retry
+    # with a deterministic failure (unknown high-risk citation).  L7 is not
+    # consulted for agreed factual claims, so no verify JSON scripts are
+    # consumed in either round.
     scripts = _scripts_for_success()[:3]
-    scripts.append(
-        '{"claims":[{"claim_id":"CLAIM-01-001","status":"supported","correction":"","note":""},'
-        '{"claim_id":"CLAIM-01-002","status":"unsupported","correction":"أزله أو أعد صياغته","note":""}]}'
+    scripts[2] = (
+        "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-RIY01]. "
+        "سعر الدخول خمسون ريالًا [CIT-UNKNOWN]."
     )
     scripts.append(
         "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-RIY01]. "
         "تتوفر معلومات محدودة عن مواقيت الزيارة في المصادر الحالية."
-    )
-    scripts.append(
-        '{"claims":[{"claim_id":"CLAIM-02-001","status":"supported","correction":"","note":""},'
-        '{"claim_id":"CLAIM-02-002","status":"explicitly_uncertain","correction":"","note":""}]}'
     )
 
     rag = FakeRAGService(_evidence_answer())
@@ -228,18 +228,17 @@ def test_retry_path_recomposes_then_passes():
 
 
 def test_exhaustion_emits_honest_partial_and_does_not_crash():
+    # Workstream G: both rounds fail deterministically (high-risk price with
+    # no lexical grounding), so the router exhausts and emits honest partial.
+    # No L7 model calls occur (deterministic UNSUPPORTED never reaches L7).
     scripts = _scripts_for_success()[:3]
-    scripts.append(
-        '{"claims":[{"claim_id":"CLAIM-01-001","status":"supported","correction":"","note":""},'
-        '{"claim_id":"CLAIM-01-002","status":"unsupported","correction":"إزالة","note":""}]}'
+    scripts[2] = (
+        "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-RIY01]. "
+        "سعر الدخول خمسون ريالًا [CIT-UNKNOWN]."
     )
     scripts.append(
         "الأسواق الشعبية في الرياض وجهة بارزة للزوار [CIT-RIY01]. "
         "سعر الدخول خمسون ريالًا [CIT-RIY02]."
-    )
-    scripts.append(
-        '{"claims":[{"claim_id":"CLAIM-02-001","status":"supported","correction":"","note":""},'
-        '{"claim_id":"CLAIM-02-002","status":"unsupported","correction":"إزالة","note":""}]}'
     )
 
     rag = FakeRAGService(_evidence_answer())

@@ -102,7 +102,10 @@ def test_unknown_citation_rejection():
 
 def test_unsupported_and_contradicted_claims():
     scripts = _scripts_for_success()
-    # model returns contradicted
+    # Workstream G: deterministic layers authoritative; use a deterministic
+    # unknown-citation failure (model-only overrules are no longer consulted
+    # for agreed factual claims).
+    scripts[2] = "معلومات غير مدعومة [CIT-UNKNOWN]. يُفضّل زيارتها مساءً في الصيف [CIT-RIY02]."
     scripts[3] = '{"claims":[{"claim_id":"CLAIM-01-001","status":"contradicted","correction":"","note":""}]}'
     rag = FakeRAGService(_evidence_answer())
     deps = _make_deps(scripts, rag_service=rag, max_retries=0)
@@ -142,7 +145,13 @@ def test_sanitized_events():
 
 def test_structured_itinerary_validation_and_unsupported_blocked_at_render():
     scripts = _scripts_for_success()
-    # Verify rejects the claim covering CIT-RIY01
+    # Workstream G: deterministic high-risk lexical failures (valid IDs, no
+    # grounding) wipe all rows -> itinerary None.  Model-only overrules no
+    # longer drive removal for agreed claims.
+    scripts[2] = (
+        "سعر الدخول خمسون ريالًا [CIT-RIY01]. "
+        "تكلفة الإقامة مائة دولار أمريكي [CIT-RIY02]."
+    )
     scripts[3] = '{"claims":[{"claim_id":"CLAIM-01-001","status":"unsupported","correction":"","note":""},{"claim_id":"CLAIM-01-002","status":"unsupported","correction":"","note":""}]}'
     rag = FakeRAGService(_evidence_answer())
     deps = _make_deps(scripts, rag_service=rag, max_retries=0)
