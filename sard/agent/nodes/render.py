@@ -7,6 +7,7 @@ No model, retriever, reranker, Zvec, or network dependency is available here.
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import date
 
@@ -28,6 +29,8 @@ from sard.outputs.artifacts import (
     skipped_artifact,
 )
 from sard.outputs.calendar import CalendarRenderError, render_calendar
+
+logger = logging.getLogger(__name__)
 from sard.outputs.pdf import render_pdf
 from sard.outputs.pdf_environment import locked_pdf_output_root
 from sard.outputs.raw import render_raw_text
@@ -72,8 +75,8 @@ def _deadline_gate(deps, stage: str) -> Optional[str]:
         cancel = getattr(deps, "cancel_event", None)
         if cancel is not None and cancel.is_set():
             return "cancelled"
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Render cancel flag read skipped (%s).", type(exc).__name__)
     try:
         raw_dl = getattr(deps, "deadline", None)
         if raw_dl is not None:
@@ -82,8 +85,8 @@ def _deadline_gate(deps, stage: str) -> Optional[str]:
             dl = _coerce(raw_dl, label=stage)
             if dl is not None and dl.reserve_remaining() <= 0:
                 return "timeout"
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Render deadline read skipped (%s).", type(exc).__name__)
     return None
 
 

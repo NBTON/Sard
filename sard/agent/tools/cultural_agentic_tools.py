@@ -37,6 +37,7 @@ from sard.outputs.memoir import (
     synthesize_memoir_from_notes,
 )
 from sard.outputs.office import (
+    DeckBuildError,
     PresentationGenerator,
     create_cultural_briefing_deck,
 )
@@ -69,17 +70,32 @@ def tool_generate_presentation(
     key_takeaways: Optional[List[str]] = None,
     quote: str = "",
 ) -> Dict[str, Any]:
-    """Generates a PowerPoint (.pptx) briefing deck styled with Sard tokens."""
+    """Generates a PowerPoint (.pptx) briefing deck styled with Sard tokens.
+
+    Returns an honest failure dict (``success`` False) when there is no real
+    content to render instead of fabricating filler slides.
+    """
     gen = PresentationGenerator(OUTPUT_DIR)
-    deck = create_cultural_briefing_deck(
-        topic=topic,
-        region=region,
-        overview_text=overview_text,
-        comparison_cards=comparison_cards,
-        timeline_items=timeline_items,
-        key_takeaways=key_takeaways,
-        quote=quote,
-    )
+    try:
+        deck = create_cultural_briefing_deck(
+            topic=topic,
+            region=region,
+            overview_text=overview_text,
+            comparison_cards=comparison_cards,
+            timeline_items=timeline_items,
+            key_takeaways=key_takeaways,
+            quote=quote,
+        )
+    except DeckBuildError as exc:
+        logger.info("tool_generate_presentation refused empty content for topic=%r", topic)
+        return {
+            "success": False,
+            "artifact_type": "presentation_pptx",
+            "title": topic,
+            "error": "empty_content",
+            "message_ar": "تعذر إنشاء العرض: لا يوجد محتوى حقيقي للموضوع المطلوب. زود نص العرض أو النقاط الرئيسية أولا.",
+            "detail": str(exc),
+        }
     safe_filename = f"sard-presentation-{deck.deck_id}.pptx"
     path, filename = gen.save_deck_file(deck, safe_filename)
 

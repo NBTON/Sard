@@ -1267,8 +1267,8 @@ class VercelBlobArtifactStore(ArtifactStore):
                     keys.extend(self._sdk_list_keys(artifact_id))
                     try:
                         keys.append(f"artifacts/{artifact_id}.json")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Blob key append skipped (%s).", type(exc).__name__)
                 for key in keys:
                     try:
                         self._client.delete(key)
@@ -1304,8 +1304,8 @@ class VercelBlobArtifactStore(ArtifactStore):
                     merged = dict(base)
                     merged.update(rest_meta)
                     return merged
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Blob metadata merge skipped (%s).", type(exc).__name__)
             return base or None
         try:
             artifact_id, filename, candidates = self._sdk_candidates(id_or_filename)
@@ -1355,8 +1355,8 @@ class VercelBlobArtifactStore(ArtifactStore):
                 merged = dict(base)
                 merged.update(rest_meta)
                 return merged or None
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Blob version metadata skipped (%s).", type(exc).__name__)
         return base or None
 
 

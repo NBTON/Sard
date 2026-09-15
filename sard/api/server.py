@@ -94,8 +94,8 @@ async def _security_headers_middleware(request: Request, call_next):
         # API/SSE payloads are dynamic; downloads opt into attachment disposition.
         if str(request.url.path or "").startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Security headers skipped (%s).", type(exc).__name__)
     return response
 
 OUTPUT_DIR = output_root(default=_PROJECT_ROOT / "output")
@@ -1633,8 +1633,8 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                         if remaining <= 0.2 or chat_cancel.is_set():
                             try:
                                 future2.cancel()
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Direct fallback cancel skipped (%s).", type(exc).__name__)
                             logger.warning("Reserve expired before direct fallback (run_id=%s).", run_id)
                             chat_res2 = None
                         else:
@@ -1782,8 +1782,8 @@ async def chat_endpoint(req: ChatRequest, request: Request):
             logger.info("SSE stream cancelled by client (run_id=%s).", run_id)
             try:
                 chat_cancel.set()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("SSE cancel flag set skipped (%s).", type(exc).__name__)
             _terminal_status.append("cancelled")
             _run_record_put(run_id, "cancelled", list(artifacts_sent), True, {"session_id": session_id_out})
             # Single terminal event: error only (no done after error).
@@ -1818,8 +1818,8 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                     _run_record_put(run_id, "succeeded", list(artifacts_sent), True, {
                         "session_id": session_id_out, "partial": bool(_partial), "truncated": bool(_truncated),
                     })
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("SSE terminal record skipped (%s).", type(exc).__name__)
                 try:
                     yield {
                         "event": "done",

@@ -21,12 +21,23 @@ from sard.agent.tools.cultural_agentic_tools import (
 )
 
 
-def test_tool_generate_presentation():
-    res = tool_generate_presentation(topic="تراث الدرعية التاريخي")
+def test_tool_generate_presentation_with_content():
+    res = tool_generate_presentation(
+        topic="تراث الدرعية التاريخي",
+        overview_text="الدرعية عاصمة الدولة السعودية الأولى وموقع الطريف المدرج في اليونسكو.",
+        key_takeaways=["الطريف موقع يونسكو", "عاصمة الدولة السعودية الأولى"],
+        quote="الدرعية مهد التاريخ السعودي",
+    )
     assert res["success"] is True
     assert res["filename"].endswith(".pptx")
     assert "slides" in res
     assert len(res["slides"]) >= 3
+
+
+def test_tool_generate_presentation_empty_refuses_filler():
+    res = tool_generate_presentation(topic="تراث الدرعية التاريخي")
+    assert res["success"] is False
+    assert res["error"] == "empty_content"
 
 
 def test_tool_generate_recipe_or_craft_card():

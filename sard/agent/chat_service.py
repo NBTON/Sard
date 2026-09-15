@@ -385,8 +385,8 @@ class ChatService:
                     return "image"
                 if fmt_name in ("json", "csv"):
                     return "document"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Artifact kind routing skipped (%s).", type(exc).__name__)
             return _format_to_kind(fmt_name)
 
         def _is_longform_request(intent_obj: Any, query_text: str, body_text: str) -> bool:
@@ -406,8 +406,8 @@ class ChatService:
                 # Very long verified bodies (> ~400 words) benefit from staging.
                 if len(body_text.split()) >= 400:
                     return True
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Long-form trigger check skipped (%s).", type(exc).__name__)
             return False
 
         def _build_longform_content(
@@ -427,8 +427,8 @@ class ChatService:
                 try:
                     if dl is not None and hasattr(dl, "reserve_remaining"):
                         return bool(dl.reserve_remaining() > 1.0)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Long-form budget check skipped (%s).", type(exc).__name__)
                 return True
 
             # Stage 1: outline (deterministic sectioning of the verified body).
@@ -482,8 +482,8 @@ class ChatService:
             if status_callback is not None:
                 try:
                     status_callback(stage, message)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Status callback skipped (%s).", type(exc).__name__)
 
         def _maybe_orchestrate(text: str, sources: list[dict[str, str]]) -> list[dict[str, Any]]:
             """Centralized helper: render requested artifact formats or return structured failure.

@@ -13,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from sard.agent.nodes import verify as verify_mod
 from sard.agent.nodes.verify import (
     classify_claim,
     evidence_ordinals,
@@ -187,6 +186,9 @@ def test_stable_evidence_ids_and_reorder_stable():
     state2 = {**state, "evidence": reversed_evidence}
     out2 = verify(state2, _deps())
     assert out2["unsupported_claims"] == out1["unsupported_claims"] == ["CLAIM-01-007"]
+    # Stable IDs are order-independent: same multiset before/after reorder.
+    ids_after = [stable_evidence_id(e.citation_id, e.chunk_id, e.content) for e in reversed_evidence]
+    assert sorted(ids_after) == sorted(ids_before)
     # Validation-side helpers agree.
     assert stable_evidence_id_for_validation("CIT-001", "CHUNK-CIT-001", "x").startswith("CIT-001:CHUNK-CIT-001:")
     assert set(evidence_ordinals_for_validation([_src("CIT-001"), _src("CIT-002")])) == {"CIT-001", "CIT-002"}

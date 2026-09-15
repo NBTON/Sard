@@ -67,8 +67,8 @@ class IsnadPlanner:
                         raise DeadlineCancelledError(f"cancelled at planner stage '{stage}'", stage=stage)
                 except DeadlineCancelledError:
                     raise
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Planner cancel flag read skipped (%s).", type(exc).__name__)
             if dl is not None:
                 dl.check(stage)
         # Scope guardrail first (do not let retrieval override confident out-of-scope)
