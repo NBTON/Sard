@@ -125,8 +125,14 @@ def test_sdk_timeout_error_advances_without_sleeping():
     assert result.receipts[0].failure_category == FailureCategory.TIMEOUT.value
 
 
-def test_invalid_json_retries_same_leg_then_switches():
-    router, _, _ = _router(
+def test_invalid_json_advances_immediately_without_reinvoke():
+    """Release contract: malformed JSON is terminal for the leg — no re-ask.
+
+    Exact counts: model-a invoked exactly once (MALFORMED_OUTPUT receipt,
+    parse_attempts == 1), then model-b wins. The second scripted bad payload
+    must never be consumed.
+    """
+    router, prov_a, prov_b = _router(
         {"model-a": [("ok", "not json at all {{"), ("ok", "still not json")]},
         {"model-b": [("ok", '{"topic": "diriyah"}')]},
     )
@@ -137,10 +143,13 @@ def test_invalid_json_retries_same_leg_then_switches():
     assert parsed == {"topic": "diriyah"}
     assert result.success
     assert result.model_used == "model-b"
+    assert len(prov_a.calls) == 1  # malformed leg invoked exactly once
+    assert len(prov_b.calls) == 1
     first_leg = result.receipts[0]
     assert first_leg.model == "model-a"
-    assert first_leg.parse_attempts == 2  # one parse retry on the same leg
+    assert first_leg.parse_attempts == 1
     assert first_leg.failure_category == FailureCategory.MALFORMED_OUTPUT.value
+    assert first_leg.outcome == "failure"
 
 
 def test_auth_failure_skips_immediately_without_retry():

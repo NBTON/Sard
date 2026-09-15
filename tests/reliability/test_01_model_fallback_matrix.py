@@ -68,15 +68,21 @@ def test_02_primary_timeout_moves_to_next_candidate(fresh_breaker, noop_sleep):
 
 
 def test_03_invalid_json_structured_retry_never_fabricates(fresh_breaker, noop_sleep):
-    """Spec J3a: invalid JSON -> bounded structured retry, explicit failure, no fabrication."""
+    """Spec J3a (release contract): invalid JSON advances IMMEDIATELY.
+
+    A transport-successful but non-JSON response is terminal for that
+    candidate — never re-invoked. Each candidate is asked exactly once,
+    the failure is explicit MALFORMED_OUTPUT, and nothing is fabricated.
+    """
     plan = {"test-primary": "ok:not json at all {{{", "test-fallback": "ok:also not json }}}{{{"}
     svc, calls = _service(plan, fresh_breaker, noop_sleep, max_structured_attempts=2)
     parsed, resp = svc.invoke_json("structured", "نظام", "أعد JSON", allowed_keys=("city",))
     assert parsed is None, "must not fabricate a dict from invalid JSON"
     assert resp.success is False
     assert resp.failure_category == FailureCategory.MALFORMED_OUTPUT
-    # Bounded retry: exactly max_structured_attempts transport successes, then give up.
-    assert calls.count("test-primary") == 2
+    # Immediate advance: exactly one transport call per candidate, no re-ask.
+    assert calls.count("test-primary") == 1
+    assert calls.count("test-fallback") == 1
     assert "city" not in (parsed or {})
 
 
@@ -121,7 +127,12 @@ def test_auth_failure_is_non_retryable_skips_wasted_retry(fresh_breaker, noop_sl
 
 
 def test_03c_invalid_json_primary_yields_to_fallback_valid_json(fresh_breaker, noop_sleep):
-    """Bug #1: primary non-empty invalid JSON must yield to fallback (retry-then-switch)."""
+    """Bug #1 (release contract): primary invalid JSON yields IMMEDIATELY.
+
+    Exact call order: primary asked once (malformed -> terminal for that
+    candidate), fallback asked once and wins. No re-invocation of the
+    malformed primary.
+    """
     plan = {"test-primary": "ok:not json at all {{{", "test-fallback": 'ok:{"city": "الرياض"}'}
     svc, calls = _service(plan, fresh_breaker, noop_sleep, max_structured_attempts=2)
     parsed, resp = svc.invoke_json("structured", "نظام", "أعد JSON", allowed_keys=("city",))
@@ -129,8 +140,5 @@ def test_03c_invalid_json_primary_yields_to_fallback_valid_json(fresh_breaker, n
     assert resp.success is True
     assert resp.model_used == "test-fallback"
     assert resp.degraded is True
-    # Bounded retry on the current candidate, then switch: exactly
-    # max_structured_attempts primary attempts before the fallback is tried.
-    assert calls.count("test-primary") == 2
-    assert "test-fallback" in calls
-    assert len(calls) <= 2 * 2  # structured_attempts * num_candidates
+    # Immediate advance: exactly [primary, fallback], one call each.
+    assert calls == ["test-primary", "test-fallback"]

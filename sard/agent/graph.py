@@ -11,6 +11,7 @@ rather than crashing.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -22,6 +23,7 @@ from sard.agent.events import (
     EVENT_FAILED,
     EVENT_WAITING,
     NON_RETRYABLE_FAILURE_KINDS,
+    FailureKind,
     make_error,
     make_event,
     safe_chain_message,
@@ -81,13 +83,75 @@ def default_dependencies(open_rag: bool = False) -> GraphDependencies:
     return deps
 
 
+logger = logging.getLogger(__name__)
+
+
+def _cancelled_node_failure(run: str, name: str, start: float, state: dict, deps: GraphDependencies) -> dict:
+    """Typed node failure for CANCELLATION — distinguishable from timeout.
+
+    Cancellation is never a degraded/ordinary failure: the error carries the
+    ``(cancelled)`` marker, kind ``TIMEOUT`` (closest fixed kind), and
+    ``retryable=False`` (timeouts stay retryable), so server layers can tell
+    "client went away" apart from "provider was slow" without new schema.
+
+    It also exhausts the verify->compose retry loop (``verification_exhausted``
+    + ``compose_retry_count`` past the cap) and seeds an honest partial
+    answer: a cancelled run must terminate at render instead of cycling
+    compose<->verify until the recursion limit.
+    """
+    duration_ms = (time.monotonic() - start) * 1000
+    try:
+        max_retries = int(getattr(deps, "compose_max_retries", 2) or 0)
+    except Exception as exc_cap:
+        logger.debug("Cancel retry-cap read skipped (%s).", type(exc_cap).__name__)
+        max_retries = 2
+    try:
+        from sard.agent.routing import assemble_partial_answer as _assemble
+
+        partial_text = _assemble(state)
+    except Exception as exc_partial:
+        logger.debug("Cancel partial-answer build skipped (%s).", type(exc_partial).__name__)
+        partial_text = "أُلغي الطلب قبل اكتمال الصياغة؛ لا توجد حقائق مُتحقق منها لعرضها."
+    return {
+        "errors": [
+            make_error(
+                run,
+                name,
+                FailureKind.TIMEOUT,
+                f"أُلغي الطلب (cancelled) قبل/أثناء {name}؛ لا تُعَد المحاولة ولا تُستكمل كفشل عادي.",
+                False,
+            )
+        ],
+        "node_failures": [name],
+        "verification_exhausted": True,
+        "compose_retry_count": max_retries + 1,
+        "final_answer": partial_text,
+        "graph_outcome": "partial",
+        "progress_events": [
+            make_event(
+                EVENT_FAILED,
+                run,
+                name,
+                "failed",
+                summary=f"أُلغي الطلب (cancelled) في {name}؛ توقفت المراحل الجديدة.",
+                duration_ms=duration_ms,
+                degraded=True,
+            )
+        ],
+        "warnings": [f"أُلغي الطلب أثناء {name} (cancelled)؛ حُفظ المتاح فقط دون متابعة كفشل عادي."],
+        "timings": {f"{name}_node_ms": duration_ms},
+    }
+
+
 def _guard_node(name: str, fn: Callable, deps: GraphDependencies) -> Callable:
     def run(state: dict) -> dict:
         run = state.get("run_id") or ""
         start = time.monotonic()
         # Workstream E: poll hierarchical deadline + server cancel flag
-        # before each node; a cancelled/expired run degrades to a typed
-        # node failure (no new stages, no late renders) instead of running.
+        # before each node; a cancelled/expired run stops new stages (no
+        # late renders) instead of running. Cancellation produces the typed
+        # cancelled failure (never degraded, never retryable); expiry the
+        # typed timeout failure.
         try:
             _cancel = getattr(deps, "cancel_event", None)
             if _cancel is not None:
@@ -98,8 +162,8 @@ def _guard_node(name: str, fn: Callable, deps: GraphDependencies) -> Callable:
                         raise _DC(f"cancelled before node '{name}'", stage=name)
                 except _DC:
                     raise
-                except Exception:
-                    pass
+                except Exception as exc_flag:
+                    logger.debug("Node cancel flag read skipped (%s).", type(exc_flag).__name__)
             _dl = getattr(deps, "deadline", None)
             if _dl is not None:
                 try:
@@ -113,6 +177,13 @@ def _guard_node(name: str, fn: Callable, deps: GraphDependencies) -> Callable:
                     # handler below convert to a typed node failure.
                     raise
         except Exception as exc:
+            try:
+                from sard.agent.deadline import DeadlineCancelledError as _DCG
+
+                if isinstance(exc, _DCG):
+                    return _cancelled_node_failure(run, name, start, state, deps)
+            except Exception as exc_probe:
+                logger.debug("Cancel-type probe skipped (%s).", type(exc_probe).__name__)
             kind = classify_failure_to_kind(exc)
             duration_ms = (time.monotonic() - start) * 1000
             return {
@@ -148,6 +219,13 @@ def _guard_node(name: str, fn: Callable, deps: GraphDependencies) -> Callable:
             updates["timings"] = timings
             return updates
         except Exception as exc:
+            try:
+                from sard.agent.deadline import DeadlineCancelledError as _DCG2
+
+                if isinstance(exc, _DCG2):
+                    return _cancelled_node_failure(run, name, start, state, deps)
+            except Exception as exc_probe2:
+                logger.debug("Cancel-type probe skipped (%s).", type(exc_probe2).__name__)
             kind = classify_failure_to_kind(exc)
             duration_ms = (time.monotonic() - start) * 1000
             return {
@@ -229,22 +307,40 @@ def run_pipeline(
     if deadline is not None or deadline_monotonic is not None or cancel_event is not None:
         import dataclasses as _dc
 
+        # Coerce once so every node (understand/plan/compose/verify) and every
+        # model call (invoke/invoke_json) observes the same hierarchical
+        # Deadline + cancel_event with remaining-time budgets enforced.
+        _coerced: Any = deadline if deadline is not None else deadline_monotonic
+        _effective_cancel = cancel_event if cancel_event is not None else getattr(deps, "cancel_event", None)
+        try:
+            from sard.agent.deadline import coerce_deadline as _coerce_dl
+
+            _coerced = _coerce_dl(_coerced, cancel_event=_effective_cancel, label="pipeline")
+            if _coerced is not None and _effective_cancel is None:
+                try:
+                    _effective_cancel = getattr(_coerced, "cancel_event", None)
+                except Exception as exc_cancel:
+                    logger.debug("Pipeline cancel read skipped (%s).", type(exc_cancel).__name__)
+        except Exception as exc_coerce:
+            logger.debug("Pipeline deadline coerce skipped (%s).", type(exc_coerce).__name__)
+            _coerced = deadline if deadline is not None else deadline_monotonic
         try:
             deps = _dc.replace(
                 deps,
-                deadline=deadline if deadline is not None else deadline_monotonic,
-                cancel_event=cancel_event if cancel_event is not None else getattr(deps, "cancel_event", None),
+                deadline=_coerced,
+                cancel_event=_effective_cancel,
             )
-        except Exception:
+        except Exception as exc_replace:
+            logger.debug("Pipeline deps replace skipped (%s).", type(exc_replace).__name__)
             try:
-                deps.deadline = deadline if deadline is not None else deadline_monotonic
-            except Exception:
-                pass
+                deps.deadline = _coerced
+            except Exception as exc_dl:
+                logger.debug("Pipeline deadline assign skipped (%s).", type(exc_dl).__name__)
             try:
-                if cancel_event is not None:
-                    deps.cancel_event = cancel_event
-            except Exception:
-                pass
+                if _effective_cancel is not None:
+                    deps.cancel_event = _effective_cancel
+            except Exception as exc_cancel2:
+                logger.debug("Pipeline cancel assign skipped (%s).", type(exc_cancel2).__name__)
     graph = build_graph(deps)
     state = initial_state(
         request,

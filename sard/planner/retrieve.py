@@ -31,10 +31,88 @@ _FRESHNESS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Unified web-trigger freshness set (mirrors cultural_router Rule B:
+# year tags + Arabic/English freshness markers + schedule/ticket/festival).
+# Kept local (not imported) so planner stays decoupled from the agent router,
+# but semantics match: fresh queries always trigger web even when RAG hits.
+_UNIFIED_FRESHNESS_RE = re.compile(
+    r"(2025|2026|2027|هذا العام|هذه السنة|هذا الأسبوع|هذا الاسبوع|الأسبوع|الاسبوع|"
+    r"أسبوع|اسبوع|اليوم|الآن|الان|غداً|غدا|حالياً|حاليا|حالي|جديد|مواعيد|ساعات العمل|"
+    r"تذاكر|مهرجان|موسم|فعالية|فعاليات|this year|this week|now|today|tomorrow|"
+    r"schedule|hours|event|festival|ticket|week|current|latest|upcoming)",
+    re.IGNORECASE,
+)
+
+_RAG_CONFIDENCE_THRESHOLD = 0.65
+
+# Request-aware depth budgets: depth selects how much to REQUEST (not how
+# much to fetch-then-truncate). rag_k goes to rag_search, web_max goes to
+# parallel_search/fanout (which caps per-provider requests), so simple never
+# over-fetches and deep actually reaches providers.
+_DEPTH_REQUEST_BUDGETS: Dict[str, Dict[str, int]] = {
+    "simple": {"rag_k": 3, "web_max": 3},
+    "normal": {"rag_k": 5, "web_max": 5},
+    "deep": {"rag_k": 8, "web_max": 8},
+}
+
 
 def is_time_sensitive_query(query: str) -> bool:
     """Freshness-aware router: current-event questions need live sources."""
-    return bool(_FRESHNESS_RE.search(query or ""))
+    text = query or ""
+    return bool(_FRESHNESS_RE.search(text) or _UNIFIED_FRESHNESS_RE.search(text))
+
+
+def infer_search_depth(query: str, explicit: Optional[str] = None) -> str:
+    """Request-aware depth: explicit wins, else derived from the request.
+
+    Short factoid queries -> ``simple``; time-sensitive or long/complex
+    queries -> ``deep``; everything else -> ``normal``. Always returns one of
+    ``simple``/``normal``/``deep``.
+    """
+    if explicit is not None:
+        norm = (explicit or "").strip().lower()
+        if norm in _DEPTH_REQUEST_BUDGETS:
+            return norm
+    text = (query or "").strip()
+    if is_time_sensitive_query(text):
+        return "deep"
+    if len(text) < 40:
+        return "simple"
+    if len(text) > 200:
+        return "deep"
+    return "normal"
+
+
+def _rag_top_score(rag_hits: List[Dict[str, Any]]) -> Optional[float]:
+    """Best calibrated score in RAG hits, or None when hits carry no scores."""
+    best: Optional[float] = None
+    for hit in rag_hits or ():
+        if not isinstance(hit, dict):
+            continue
+        raw = hit.get("score", hit.get("confidence_score"))
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if best is None or value > best:
+            best = value
+    return best
+
+
+def should_trigger_web_search(query: str, rag_hits: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    """Unified web-trigger semantics (matches cultural_router Rule B).
+
+    Web is warranted when the query needs freshness, when RAG is empty, or
+    when RAG confidence is low (top score < 0.65). Returns (trigger, reason).
+    """
+    if is_time_sensitive_query(query):
+        return True, "query requires freshness or live schedule"
+    if not rag_hits:
+        return True, "topic outside local corpus (no RAG hits)"
+    top = _rag_top_score(rag_hits)
+    if top is not None and top < _RAG_CONFIDENCE_THRESHOLD:
+        return True, f"low RAG confidence ({top:.2f} < {_RAG_CONFIDENCE_THRESHOLD})"
+    return False, ""
 
 
 def _classify_source_type(url_or_name: str, origin: str) -> SourceType:
@@ -100,8 +178,18 @@ class GroundedRetriever:
         deadline: Optional[Any] = None,
         deadline_monotonic: Optional[Any] = None,
         cancel_event: Optional[Any] = None,
+        depth: Optional[str] = None,
     ) -> Tuple[List[Evidence], List[str]]:
-        """Retrieve evidence across RAG, Web, and Multimodal extractors."""
+        """Retrieve evidence across RAG, Web, and Multimodal extractors.
+
+        Request-aware depth (``simple``/``normal``/``deep``, inferred from
+        the request when omitted) selects how much to REQUEST from each
+        channel (``rag_k``/``web_max``) so depth actually reaches providers
+        instead of fetching-then-truncating. Web trigger semantics match
+        ``cultural_router`` Rule B (fresh OR empty OR low-confidence RAG).
+        Local/web hits are cross-deduplicated by canonical URL without
+        dropping distinct content (same URL + distinct body is kept).
+        """
         from sard.agent.deadline import DeadlineCancelledError as _Cancelled
         from sard.agent.deadline import coerce_deadline as _coerce
 
@@ -118,8 +206,8 @@ class GroundedRetriever:
                         raise _Cancelled(f"cancelled at retrieval stage '{stage}'", stage=stage)
                 except _Cancelled:
                     raise
-                except Exception:
-                    pass
+                except Exception as exc_flag:
+                    logger.debug("Retrieve cancel flag read skipped (%s).", type(exc_flag).__name__)
             if dl is not None:
                 dl.check(stage)
 
@@ -157,9 +245,15 @@ class GroundedRetriever:
             evidence_list.append(ev)
             retrieval_logs.append(f"تم فحص المرفق {m.filename} وتوثيقه بسند {ev.source_id}")
 
-        # 2. Curated RAG Search
+        # Request-aware depth: how much to REQUEST from each channel.
+        depth_norm = infer_search_depth(query, depth)
+        request_budget = _DEPTH_REQUEST_BUDGETS.get(depth_norm, _DEPTH_REQUEST_BUDGETS["normal"])
+        rag_k = int(request_budget["rag_k"])
+        web_max = int(request_budget["web_max"])
+
+        # 2. Curated RAG Search (request exactly rag_k; no fetch-then-truncate)
         _gate("retrieve:rag")
-        rag_hits = self.rag_search(query, 5)
+        rag_hits = self.rag_search(query, rag_k)
         for h in rag_hits:
             meta = h.get("metadata") or {}
             text = h.get("chunk") or h.get("text") or h.get("content") or ""
@@ -185,10 +279,11 @@ class GroundedRetriever:
             evidence_list.append(ev)
             retrieval_logs.append(f"تم استرجاع وثيقة RAG: {origin} [{region}] -> {ev.source_id}")
 
-        # 3. Parallel Search (Web) — freshness-aware: current-event queries go
-        # through the research router even when RAG hits exist; otherwise web
-        # is invoked only if RAG hits are completely empty.
-        needs_fresh = is_time_sensitive_query(query)
+        # 3. Web search — unified trigger (cultural_router Rule B): fresh OR
+        # empty OR low-confidence RAG. Depth-aware web_max reaches providers
+        # (no fetch-then-truncate); cross-dedup by canonical URL keeps
+        # distinct content even when URLs collide.
+        trigger_web, trigger_reason = should_trigger_web_search(query, rag_hits)
         # Workstream E: never start the slow web leg on a doomed budget —
         # preserve the reserve for terminal SSE work instead.
         if dl is not None:
@@ -196,17 +291,61 @@ class GroundedRetriever:
                 dl.check("retrieve:web")
             except Exception:
                 allow_web_search = False
-        if allow_web_search and (len(rag_hits) == 0 or needs_fresh):
+        if allow_web_search and trigger_web:
             try:
+                _gate("retrieve:web")
                 web_hits = self.parallel_search(
                     objective=query,
                     search_queries=[query],
-                    max_results=3,
+                    max_results=web_max,
                 )
+                try:
+                    from sard.rag.search_providers import (
+                        canonicalize_url as _canon,
+                    )
+                    from sard.rag.search_providers import (
+                        is_duplicate_of_seen as _is_dup,
+                    )
+                except Exception:
+                    _canon = None  # type: ignore[assignment]
+                    _is_dup = None  # type: ignore[assignment]
+                # Canonical URLs + bodies already kept from local RAG evidence.
+                seen_canonicals: Dict[str, List[str]] = {}
+                for h in rag_hits:
+                    try:
+                        meta = h.get("metadata") or {}
+                        raw_url = (
+                            h.get("url")
+                            or h.get("source_url")
+                            or meta.get("source_url")
+                            or h.get("citation_id")
+                            or h.get("doc_id")
+                            or ""
+                        )
+                        body = h.get("chunk") or h.get("text") or h.get("content") or ""
+                        canon = _canon(raw_url) if _canon is not None else (raw_url or "").strip().lower()
+                        if canon:
+                            seen_canonicals.setdefault(canon, []).append(body or "")
+                    except Exception as exc_seen:
+                        logger.debug("RAG seen-canonical skipped (%s).", type(exc_seen).__name__)
+                        continue
+                kept_web = 0
                 for wh in web_hits:
                     title = wh.get("title", "")
                     content = wh.get("content", "")
                     url = wh.get("url", "")
+                    try:
+                        canon = _canon(url) if _canon is not None else (url or "").strip().lower()
+                    except Exception as exc_canon:
+                        logger.debug("Web canonical skipped (%s).", type(exc_canon).__name__)
+                        canon = (url or "").strip().lower()
+                    if canon and _is_dup is not None:
+                        try:
+                            if _is_dup(canon, content or "", "", seen_canonicals):
+                                retrieval_logs.append(f"تم تجاهل مصدر ويب مكرر: {url}")
+                                continue
+                        except Exception as exc_dup:
+                            logger.debug("Web cross-dedup skipped (%s).", type(exc_dup).__name__)
                     region = _infer_region_from_text(f"{title} {content}") or target_region or "unknown"
                     origin = title or url
                     stype = _classify_source_type(url, origin)
@@ -223,7 +362,27 @@ class GroundedRetriever:
                     )
                     evidence_list.append(ev)
                     retrieval_logs.append(f"تم استرجاع مصدر ويب: {origin} -> {ev.source_id}")
+                    if canon:
+                        seen_canonicals.setdefault(canon, []).append(content or "")
+                    kept_web += 1
+                if trigger_reason:
+                    retrieval_logs.append(f"سبب البحث الويب ({depth_norm}): {trigger_reason}")
+            except _Cancelled:
+                # Typed cancellation (gate or provider) propagates — never
+                # swallowed as an ordinary web failure, never degraded.
+                raise
             except Exception as exc:
-                logger.warning("Parallel search skipped or failed: %s", exc)
+                # A late-arriving cancel flag still converts to typed
+                # cancellation instead of a quiet warning + continue.
+                try:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise _Cancelled(
+                            "cancelled during web retrieval", stage="retrieve:web"
+                        ) from exc
+                except _Cancelled:
+                    raise
+                except Exception as exc_flag:
+                    logger.debug("Retrieve web cancel probe skipped (%s).", type(exc_flag).__name__)
+                logger.warning("Parallel search skipped or failed: %s", type(exc).__name__)
 
         return evidence_list, retrieval_logs

@@ -9,6 +9,7 @@ claims and may only narrow (see :func:`_status_choice`).
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
 from typing import Optional
@@ -349,6 +350,56 @@ def _parse_model_verdict(entry: dict) -> tuple[Optional[ClaimStatus], tuple[str,
     return status, tuple(codes), correction
 
 
+logger = logging.getLogger(__name__)
+
+
+def _node_deadline(deps, label: str):
+    """Hierarchical Deadline/cancel for this node (never raises)."""
+    try:
+        from sard.agent.deadline import coerce_deadline as _coerce
+    except Exception as exc_import:
+        logger.debug("Deadline import skipped (%s).", type(exc_import).__name__)
+        return None, getattr(deps, "cancel_event", None)
+    try:
+        raw = getattr(deps, "deadline", None)
+        cancel = getattr(deps, "cancel_event", None)
+        dl = _coerce(raw, cancel_event=cancel, label=label)
+        if dl is not None and cancel is None:
+            try:
+                cancel = getattr(dl, "cancel_event", None)
+            except Exception as exc_cancel:
+                logger.debug("Deadline cancel read skipped (%s).", type(exc_cancel).__name__)
+        return dl, cancel
+    except Exception as exc_coerce:
+        logger.debug("Deadline coerce skipped (%s).", type(exc_coerce).__name__)
+        return None, getattr(deps, "cancel_event", None)
+
+
+def _raise_if_cancelled(cancel, stage: str) -> None:
+    """Raise typed cancellation before starting model work (never degrade)."""
+    flagged = False
+    try:
+        flagged = bool(cancel is not None and cancel.is_set())
+    except Exception as exc_flag:
+        logger.debug("Cancel flag read skipped (%s).", type(exc_flag).__name__)
+    if not flagged:
+        return
+    try:
+        from sard.agent.deadline import DeadlineCancelledError as _DC
+    except Exception as exc_import:
+        logger.debug("Deadline import skipped (%s).", type(exc_import).__name__)
+        raise TimeoutError(f"cancelled before node '{stage}'")
+    raise _DC(f"cancelled before node '{stage}'", stage=stage)
+
+
+def _budget_exhausted(dl) -> bool:
+    try:
+        return bool(dl is not None and dl.reserve_remaining() <= 0)
+    except Exception as exc_budget:
+        logger.debug("Budget check skipped (%s).", type(exc_budget).__name__)
+        return False
+
+
 def _claim_evidence_ids(citation_ids: tuple[str, ...], item_by_cit: dict) -> tuple[str, ...]:
     out: list[str] = []
     for cid in citation_ids or ():
@@ -362,6 +413,9 @@ def _claim_evidence_ids(citation_ids: tuple[str, ...], item_by_cit: dict) -> tup
 def verify(state: dict, deps) -> dict:
     run = state.get("run_id") or ""
     start = time.monotonic()
+    # Cancel gate at node entry (before ANY work): typed raise, never degrade.
+    _, _entry_cancel = _node_deadline(deps, "verify")
+    _raise_if_cancelled(_entry_cancel, "verify")
     events = [
         make_event(EVENT_STARTED, run, "verify", "started", summary="بدء التحقق من الادعاءات")
     ]
@@ -573,34 +627,43 @@ def verify(state: dict, deps) -> dict:
     model_reason_codes: dict[str, tuple[str, ...]] = {}
     model_service = getattr(deps, "model_service", None)
     if entail_candidates and model_service is not None:
-        evidence_text = "\n\n".join(
-            f"[{item.citation_id}] {item.title} — {item.source_name}\n{item.content[:700]}"
-            for item in evidence
-        )
-        claims_text = "\n".join(f"- {r.claim_id} [{r.claim_class}]: {r.text}" for r in entail_candidates)
-        user = VERIFY_USER_TEMPLATE.format(claims=claims_text)
-        parsed, response = model_service.invoke_json(
-            "verify",
-            VERIFY_SYSTEM_PROMPT.format(evidence=evidence_text),
-            user,
-            allowed_keys=VERIFY_OUTPUT_KEYS,
-        )
-        fallback_events = adapt_fallback_events(response.events)
-        if parsed is not None and isinstance(parsed.get("claims"), list):
-            for entry in parsed["claims"]:
-                if not isinstance(entry, dict):
-                    continue
-                claim_id = entry.get("claim_id")
-                status, codes, correction = _parse_model_verdict(entry)
-                if status is not None:
-                    model_suggestions[claim_id] = status
-                    if codes:
-                        model_reason_codes[claim_id] = codes
-                if correction:
-                    model_corrections[claim_id] = correction
-            semantic_model_used = response.model_used
-        elif not response.success:
+        dl, cancel_event = _node_deadline(deps, "verify")
+        _raise_if_cancelled(cancel_event, "verify")
+        if _budget_exhausted(dl):
+            # Remaining-time budget exhausted: skip the constrained L7 model
+            # and keep deterministic layers authoritative (advisory-only).
             semantic_degraded = True
+        else:
+            evidence_text = "\n\n".join(
+                f"[{item.citation_id}] {item.title} — {item.source_name}\n{item.content[:700]}"
+                for item in evidence
+            )
+            claims_text = "\n".join(f"- {r.claim_id} [{r.claim_class}]: {r.text}" for r in entail_candidates)
+            user = VERIFY_USER_TEMPLATE.format(claims=claims_text)
+            parsed, response = model_service.invoke_json(
+                "verify",
+                VERIFY_SYSTEM_PROMPT.format(evidence=evidence_text),
+                user,
+                allowed_keys=VERIFY_OUTPUT_KEYS,
+                deadline=dl,
+                cancel_event=cancel_event,
+            )
+            fallback_events = adapt_fallback_events(response.events)
+            if parsed is not None and isinstance(parsed.get("claims"), list):
+                for entry in parsed["claims"]:
+                    if not isinstance(entry, dict):
+                        continue
+                    claim_id = entry.get("claim_id")
+                    status, codes, correction = _parse_model_verdict(entry)
+                    if status is not None:
+                        model_suggestions[claim_id] = status
+                        if codes:
+                            model_reason_codes[claim_id] = codes
+                    if correction:
+                        model_corrections[claim_id] = correction
+                semantic_model_used = response.model_used
+            elif not response.success:
+                semantic_degraded = True
 
     final_records: list[ClaimRecord] = []
     for record in claim_records:
@@ -639,7 +702,6 @@ def verify(state: dict, deps) -> dict:
         coverage=coverage_ratio, source_count=len(evidence)))
 
     if not removed or isolated:
-        passed = True
         if isolated:
             feedback = (
                 f"نجاة per-scope: {covered}/{total_external} ادعاءات قابلة للتحقق مدعومة؛ "

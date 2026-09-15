@@ -592,12 +592,123 @@ def _dedup_and_rerank(candidates: list[SearchResult]) -> list[SearchResult]:
     return sorted(kept, key=lambda r: (-institutional_boost(r.url), first_seen[id(r)]))
 
 
+def is_duplicate_of_seen(
+    canonical_url: str,
+    content: str,
+    snippet: str,
+    seen_canonicals: dict[str, list[str]],
+) -> bool:
+    """True when a web hit duplicates already-kept local evidence.
+
+    Cross-dedup by canonical URL without dropping distinct content: the same
+    canonical URL is a duplicate ONLY when its content is also the same
+    (identical normalized hash) or near-identical (Jaccard >= 0.9). The same
+    URL with distinct content is kept (different evidence, e.g. updated page
+    vs cached excerpt).
+    """
+    if not canonical_url:
+        return False
+    prior_texts = seen_canonicals.get(canonical_url) or []
+    if not prior_texts:
+        return False
+    body = content or snippet or ""
+    if not body.strip():
+        return True  # empty web body adds nothing over the local record
+    for prior in prior_texts:
+        if not prior:
+            continue
+        if _normalize_for_hash(body) == _normalize_for_hash(prior):
+            return True
+        try:
+            if jaccard_similarity(prior, body) >= 0.9:
+                return True
+        except Exception as exc_sim:
+            logger.debug("Cross-dedup similarity skipped (%s).", type(exc_sim).__name__)
+            continue
+    return False
+
+
 def build_providers(settings: Any = None) -> list[Any]:
     return [
         ParallelProvider(timeout_s=_timeout_for("parallel", settings, 15.0)),
         TavilyProvider(timeout_s=_timeout_for("tavily", settings, 10.0)),
         ExaProvider(timeout_s=_timeout_for("exa", settings, 10.0)),
     ]
+
+
+def _fanout_deadline(
+    deadline: Any = None,
+    cancel_event: Any = None,
+    reserve_s: float = 0.0,
+    label: str = "fanout_search",
+) -> tuple[Any, Any]:
+    """Coerce hierarchical Deadline/cancel for fanout (never raises)."""
+    try:
+        from sard.agent.deadline import coerce_deadline as _coerce
+    except Exception as exc_import:
+        logger.debug("Deadline import skipped (%s).", type(exc_import).__name__)
+        return None, cancel_event
+    try:
+        if deadline is None and cancel_event is None:
+            return None, None
+        dl = _coerce(deadline, cancel_event=cancel_event, label=label)
+        if dl is not None and cancel_event is None:
+            try:
+                cancel_event = getattr(dl, "cancel_event", None)
+            except Exception as exc_cancel:
+                logger.debug("Fanout cancel read skipped (%s).", type(exc_cancel).__name__)
+        if dl is not None and reserve_s:
+            try:
+                dl.reserve_s = max(float(dl.reserve_s or 0.0), float(reserve_s))
+            except Exception as exc_reserve:
+                logger.debug("Fanout reserve set skipped (%s).", type(exc_reserve).__name__)
+        return dl, cancel_event
+    except Exception as exc_coerce:
+        logger.debug("Fanout deadline coerce skipped (%s).", type(exc_coerce).__name__)
+        return None, cancel_event
+
+
+def _fanout_cancelled(cancel_event: Any) -> bool:
+    try:
+        return bool(cancel_event is not None and cancel_event.is_set())
+    except Exception as exc_flag:
+        logger.debug("Fanout cancel flag read skipped (%s).", type(exc_flag).__name__)
+        return False
+
+
+def _fanout_reserve_gone(dl: Any) -> bool:
+    try:
+        return bool(dl is not None and dl.reserve_remaining() <= 0)
+    except Exception as exc_budget:
+        logger.debug("Fanout budget check skipped (%s).", type(exc_budget).__name__)
+        return False
+
+
+def _provider_timeout_s(default_s: float, dl: Any, providers_left: int) -> float:
+    """Per-provider timeout from RESERVE-PROTECTED remaining time.
+
+    ``min(default, reserve_remaining() / providers_left)`` so sequential
+    provider timeouts can never consume the terminal reserve. Without a
+    Deadline the configured default applies unchanged.
+    """
+    try:
+        default = max(0.05, float(default_s))
+    except Exception:
+        default = 10.0
+    if dl is None:
+        return default
+    try:
+        reserve_left = float(dl.reserve_remaining())
+    except Exception as exc_reserve:
+        logger.debug("Fanout reserve read skipped (%s).", type(exc_reserve).__name__)
+        return default
+    if reserve_left <= 0:
+        return 0.05
+    try:
+        left = max(1, int(providers_left))
+    except Exception:
+        left = 1
+    return max(0.05, min(default, reserve_left / left))
 
 
 def fanout_search(
@@ -608,19 +719,54 @@ def fanout_search(
     max_results: Optional[int] = None,
     providers: Optional[Sequence[Any]] = None,
     run_extract: bool = True,
+    deadline: Any = None,
+    cancel_event: Any = None,
+    reserve_s: float = 0.0,
 ) -> tuple[list[SearchResult], list[dict[str, Any]], dict[str, Any]]:
     """Fan out Parallel -> Tavily -> Exa with dedup + rerank + optional extracts.
+
+    Request-aware depth: ``simple``/``normal``/``deep`` selects
+    ``max_queries``/``per_provider``/``final_top``/``extract_n`` from
+    ``_DEPTH_BUDGETS`` and those budgets actually reach providers (queries
+    sliced, ``max_results`` passed through). When callers also cap
+    ``max_results``, providers are asked for at most that many each so we
+    never fetch-then-truncate (e.g. fetch 10 per provider only to keep 3).
+
+    Hierarchical ``deadline`` (Deadline or absolute monotonic float),
+    ``cancel_event``, and ``reserve_s`` bound the chain: no new provider is
+    launched once cancelled or once ``remaining - reserve <= 0``, and each
+    provider's ``timeout_s`` is ``min(configured, reserve_remaining /
+    providers_left)`` so sequential provider timeouts can never consume the
+    terminal reserve. Cancellation raises typed ``DeadlineCancelledError``
+    (never swallowed as an ordinary provider failure).
 
     Returns ``(results, telemetry, flags)``. Never raises for provider
     failures; never fabricates results. Telemetry entries carry
     ``{provider, ok, latency_ms, raw_n, kept_n, status, error_class}`` with
     no keys and no URLs.
     """
-    budget = _DEPTH_BUDGETS.get((depth or "normal").lower(), _DEPTH_BUDGETS["normal"])
+    from sard.agent.deadline import DeadlineCancelledError as _FanoutCancelled
+
+    dl, cancel_event = _fanout_deadline(deadline, cancel_event, reserve_s)
+    depth_norm = (depth or "normal").strip().lower()
+    budget = _DEPTH_BUDGETS.get(depth_norm, _DEPTH_BUDGETS["normal"])
     qs = [q.strip() for q in (queries or []) if q and q.strip()]
     if not qs and (objective or "").strip():
         qs = [(objective or "").strip()]
     qs = qs[: budget["max_queries"]]
+
+    # Avoid fetching then truncating: when the caller caps max_results,
+    # ask each provider for at most that many (dedup still needs a small
+    # pool, but never 10-per-provider when only 3 are wanted).
+    per_provider_n = int(budget["per_provider"])
+    final_top_n = int(budget["final_top"])
+    if max_results is not None:
+        try:
+            cap = max(0, int(max_results))
+        except (TypeError, ValueError):
+            cap = final_top_n
+        per_provider_n = min(per_provider_n, cap) if cap else 0
+        final_top_n = min(final_top_n, cap) if cap else 0
 
     chain = list(providers) if providers is not None else build_providers(settings)
     timeouts = {
@@ -629,12 +775,28 @@ def fanout_search(
         "exa": _timeout_for("exa", settings, 10.0),
     }
 
+    def _halt_telemetry(pname: str, status: str, klass: str) -> dict[str, Any]:
+        return {
+            "provider": pname, "ok": False, "latency_ms": 0.0,
+            "raw_n": 0, "kept_n": 0, "status": status, "error_class": klass,
+        }
+
     telemetry: list[dict[str, Any]] = []
     pool: list[SearchResult] = []
     origin_index: dict[str, int] = {}
 
-    for provider in chain:
+    if _fanout_cancelled(cancel_event):
+        raise _FanoutCancelled("cancelled before fanout_search", stage="fanout_search")
+
+    for index, provider in enumerate(chain):
         pname = getattr(provider, "name", type(provider).__name__)
+        # Never launch a new provider on a cancelled or reserve-exhausted
+        # budget: halt the chain here instead of overrunning the parent.
+        if _fanout_cancelled(cancel_event):
+            raise _FanoutCancelled(f"cancelled before provider '{pname}'", stage="fanout_search")
+        if _fanout_reserve_gone(dl):
+            telemetry.append(_halt_telemetry(pname, "timeout", "DeadlineBudget"))
+            break
         t0 = time.monotonic()
         if not provider.has_key():
             telemetry.append({
@@ -643,11 +805,13 @@ def fanout_search(
                 "error_class": "MissingKey",
             })
             continue
+        providers_left = len(chain) - index
+        timeout_s = _provider_timeout_s(timeouts.get(pname, 10.0), dl, providers_left)
         try:
             hits = provider.search(
                 objective, qs,
-                max_results=budget["per_provider"],
-                timeout_s=timeouts.get(pname, 10.0),
+                max_results=per_provider_n,
+                timeout_s=timeout_s,
             ) or []
             latency = (time.monotonic() - t0) * 1000
             for hit in hits:
@@ -658,11 +822,16 @@ def fanout_search(
                 "provider": pname, "ok": True, "latency_ms": round(latency, 1),
                 "raw_n": len(hits), "kept_n": 0, "status": "ok", "error_class": "",
             })
+        except _FanoutCancelled:
+            raise
         except httpx.HTTPStatusError as exc:
+            if _fanout_cancelled(cancel_event):
+                raise _FanoutCancelled(f"cancelled during provider '{pname}'", stage="fanout_search") from exc
             code: Optional[int] = None
             try:
                 code = exc.response.status_code
-            except Exception:
+            except Exception as exc_code:
+                logger.debug("Search status-code read skipped (%s).", type(exc_code).__name__)
                 code = None
             status, klass = _classify_error(exc, code)
             # Never log URLs or keys -- counts only.
@@ -673,6 +842,8 @@ def fanout_search(
                 "raw_n": 0, "kept_n": 0, "status": status, "error_class": klass,
             })
         except Exception as exc:  # timeout / malformed / transport -- continue chain
+            if _fanout_cancelled(cancel_event):
+                raise _FanoutCancelled(f"cancelled during provider '{pname}'", stage="fanout_search") from exc
             status, klass = _classify_error(exc)
             logger.warning("search provider '%s' failed: %s (%s)", pname, status, klass)
             telemetry.append({
@@ -681,32 +852,43 @@ def fanout_search(
                 "raw_n": 0, "kept_n": 0, "status": status, "error_class": klass,
             })
 
-    ranked = _dedup_and_rerank(pool)[: budget["final_top"]]
-    if max_results is not None:
-        ranked = ranked[:max(0, int(max_results))]
+    ranked = _dedup_and_rerank(pool)[:final_top_n]
 
     # Optional extract enrichment for top-N (depth budgets; never fabricates).
+    # Bound by the same remaining budget: skip enrichment entirely when the
+    # reserve is gone or cancellation arrived.
     extract_n = budget["extract_n"] if run_extract else 0
+    if extract_n and ranked:
+        if _fanout_cancelled(cancel_event):
+            raise _FanoutCancelled("cancelled before fanout extract", stage="fanout_search")
+        if _fanout_reserve_gone(dl):
+            extract_n = 0
     if extract_n and ranked:
         targets = [r for r in ranked[:extract_n] if r.url]
         enriched: dict[str, str] = {}
-        for provider in chain:
+        for index, provider in enumerate(chain):
             if not targets or not provider.has_key():
                 continue
+            if _fanout_cancelled(cancel_event):
+                raise _FanoutCancelled("cancelled during fanout extract", stage="fanout_search")
+            if _fanout_reserve_gone(dl):
+                break
             try:
                 docs = provider.extract(
                     [t.url for t in targets if t.url not in enriched],
                     objective,
-                    timeout_s=timeouts.get(getattr(provider, "name", ""), 10.0),
+                    timeout_s=_provider_timeout_s(
+                        timeouts.get(getattr(provider, "name", ""), 10.0), dl, len(chain) - index
+                    ),
                 ) or []
                 for doc in docs:
                     curl = canonicalize_url(doc.get("url", ""))
                     md = (doc.get("markdown") or doc.get("content") or "").strip()
                     if curl and md and curl not in enriched:
                         enriched[curl] = md[:8000]
-            except Exception as exc:
+            except Exception as exc_extract:
                 logger.debug("extract via '%s' skipped (%s)",
-                             getattr(provider, "name", "?"), type(exc).__name__)
+                             getattr(provider, "name", "?"), type(exc_extract).__name__)
                 continue
             if len(enriched) >= len(targets):
                 break
@@ -735,7 +917,7 @@ def fanout_search(
         "provider_unavailable": any(t["status"] == "provider_unavailable" for t in telemetry),
         "web_unavailable_warning": len(ranked) == 0,
         "providers_attempted": [t["provider"] for t in telemetry],
-        "depth": (depth or "normal").lower(),
+        "depth": depth_norm,
     }
     if not ranked:
         logger.warning("fanout_search: all providers down or unkeyed; returning [] (RAG proceeds).")

@@ -6,6 +6,7 @@ questions and constraints — never unverified concrete facts.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional
 
@@ -22,6 +23,56 @@ from sard.agent.prompts.plan import (
     PLAN_USER_TEMPLATE,
 )
 from sard.agent.state import ItineraryPlan, PlanDay, PlanTimeBlock
+
+
+logger = logging.getLogger(__name__)
+
+
+def _node_deadline(deps, label: str):
+    """Hierarchical Deadline/cancel for this node (never raises)."""
+    try:
+        from sard.agent.deadline import coerce_deadline as _coerce
+    except Exception as exc_import:
+        logger.debug("Deadline import skipped (%s).", type(exc_import).__name__)
+        return None, getattr(deps, "cancel_event", None)
+    try:
+        raw = getattr(deps, "deadline", None)
+        cancel = getattr(deps, "cancel_event", None)
+        dl = _coerce(raw, cancel_event=cancel, label=label)
+        if dl is not None and cancel is None:
+            try:
+                cancel = getattr(dl, "cancel_event", None)
+            except Exception as exc_cancel:
+                logger.debug("Deadline cancel read skipped (%s).", type(exc_cancel).__name__)
+        return dl, cancel
+    except Exception as exc_coerce:
+        logger.debug("Deadline coerce skipped (%s).", type(exc_coerce).__name__)
+        return None, getattr(deps, "cancel_event", None)
+
+
+def _raise_if_cancelled(cancel, stage: str) -> None:
+    """Raise typed cancellation before starting model work (never degrade)."""
+    flagged = False
+    try:
+        flagged = bool(cancel is not None and cancel.is_set())
+    except Exception as exc_flag:
+        logger.debug("Cancel flag read skipped (%s).", type(exc_flag).__name__)
+    if not flagged:
+        return
+    try:
+        from sard.agent.deadline import DeadlineCancelledError as _DC
+    except Exception as exc_import:
+        logger.debug("Deadline import skipped (%s).", type(exc_import).__name__)
+        raise TimeoutError(f"cancelled before node '{stage}'")
+    raise _DC(f"cancelled before node '{stage}'", stage=stage)
+
+
+def _budget_exhausted(dl) -> bool:
+    try:
+        return bool(dl is not None and dl.reserve_remaining() <= 0)
+    except Exception as exc_budget:
+        logger.debug("Budget check skipped (%s).", type(exc_budget).__name__)
+        return False
 
 
 def _plan_from_dict(payload: dict, duration_hint: Optional[int]) -> ItineraryPlan:
@@ -92,6 +143,9 @@ def _deterministic_plan(state: dict) -> ItineraryPlan:
 def plan(state: dict, deps) -> dict:
     run = state.get("run_id") or ""
     start = time.monotonic()
+    # Cancel gate at node entry (before ANY work): typed raise, never degrade.
+    _, _entry_cancel = _node_deadline(deps, "plan")
+    _raise_if_cancelled(_entry_cancel, "plan")
     events = [
         make_event(EVENT_STARTED, run, "plan", "started", summary="بدء التخطيط المؤقت")
     ]
@@ -104,28 +158,35 @@ def plan(state: dict, deps) -> dict:
 
     model_service = getattr(deps, "model_service", None)
     if model_service is not None:
-        user = PLAN_USER_TEMPLATE.format(
-            destination=state.get("destination") or "غير محددة",
-            duration_days=state.get("duration_days") or "غير معروف",
-            audience=state.get("audience") or [],
-            interests=state.get("interests") or [],
-            timing=state.get("timing") or "غير محدد",
-            missing=state.get("missing_constraints") or [],
-            assumptions=state.get("assumptions") or [],
-            request=state.get("original_request"),
-        )
-        parsed, response = model_service.invoke_json(
-            "plan",
-            PLAN_SYSTEM_PROMPT,
-            user,
-            allowed_keys=PLAN_OUTPUT_KEYS,
-        )
-        model_used = response.model_used
-        fallback_events = adapt_fallback_events(response.events)
-        if parsed is not None:
-            final_plan = _plan_from_dict(parsed, state.get("duration_days"))
-        else:
+        dl, cancel_event = _node_deadline(deps, "plan")
+        _raise_if_cancelled(cancel_event, "plan")
+        if _budget_exhausted(dl):
             degraded = True
+        else:
+            user = PLAN_USER_TEMPLATE.format(
+                destination=state.get("destination") or "غير محددة",
+                duration_days=state.get("duration_days") or "غير معروف",
+                audience=state.get("audience") or [],
+                interests=state.get("interests") or [],
+                timing=state.get("timing") or "غير محدد",
+                missing=state.get("missing_constraints") or [],
+                assumptions=state.get("assumptions") or [],
+                request=state.get("original_request"),
+            )
+            parsed, response = model_service.invoke_json(
+                "plan",
+                PLAN_SYSTEM_PROMPT,
+                user,
+                allowed_keys=PLAN_OUTPUT_KEYS,
+                deadline=dl,
+                cancel_event=cancel_event,
+            )
+            model_used = response.model_used
+            fallback_events = adapt_fallback_events(response.events)
+            if parsed is not None:
+                final_plan = _plan_from_dict(parsed, state.get("duration_days"))
+            else:
+                degraded = True
 
     duration_ms = (time.monotonic() - start) * 1000
     events.append(

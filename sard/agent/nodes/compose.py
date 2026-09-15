@@ -9,6 +9,7 @@ model path degrades.  Prompts/reasoning are never surfaced.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -38,6 +39,55 @@ from sard.outputs.schemas import (
 )
 
 _DRAFT_LIMIT_CHARS = 900
+
+logger = logging.getLogger(__name__)
+
+
+def _node_deadline(deps, label: str):
+    """Hierarchical Deadline/cancel for this node (never raises)."""
+    try:
+        from sard.agent.deadline import coerce_deadline as _coerce
+    except Exception as exc_import:
+        logger.debug("Deadline import skipped (%s).", type(exc_import).__name__)
+        return None, getattr(deps, "cancel_event", None)
+    try:
+        raw = getattr(deps, "deadline", None)
+        cancel = getattr(deps, "cancel_event", None)
+        dl = _coerce(raw, cancel_event=cancel, label=label)
+        if dl is not None and cancel is None:
+            try:
+                cancel = getattr(dl, "cancel_event", None)
+            except Exception as exc_cancel:
+                logger.debug("Deadline cancel read skipped (%s).", type(exc_cancel).__name__)
+        return dl, cancel
+    except Exception as exc_coerce:
+        logger.debug("Deadline coerce skipped (%s).", type(exc_coerce).__name__)
+        return None, getattr(deps, "cancel_event", None)
+
+
+def _raise_if_cancelled(cancel, stage: str) -> None:
+    """Raise typed cancellation before starting model work (never degrade)."""
+    flagged = False
+    try:
+        flagged = bool(cancel is not None and cancel.is_set())
+    except Exception as exc_flag:
+        logger.debug("Cancel flag read skipped (%s).", type(exc_flag).__name__)
+    if not flagged:
+        return
+    try:
+        from sard.agent.deadline import DeadlineCancelledError as _DC
+    except Exception as exc_import:
+        logger.debug("Deadline import skipped (%s).", type(exc_import).__name__)
+        raise TimeoutError(f"cancelled before node '{stage}'")
+    raise _DC(f"cancelled before node '{stage}'", stage=stage)
+
+
+def _budget_exhausted(dl) -> bool:
+    try:
+        return bool(dl is not None and dl.reserve_remaining() <= 0)
+    except Exception as exc_budget:
+        logger.debug("Budget check skipped (%s).", type(exc_budget).__name__)
+        return False
 
 
 def _safe_source(citation_id: str, item: EvidenceItem) -> Optional[CitationSource]:
@@ -219,6 +269,9 @@ def _build_itinerary(
 def compose(state: dict, deps) -> dict:
     run = state.get("run_id") or ""
     start = time.monotonic()
+    # Cancel gate at node entry (before ANY work): typed raise, never degrade.
+    _, _entry_cancel = _node_deadline(deps, "compose")
+    _raise_if_cancelled(_entry_cancel, "compose")
     events = [make_event(EVENT_STARTED, run, "compose", "started", summary="بدء صياغة الإجابة")]
 
     evidence: list[EvidenceItem] = list(state.get("evidence") or [])
@@ -272,39 +325,47 @@ def compose(state: dict, deps) -> dict:
     draft = None
     model_service = getattr(deps, "model_service", None)
     if model_service is not None:
-        context = "\n\n---\n\n".join(
-            f"[{item.citation_id}] {item.title} — {item.source_name}\n{item.content}"
-            for item in evidence
-        )
-        user = COMPOSE_USER_TEMPLATE.format(
-            plan=plan_summary,
-            open_questions="؛ ".join(plan.open_questions) if plan is not None and plan.open_questions else "—",
-            constraints="؛ ".join(constraints) if constraints else "—",
-            request=state.get("original_request"),
-        )
-        feedback_section = ""
-        if verification_feedback:
-            last = verification_feedback[-1]
-            feedback_section = (
-                "\nملاحظات المراجعة (عالجها):\n" + "\n".join(f"- {line}" for line in last.splitlines())
-            )
-        response = model_service.invoke(
-            "compose",
-            COMPOSE_SYSTEM_PROMPT.format(context=context),
-            user + feedback_section,
-        )
-        model_used = response.model_used
-        fallback_events = adapt_fallback_events(response.events)
-        if response.success:
-            draft, referenced_ids = _repair_citations(
-                response.text, valid_ids
-            )
-            if not referenced_ids:
-                degraded = True
-                draft = _extractive_draft(evidence)
-        else:
+        dl, cancel_event = _node_deadline(deps, "compose")
+        _raise_if_cancelled(cancel_event, "compose")
+        if _budget_exhausted(dl):
             degraded = True
             draft = _extractive_draft(evidence)
+        else:
+            context = "\n\n---\n\n".join(
+                f"[{item.citation_id}] {item.title} — {item.source_name}\n{item.content}"
+                for item in evidence
+            )
+            user = COMPOSE_USER_TEMPLATE.format(
+                plan=plan_summary,
+                open_questions="؛ ".join(plan.open_questions) if plan is not None and plan.open_questions else "—",
+                constraints="؛ ".join(constraints) if constraints else "—",
+                request=state.get("original_request"),
+            )
+            feedback_section = ""
+            if verification_feedback:
+                last = verification_feedback[-1]
+                feedback_section = (
+                    "\nملاحظات المراجعة (عالجها):\n" + "\n".join(f"- {line}" for line in last.splitlines())
+                )
+            response = model_service.invoke(
+                "compose",
+                COMPOSE_SYSTEM_PROMPT.format(context=context),
+                user + feedback_section,
+                deadline=dl,
+                cancel_event=cancel_event,
+            )
+            model_used = response.model_used
+            fallback_events = adapt_fallback_events(response.events)
+            if response.success:
+                draft, referenced_ids = _repair_citations(
+                    response.text, valid_ids
+                )
+                if not referenced_ids:
+                    degraded = True
+                    draft = _extractive_draft(evidence)
+            else:
+                degraded = True
+                draft = _extractive_draft(evidence)
 
     if draft is None:
         draft = _extractive_draft(evidence)
