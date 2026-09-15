@@ -12,6 +12,7 @@ Evidence rule (fail-closed): a block with empty ``source_ids`` + empty
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +20,36 @@ from sard.outputs.schemas import CITATION_ID_RE, INLINE_CITATION_RE, CitationSou
 
 _ALLOWED_BLOCK_STATUS = frozenset({"verified", "user_provided", "uncertain", "evidence_limited"})
 _RENDERABLE_UNCITED = frozenset({"user_provided", "uncertain"})
+
+
+def parse_markdown_table(paragraph: str) -> list[list[str]] | None:
+    """Parse a GitHub-style markdown table paragraph into rows, else None.
+
+    Shared by from_request so HTML/PDF/DOCX/PPTX all see one TableBlock
+    instead of each renderer re-parsing (or ignoring) markdown text.
+    """
+    lines = [ln.strip() for ln in (paragraph or "").strip().splitlines() if ln.strip()]
+    if len(lines) < 2 or any("|" not in ln for ln in lines):
+        return None
+
+    def _cells(line: str) -> list[str]:
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    body_start = 1
+    sep = _cells(lines[1])
+    if sep and all(re.fullmatch(r":?-{1,}:?", c or "") for c in sep):
+        body_start = 2
+    elif len({_cells_count(ln) for ln in lines}) != 1:
+        return None
+    rows = [_cells(lines[0])] + [_cells(ln) for ln in lines[body_start:]]
+    if not any(rows[0]):
+        return None
+    width = max(len(r) for r in rows)
+    return [r + [""] * (width - len(r)) for r in rows]
+
+
+def _cells_count(line: str) -> int:
+    return len([c for c in line.strip().strip("|").split("|")])
 
 
 def _as_tuple(values: Any) -> tuple:
@@ -741,6 +772,18 @@ class ArtifactDocument:
                 if not paras:
                     paras = [topic] if topic.strip() else [title]
                 for j, para in enumerate(paras, start=1):
+                    table_rows = parse_markdown_table(para)
+                    if table_rows:
+                        blocks.append(
+                            ArtifactBlock(
+                                block_id=f"p{j}-table",
+                                block_type="table",
+                                text=" | ".join(table_rows[0])[:500],
+                                data={"rows": table_rows},
+                                verification_status="uncertain",
+                            )
+                        )
+                        continue
                     blocks.append(
                         ArtifactBlock(
                             block_id=f"p{j}",

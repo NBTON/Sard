@@ -219,3 +219,63 @@ def test_service_view_populates_preview():
     view = service._artifact_view(result)
     assert view is not None
     assert view.preview == result.preview
+
+
+def test_markdown_table_parsed_to_table_block():
+    from sard.outputs.document import parse_markdown_table
+
+    rows = parse_markdown_table("| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |")
+    assert rows == [["A", "B"], ["1", "2"], ["3", "4"]]
+    # Lenient: header + aligned rows without a separator line.
+    rows = parse_markdown_table("| A | B |\n| 1 | 2 |")
+    assert rows == [["A", "B"], ["1", "2"]]
+    assert parse_markdown_table("Just a paragraph, no pipes.") is None
+    assert parse_markdown_table("| A |\nplain line without pipe") is None
+
+
+def test_from_request_table_renders_once_in_every_renderer(tmp_path):
+    import io
+    import zipfile
+
+    from sard.outputs.document import ArtifactDocument
+    from sard.outputs.html import render_html_document
+    from sard.outputs.pdf import build_pdf_from_document
+
+    raw = "Body para one.\n\n| H1 | H2 |\n| A1 | B1 |\n| A2 | B2 |"
+    req = ArtifactRequest(format="pdf", kind="document", title="T", topic="TT", raw_text=raw)
+    doc = ArtifactDocument.from_request(req)
+    tables = [b for s in doc.sections for b in s.blocks if b.block_type == "table"]
+    assert len(tables) == 1
+    assert tables[0].data["rows"] == [["H1", "H2"], ["A1", "B1"], ["A2", "B2"]]
+
+    html = render_html_document(doc)
+    assert html.count("<table") == 1
+
+    pdf_text = "".join(
+        page.extract_text() or ""
+        for page in __import__("pypdf").PdfReader(io.BytesIO(build_pdf_from_document(doc))).pages
+    )
+    # Body emitted exactly once (no flat-paragraph + section duplication).
+    assert pdf_text.count("Body para one.") == 1
+    assert "A1" in pdf_text and "B2" in pdf_text
+
+
+def test_single_section_pdf_has_no_title_echo_or_body_dup():
+    import io
+
+    from sard.outputs.document import ArtifactDocument
+    from sard.outputs.pdf import build_pdf_from_document
+
+    req = ArtifactRequest(
+        format="pdf", kind="document", title="DocTitle", topic="Top",
+        raw_text="First para.\n\nSecond para.",
+    )
+    doc = ArtifactDocument.from_request(req)
+    pdf_text = "".join(
+        page.extract_text() or ""
+        for page in __import__("pypdf").PdfReader(io.BytesIO(build_pdf_from_document(doc))).pages
+    )
+    assert pdf_text.count("First para.") == 1
+    assert pdf_text.count("Second para.") == 1
+    # Cover title appears once as title, not again as a section header.
+    assert "◆ DocTitle" not in pdf_text

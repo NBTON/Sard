@@ -1099,28 +1099,29 @@ def render_document_pdf(
     for section in section_list:
         section_title = str(section.get("title") or "").strip()
         badge = str(section.get("badge") or "").strip()
-        story.append(Spacer(1, 8))
-        story.append(CondPageBreak(180))
-        header = f"◆ {section_title}" + (f" ({badge})" if badge else "")
-        story.append(
-            _TextFlowable(
-                header,
-                font=font_name,
-                latin_font=latin_font_name,
-                size=18,
-                leading=25,
-                color=colors.HexColor("#6E1F1F"),
-                bottom_padding=6,
+        if section_title or badge:
+            story.append(Spacer(1, 8))
+            story.append(CondPageBreak(180))
+            header = f"◆ {section_title}" + (f" ({badge})" if badge else "")
+            story.append(
+                _TextFlowable(
+                    header,
+                    font=font_name,
+                    latin_font=latin_font_name,
+                    size=18,
+                    leading=25,
+                    color=colors.HexColor("#6E1F1F"),
+                    bottom_padding=6,
+                )
             )
-        )
-        story.append(
-            HRFlowable(
-                width="100%",
-                thickness=0.8,
-                color=colors.HexColor("#D4CBBD"),
-                spaceAfter=8,
+            story.append(
+                HRFlowable(
+                    width="100%",
+                    thickness=0.8,
+                    color=colors.HexColor("#D4CBBD"),
+                    spaceAfter=8,
+                )
             )
-        )
         content = str(section.get("content") or "")
         if content.strip():
             story.extend(markdown_to_flowables(content, font_name, latin_font_name))
@@ -1338,6 +1339,16 @@ def build_pdf_from_document(doc) -> bytes:
             sections.append(entry)
     if not paragraphs and not sections and not takeaways and not summary.strip():
         raise ValueError("PDF report content is missing; refusing to render filler.")
+    # Single-source rule: flat `paragraphs` is the flattened section content by
+    # construction, so rendering both would duplicate the body. Headed sections
+    # are the body; a lone flat section (the from_request raw_text shape) folds
+    # to an untitled body so the cover title is not echoed as "◆ <title>".
+    if sections:
+        only = sections[0] if len(sections) == 1 else None
+        only_title = str((only or {}).get("title") or "").strip()
+        if only is not None and (not only_title or only_title == title):
+            sections = [{**only, "title": ""}]
+        paragraphs = []
     sources = [
         {"citation_id": s.citation_id, "title": s.title, "url": s.url} for s in doc.sources
     ]
