@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
@@ -81,6 +82,7 @@ class ChatService:
     ):
         self._injected_model = chat_model
         self.router = router or CulturalRouter()
+        self._model_router = None  # lazy ModelRouter (capability-aware, per-service breaker)
         self.orchestrator = orchestrator or get_artifact_orchestrator()
         if planner is not None:
             self.planner = planner
@@ -93,6 +95,42 @@ class ChatService:
         if self._injected_model is not None:
             return self._injected_model
         return get_chat_model()
+
+    def _get_model_router(self):
+        """Lazily build the capability-aware router (never raises)."""
+        if self._model_router is None:
+            try:
+                from sard.config.model_router import ModelRouter
+
+                self._model_router = ModelRouter()
+            except Exception as exc:
+                logger.debug("Model router unavailable (%s).", type(exc).__name__)
+                return None
+        return self._model_router
+
+    def _invoke_via_router(self, messages, timeout_s: float = 6.0) -> Optional[str]:
+        """Try capability-aware routing first; return text or None (never raises).
+
+        Bounded by the same per-call budget as the legacy path via
+        ``deadline_monotonic``; receipts carry provider/model metadata and no
+        prompts, payloads, or secrets.
+        """
+        try:
+            from sard.config.routing_table import TaskClass
+
+            router = self._get_model_router()
+            if router is None:
+                return None
+            result = router.invoke_chat(
+                TaskClass.COMPOSE_SHORT,
+                messages,
+                deadline_monotonic=time.monotonic() + timeout_s,
+            )
+            if result.success and result.text and result.text.strip():
+                return result.text
+        except Exception as exc:
+            logger.debug("Routed model invocation failed (%s); using legacy model path.", type(exc).__name__)
+        return None
 
     def _invoke_llm_str(self, sys_p: str, user_p: str) -> str:
         """Invoke configured LLM with prompt strings with fast timeout."""
@@ -107,6 +145,12 @@ class ChatService:
             except Exception as exc:
                 logger.debug("Injected model failed (%s)", exc)
                 return ""
+
+        routed = self._invoke_via_router(
+            [SystemMessage(content=sys_p), HumanMessage(content=user_p)], timeout_s=6.0
+        )
+        if routed is not None:
+            return routed
 
         try:
             model = self._get_model()
@@ -452,6 +496,14 @@ class ChatService:
                     elif role == "assistant":
                         lc_messages.append(AIMessage(content=content))
             lc_messages.append(HumanMessage(content=user_query))
+
+            routed = self._invoke_via_router(lc_messages, timeout_s=6.0)
+            if routed is not None:
+                routed_text = sanitize_cultural_output(routed)
+                if not routed_text or not routed_text.strip():
+                    routed_text = ""
+                routed_artifacts = _maybe_orchestrate(routed_text, []) if routed_text else []
+                return ChatResult(ok=True, text=routed_text, artifacts=routed_artifacts)
 
             future = _SHARED_EXECUTOR.submit(model.invoke, lc_messages)
             try:

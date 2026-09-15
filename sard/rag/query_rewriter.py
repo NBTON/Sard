@@ -22,7 +22,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from sard.config.rag import RAGSettings, build_chat_model, get_rag_settings
+from sard.config.model_router import route_chat_factory
+from sard.config.rag import RAGSettings, get_rag_settings
 from sard.rag.fallbacks import (
     AllCandidatesFailedError,
     CircuitBreaker,
@@ -139,7 +140,7 @@ class QueryRewriteService:
         self,
         settings: Optional[RAGSettings] = None,
         circuit_breaker: Optional[CircuitBreaker] = None,
-        chat_model_factory=build_chat_model,
+        chat_model_factory=route_chat_factory,
     ):
         self._settings = settings or get_rag_settings()
         self._breaker = circuit_breaker or CircuitBreaker()

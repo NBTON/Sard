@@ -41,6 +41,10 @@ dependencies = [
 anthropic = [
     "langchain-anthropic>=0.2.0",
 ]
+# NOTE: the OpenRouter provider (sard/config/providers/openrouter.py) builds
+# on this OpenAI-compatible endpoint package; no separate openrouter extra.
+# httpx stays a dev-only dependency on purpose: the optional catalog refresh
+# imports it lazily so the runtime never hard-requires it.
 openai = [
     "langchain-openai>=0.2.0",
 ]

@@ -6,9 +6,10 @@ NVIDIA SDK, OpenAI, Anthropic, or ``sard.config.models`` directly — they call
 
 Resolved model IDs and primary/fallback order come from
 ``get_rag_settings().chat_route``; concrete models are built lazily via
-``sard.config.rag.build_chat_model`` (or an injected factory so offline tests
-can supply fakes).  Never retries auth/dimension-mismatch failures, reusing
-Step 3's fallback policy instead of duplicating it.
+:func:`sard.config.model_router.route_chat_factory`, which routes
+OpenRouter-style IDs through the OpenRouter provider and every other ID
+through the existing NVIDIA factory.  Never retries auth/dimension-mismatch
+failures, reusing Step 3's fallback policy instead of duplicating it.
 """
 
 from __future__ import annotations
@@ -20,7 +21,8 @@ from typing import Any, Callable, Optional, Protocol, Sequence, TypeVar
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from sard.agent.util import extract_json_object, pick_allowed
-from sard.config.rag import RAGSettings, build_chat_model
+from sard.config.model_router import provider_name_for_model, route_chat_factory
+from sard.config.rag import RAGSettings
 from sard.rag.fallbacks import (
     AllCandidatesFailedError,
     CircuitBreaker,
@@ -57,6 +59,7 @@ class AgentModelResponse:
     success: bool
     text: str = ""
     model_used: Optional[str] = None
+    provider_used: Optional[str] = None
     degraded: bool = False
     use_case: str = ""
     events: list[FallbackEvent] = field(default_factory=list)
@@ -67,7 +70,7 @@ class AgentModelResponse:
 @dataclass
 class AgentModelService:
     settings: Optional[RAGSettings] = None
-    chat_model_factory: Callable[..., Any] = build_chat_model
+    chat_model_factory: Callable[..., Any] = route_chat_factory
     circuit_breaker: Optional[CircuitBreaker] = None
     max_retries_per_candidate: int = 1
     max_structured_attempts: int = 2
@@ -143,6 +146,7 @@ class AgentModelService:
                     FailureCategory.MALFORMED_OUTPUT, "Model returned empty content."
                 )
             selected["model_id"] = candidate.model_id
+            selected["provider"] = provider_name_for_model(candidate.model_id)
             selected["degraded"] = candidate.degraded
             return content
 
@@ -169,6 +173,7 @@ class AgentModelService:
             success=True,
             text=text,
             model_used=selected.get("model_id"),
+            provider_used=selected.get("provider"),
             degraded=bool(selected.get("degraded")),
             use_case=use_case_key,
             events=events,
@@ -204,6 +209,7 @@ class AgentModelService:
                     success=False,
                     use_case=response.use_case,
                     model_used=response.model_used,
+                    provider_used=response.provider_used,
                     degraded=response.degraded,
                     events=response.events,
                     failure_category=FailureCategory.MALFORMED_OUTPUT,
