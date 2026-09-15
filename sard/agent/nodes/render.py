@@ -64,6 +64,29 @@ def _manifest_info(result: ArtifactWriteResult) -> RenderedArtifactInfo:
     )
 
 
+def _deadline_gate(deps, stage: str) -> Optional[str]:
+    """Workstream E (additive): return None when render may proceed, else an
+    error_category (``"timeout"`` / ``"cancelled"``) so the caller degrades
+    that format instead of starting a doomed render."""
+    try:
+        cancel = getattr(deps, "cancel_event", None)
+        if cancel is not None and cancel.is_set():
+            return "cancelled"
+    except Exception:
+        pass
+    try:
+        raw_dl = getattr(deps, "deadline", None)
+        if raw_dl is not None:
+            from sard.agent.deadline import coerce_deadline as _coerce
+
+            dl = _coerce(raw_dl, label=stage)
+            if dl is not None and dl.reserve_remaining() <= 0:
+                return "timeout"
+    except Exception:
+        pass
+    return None
+
+
 def _artifact_failure(artifact_type: str, label: str, filename: str, mime: str, exc: Exception) -> ArtifactWriteResult:
     category = getattr(exc, "category", None) or type(exc).__name__.lower()
     return failed_artifact(
@@ -77,14 +100,26 @@ def _artifact_failure(artifact_type: str, label: str, filename: str, mime: str, 
 
 
 def _render_pdf_artifact(manager: ArtifactManager, verified: VerifiedRenderInput) -> ArtifactWriteResult:
+    # Per-scope skip: only empty scopes skip, with a specific category.
+    # A partial itinerary (surviving rows) always renders; generic
+    # ``no_verified_itinerary`` is never used for partial survival.
     if verified.itinerary is None:
         return skipped_artifact(
             artifact_type="pdf",
             display_label="برنامج الرحلة PDF",
             filename="itinerary.pdf",
             mime_type="application/pdf",
-            category="no_verified_itinerary",
-            warning="تم تخطي PDF لعدم توفر جدول رحلة منظم موثق.",
+            category="empty_scope",
+            warning="تم تخطي PDF لعدم توفر صفوف موثقة (empty_scope).",
+        )
+    if not verified.itinerary.days or not any(day.stops for day in verified.itinerary.days):
+        return skipped_artifact(
+            artifact_type="pdf",
+            display_label="برنامج الرحلة PDF",
+            filename="itinerary.pdf",
+            mime_type="application/pdf",
+            category="empty_scope",
+            warning="تم تخطي PDF: النطاق فارغ بلا محطات موثقة (empty_scope).",
         )
     temporary = manager.temporary_path(".pdf")
     try:
@@ -203,26 +238,42 @@ def render(state: dict, deps) -> dict:
     results: list[ArtifactWriteResult] = []
     # Raw text is independent and is attempted first so it survives structured
     # PDF/calendar failures.
-    try:
-        raw = render_raw_text(
-            verified.final_answer,
-            verified.sources,
-            verification_status=verified.verification_status,
-            retrieval_mode=verified.retrieval_mode,
-            warnings=verified.warnings,
-            degraded_notice=verified.degraded_notice,
-        )
-        results.append(manager.write_bytes(raw.data, filename="answer.txt", artifact_type="raw_text", display_label="الإجابة العربية الخام", mime_type="text/plain; charset=utf-8", warnings=raw.warnings))
-    except Exception as exc:
-        results.append(_artifact_failure("raw_text", "الإجابة العربية الخام", "answer.txt", "text/plain; charset=utf-8", exc))
+    _raw_gate = _deadline_gate(deps, "render:raw")
+    if _raw_gate is not None:
+        results.append(failed_artifact(
+            artifact_type="raw_text", display_label="الإجابة العربية الخام",
+            filename="answer.txt", mime_type="text/plain; charset=utf-8",
+            category=_raw_gate, warning="توقف إنشاء النص الخام: انتهت المهلة أو أُلغي الطلب.",
+        ))
+    else:
+        try:
+            raw = render_raw_text(
+                verified.final_answer,
+                verified.sources,
+                verification_status=verified.verification_status,
+                retrieval_mode=verified.retrieval_mode,
+                warnings=verified.warnings,
+                degraded_notice=verified.degraded_notice,
+            )
+            results.append(manager.write_bytes(raw.data, filename="answer.txt", artifact_type="raw_text", display_label="الإجابة العربية الخام", mime_type="text/plain; charset=utf-8", warnings=raw.warnings))
+        except Exception as exc:
+            results.append(_artifact_failure("raw_text", "الإجابة العربية الخام", "answer.txt", "text/plain; charset=utf-8", exc))
 
-    try:
-        results.append(_render_pdf_artifact(manager, verified))
-    except Exception as exc:
-        results.append(_artifact_failure("pdf", "برنامج الرحلة PDF", "itinerary.pdf", "application/pdf", exc))
+    _pdf_gate = _deadline_gate(deps, "render:pdf")
+    if _pdf_gate is not None:
+        results.append(failed_artifact(
+            artifact_type="pdf", display_label="برنامج الرحلة PDF",
+            filename="itinerary.pdf", mime_type="application/pdf",
+            category=_pdf_gate, warning="توقف إنشاء PDF: انتهت المهلة أو أُلغي الطلب.",
+        ))
+    else:
+        try:
+            results.append(_render_pdf_artifact(manager, verified))
+        except Exception as exc:
+            results.append(_artifact_failure("pdf", "برنامج الرحلة PDF", "itinerary.pdf", "application/pdf", exc))
 
     if verified.itinerary is None:
-        results.append(skipped_artifact(artifact_type="calendar", display_label="تقويم الرحلة", filename="itinerary.ics", mime_type="text/calendar; charset=utf-8", category="no_verified_itinerary", warning="تم تخطي التقويم لعدم توفر جدول رحلة موثق."))
+        results.append(skipped_artifact(artifact_type="calendar", display_label="تقويم الرحلة", filename="itinerary.ics", mime_type="text/calendar; charset=utf-8", category="empty_scope", warning="تم تخطي التقويم لعدم توفر صفوف موثقة (empty_scope)."))
     elif not (
         explicit_dates
         or verified.itinerary.explicit_dates
@@ -230,16 +281,24 @@ def render(state: dict, deps) -> dict:
     ):
         results.append(skipped_artifact(artifact_type="calendar", display_label="تقويم الرحلة", filename="itinerary.ics", mime_type="text/calendar; charset=utf-8", category="missing_dates", warning="أدخل تواريخ صريحة قبل إنشاء التقويم؛ لم تُخترع تواريخ."))
     else:
-        try:
-            calendar = render_calendar(
-                verified.itinerary,
-                preview=bool(getattr(deps, "preview_calendar", False)),
-            )
-            results.append(manager.write_bytes(calendar.data, filename="itinerary.ics", artifact_type="calendar", display_label="تقويم الرحلة", mime_type="text/calendar; charset=utf-8", warnings=calendar.warnings))
-        except CalendarRenderError as exc:
-            results.append(skipped_artifact(artifact_type="calendar", display_label="تقويم الرحلة", filename="itinerary.ics", mime_type="text/calendar; charset=utf-8", category=exc.category, warning="\n".join((str(exc), *exc.warnings))))
-        except Exception as exc:
-            results.append(_artifact_failure("calendar", "تقويم الرحلة", "itinerary.ics", "text/calendar; charset=utf-8", exc))
+        _cal_gate = _deadline_gate(deps, "render:calendar")
+        if _cal_gate is not None:
+            results.append(failed_artifact(
+                artifact_type="calendar", display_label="تقويم الرحلة",
+                filename="itinerary.ics", mime_type="text/calendar; charset=utf-8",
+                category=_cal_gate, warning="توقف إنشاء التقويم: انتهت المهلة أو أُلغي الطلب.",
+            ))
+        else:
+            try:
+                calendar = render_calendar(
+                    verified.itinerary,
+                    preview=bool(getattr(deps, "preview_calendar", False)),
+                )
+                results.append(manager.write_bytes(calendar.data, filename="itinerary.ics", artifact_type="calendar", display_label="تقويم الرحلة", mime_type="text/calendar; charset=utf-8", warnings=calendar.warnings))
+            except CalendarRenderError as exc:
+                results.append(skipped_artifact(artifact_type="calendar", display_label="تقويم الرحلة", filename="itinerary.ics", mime_type="text/calendar; charset=utf-8", category=exc.category, warning="\n".join((str(exc), *exc.warnings))))
+            except Exception as exc:
+                results.append(_artifact_failure("calendar", "تقويم الرحلة", "itinerary.ics", "text/calendar; charset=utf-8", exc))
 
     for result in results:
         warnings.extend(result.warnings)

@@ -798,6 +798,86 @@ async def get_artifact_file(filename: str):
 
 
 # ---------------------------------------------------------------------------
+# Minimal run-record (workstream E, additive): {run_id, status, artifacts[],
+# done} in-memory + durable JSON sidecar with short TTL, so a client can
+# poll-after-abort via GET /api/runs/:id. Frontend contract: expose fields
+# only (page.tsx/api.ts owned by frontend agent).
+# ---------------------------------------------------------------------------
+
+_RUNS: Dict[str, Dict[str, Any]] = {}
+_RUN_TTL_SECONDS = 3600  # short TTL: 1 hour
+
+
+def _runs_dir() -> Path:
+    try:
+        d = OUTPUT_DIR / ".runs"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except Exception:
+        fallback = Path(".runs")
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+def _run_record_path(run_id: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(run_id or ""))[:64] or "run"
+    return _runs_dir() / f"{safe}.json"
+
+
+def _run_record_put(run_id: str, status: str, artifacts: Optional[List[Dict[str, Any]]] = None, done: bool = False, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    record: Dict[str, Any] = {
+        "run_id": run_id,
+        "status": status,
+        "artifacts": list(artifacts or []),
+        "done": bool(done),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if extra:
+        record.update(extra)
+    _RUNS[run_id] = record
+    # Bounded memory: keep last 200 runs.
+    if len(_RUNS) > 200:
+        for old_key in list(_RUNS.keys())[: len(_RUNS) - 200]:
+            _RUNS.pop(old_key, None)
+    try:
+        tmp = _run_record_path(run_id).with_name(f".{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_run_record_path(run_id))
+    except Exception as exc:
+        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
+    return record
+
+
+def _run_record_get(run_id: str) -> Optional[Dict[str, Any]]:
+    record = _RUNS.get(run_id)
+    if record is not None:
+        return record
+    try:
+        path = _run_record_path(run_id)
+        if path.exists() and (time.time() - path.stat().st_mtime) < _RUN_TTL_SECONDS:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("run_id") == run_id:
+                _RUNS[run_id] = data
+                return data
+    except Exception as exc:
+        logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
+    return None
+
+
+@app.get("/api/runs/{run_id}")
+@app.get("/runs/{run_id}")
+async def get_run_record(run_id: str):
+    """Poll-after-abort: fetch the minimal run record for a chat/itinerary run."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "", str(run_id or ""))[:64]
+    if not safe:
+        raise HTTPException(status_code=400, detail="run_id غير صالح.")
+    record = _run_record_get(safe)
+    if record is None:
+        raise HTTPException(status_code=404, detail="السجل المطلوب غير موجود أو انتهت صلاحيته.")
+    return record
+
+
+# ---------------------------------------------------------------------------
 # Full Itinerary Pipeline Endpoint
 # ---------------------------------------------------------------------------
 
@@ -807,19 +887,26 @@ async def get_artifact_file(filename: str):
 async def generate_full_itinerary(req: ItineraryRequest, request: Request):
     """Executes the full LangGraph agent pipeline and generates real PDF / ICS artifacts.
 
-    Bounded by a 30–45s overall deadline with client-disconnect propagation.
-    Returns a typed partial/timeout response and never writes background
-    artifacts after cancellation.
+    Hierarchical budget (workstream E): 40s request -> 32s pipeline with an
+    8s reserve for verify+store+serialize; internal hard stop at request-2s
+    so the response beats the platform kill. Bounded by a 30–45s overall
+    deadline with client-disconnect propagation. Returns a typed
+    partial/timeout response and never writes background artifacts after
+    cancellation.
+
+    Follow-up (requires owner plan confirm, NOT done here): raise Vercel
+    maxDuration 60 -> itinerary 60s (platform supports up to 300s on paid
+    plans; no billing changes made in this workstream).
     """
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="الرجاء تقديم استفسار للرحلة")
 
-    try:
-        deadline_s = float(os.environ.get("SARD_ITINERARY_TIMEOUT", "40"))
-        deadline_s = max(30.0, min(45.0, deadline_s))
-    except ValueError:
-        deadline_s = 40.0
+    from sard.agent.deadline import Deadline, itinerary_request_budget
+
+    deadline_s, reserve_s = itinerary_request_budget()
     t_start = time.monotonic()
+    # Internal hard stop: request-2s so the terminal response beats the kill.
+    hard_end = t_start + max(1.0, deadline_s - 2.0)
     cancelled = False
 
     async def _is_disconnected() -> bool:
@@ -830,6 +917,7 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
 
     try:
         run_id = f"itin-{uuid.uuid4().hex[:10]}"
+        _run_record_put(run_id, "running", [], False, {"query": req.query})
         deps = default_dependencies(open_rag=True)
         deps.render_artifacts = True
         deps.output_root = str(OUTPUT_DIR)
@@ -846,6 +934,16 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
         pipeline_box: dict[str, Any] = {}
         pipeline_done = _threading.Event()
         cancel_flag = _threading.Event()
+        # Hierarchical deadline object: pipeline 32s + 8s reserve, plumbed
+        # (existing cancel_flag) into graph nodes + render/store.
+        itinerary_dl = Deadline(
+            monotonic_end=t_start + deadline_s,
+            reserve_s=reserve_s,
+            cancel_event=cancel_flag,
+            label="itinerary",
+        )
+        deps.deadline = itinerary_dl
+        deps.cancel_event = cancel_flag
 
         def _worker() -> None:
             try:
@@ -855,6 +953,8 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
                     run_id=run_id,
                     caller_dates=req.dates,
                     preview_calendar=req.preview_calendar,
+                    deadline=itinerary_dl,
+                    cancel_event=cancel_flag,
                 )
             except Exception as exc:  # worker errors surface as typed 500, never leak
                 pipeline_box["error"] = exc
@@ -869,8 +969,9 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
                 if await _is_disconnected():
                     cancel_flag.set()
                     raise asyncio.CancelledError("client disconnected")
-                remaining = deadline_s - (time.monotonic() - t_start)
-                if remaining <= 0:
+                # Reserve-preserving check: stop waiting once the pipeline
+                # slice is gone so the 8s reserve stays for terminal work.
+                if itinerary_dl.reserve_remaining() <= 0:
                     cancel_flag.set()
                     raise asyncio.TimeoutError(f"itinerary deadline exceeded ({deadline_s:.0f}s)")
                 await asyncio.sleep(0.25)
@@ -882,6 +983,7 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
             state = await _run_with_deadline()
         except asyncio.TimeoutError:
             elapsed_ms = round((time.monotonic() - t_start) * 1000, 1)
+            _run_record_put(run_id, "timeout", [], True, {"query": req.query, "elapsed_ms": elapsed_ms})
             return JSONResponse(
                 status_code=504,
                 content={
@@ -898,6 +1000,7 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
         except asyncio.CancelledError:
             cancelled = True
             elapsed_ms = round((time.monotonic() - t_start) * 1000, 1)
+            _run_record_put(run_id, "cancelled", [], True, {"query": req.query, "elapsed_ms": elapsed_ms})
             return JSONResponse(
                 status_code=499,
                 content={
@@ -914,6 +1017,7 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
 
         if await _is_disconnected():
             # Client already gone: do not write artifacts.
+            _run_record_put(run_id, "cancelled", [], True, {"query": req.query})
             return JSONResponse(
                 status_code=499,
                 content={
@@ -925,12 +1029,31 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
 
         # Extract and verify artifacts (skipped entirely after cancellation).
         if cancelled or cancel_flag.is_set() or await _is_disconnected():
+            _run_record_put(run_id, "cancelled", [], True, {"query": req.query})
             return JSONResponse(
                 status_code=499,
                 content={
                     "ok": False, "error": "cancelled", "error_category": "cancelled",
                     "message": "تم إلغاء الطلب من قبل العميل.", "run_id": run_id,
                     "query": req.query, "partial": True,
+                },
+            )
+        # Internal hard stop (request-2s): serialize a typed partial now so
+        # the response beats the platform kill.
+        if time.monotonic() >= hard_end:
+            elapsed_ms = round((time.monotonic() - t_start) * 1000, 1)
+            _run_record_put(run_id, "timeout", [], True, {"query": req.query, "elapsed_ms": elapsed_ms})
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "ok": True, "partial": True,
+                    "error": "timeout", "error_category": "timeout",
+                    "message": "اكتمل النص دون مخرجات ملفات ضمن المهلة.",
+                    "run_id": run_id, "query": req.query,
+                    "final_text": (state.get("final_itinerary_text") or state.get("final_response") or "") if isinstance(state, dict) else "",
+                    "sources": state.get("sources", []) if isinstance(state, dict) else [],
+                    "artifacts": [],
+                    "elapsed_ms": elapsed_ms,
                 },
             )
         orchestrator = get_artifact_orchestrator()
@@ -955,17 +1078,19 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
                 })
 
         # Fallback: if no artifacts rendered yet, generate via orchestrator
-        # (only if deadline budget remains; otherwise return typed partial).
+        # (only if reserve budget remains; otherwise return typed partial).
         if not artifacts_list:
-            remaining = deadline_s - (time.monotonic() - t_start)
-            if remaining <= 1.0 or await _is_disconnected():
+            remaining = itinerary_dl.remaining()
+            if remaining <= 1.0 or time.monotonic() >= hard_end or await _is_disconnected():
                 elapsed_ms = round((time.monotonic() - t_start) * 1000, 1)
+                timed_out = remaining <= 1.0 or time.monotonic() >= hard_end
+                _run_record_put(run_id, "timeout" if timed_out else "cancelled", [], True, {"query": req.query, "elapsed_ms": elapsed_ms})
                 return JSONResponse(
-                    status_code=504 if remaining <= 1.0 else 499,
+                    status_code=504 if timed_out else 499,
                     content={
                         "ok": True, "partial": True,
-                        "error": "timeout" if remaining <= 1.0 else "cancelled",
-                        "error_category": "timeout" if remaining <= 1.0 else "cancelled",
+                        "error": "timeout" if timed_out else "cancelled",
+                        "error_category": "timeout" if timed_out else "cancelled",
                         "message": "اكتمل النص دون مخرجات ملفات ضمن المهلة.",
                         "run_id": run_id, "query": req.query,
                         "final_text": state.get("final_itinerary_text") or state.get("final_response") or "",
@@ -981,11 +1106,18 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
                 explicit_artifact_request=True,
                 extracted_topic=req.query[:40],
             )
-            orch_results = orchestrator.orchestrate_from_intent(intent, raw_text=itin_text)
+            orch_results = orchestrator.orchestrate_from_intent(
+                intent, raw_text=itin_text, deadline=itinerary_dl, cancel_event=cancel_flag
+            )
             for r in orch_results:
                 if r.status == "created":
                     artifacts_list.append(r.to_dict())
 
+        _run_record_put(
+            run_id, "succeeded",
+            [a for a in artifacts_list if isinstance(a, dict)],
+            True, {"query": req.query},
+        )
         return {
             "ok": True,
             "run_id": run_id,
@@ -1008,18 +1140,32 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
 
 @app.post("/api/chat")
 @app.post("/chat")
-async def chat_endpoint(req: ChatRequest):
+async def chat_endpoint(req: ChatRequest, request: Request):
     """Streaming Chat endpoint with public progress telemetry and verified artifacts.
 
     SSE contract (guaranteed ordering):
-    status → citations (if any) → artifacts (if requested, includes failed) → delta → done
+    status (FIRST carries run_id) → citations (if any) → artifacts (if requested, includes failed) → delta → done
+
+    Typed status.stage values include init|research_started|artifact_started|
+    render_started|verify_started|artifact_ready|artifact_failed (each carrying
+    run_id); planner sub-stages are forwarded unchanged. Frontend contract:
+    fields exposed only (page.tsx/api.ts owned by frontend agent).
+
+    Hierarchical budget (workstream E): 35s request -> 25s pipeline with a
+    10s reserve for artifacts+delta+done+flush; internal hard stop at
+    request-2s so done beats the platform kill. Chat-text no-artifact fast
+    path is preserved (no orchestration runs).
+
+    Follow-up (requires owner plan confirm, NOT done here): raise Vercel
+    maxDuration 60 -> artifact-chat 55s / itinerary 60s / chat-text 35s
+    (platform supports up to 300s on paid plans; no billing changes here).
 
     Invariants enforced here:
     - Explicit artifact intent (requested_formats via classify_intent) survives every fallback
     - Retrieval failure never injects irrelevant context (handled in rag layer)
     - Session isolation: history is client-supplied but never echoed as stale; effective_query is current turn
     - Bounded timeouts: overall chat deadline via SARD_CHAT_OVERALL_TIMEOUT (default 35s; client 50s => 15s slack)
-    - Cancellation propagates to executor future
+    - Cancellation propagates via threading flag + deadline into planner/RAG/render (future.cancel()-only cannot stop workers)
     - Every stream terminates with done (or error) and logs carry run_id without secrets
     - Artifacts event always before done, includes both created and failed where applicable
     - Download verification via orchestrator store
@@ -1034,6 +1180,8 @@ async def chat_endpoint(req: ChatRequest):
     resolved_lang = _resolve_request_lang(req, effective_query)
 
     async def sse_generator() -> AsyncGenerator[dict, None]:
+        from sard.agent.deadline import Deadline, chat_request_budget
+
         t_start = time.monotonic()
         run_id = f"chat-{uuid.uuid4().hex[:10]}"
         citations_sent: list[dict[str, Any]] = []
@@ -1043,23 +1191,39 @@ async def chat_endpoint(req: ChatRequest):
         # Early intent classification so fallback path knows artifact expectation and can surface failed artifacts
         early_intent = classify_intent(effective_query, messages=[m.model_dump() for m in req.messages] if req.messages else None, attachments=all_attachments)
         session_id_out = req.session_id or str(uuid.uuid4())
-        # Overall SSE deadline (bounded). Env overridable, capped at 60s.
-        # P1-4: default 35s with client 50s => deliberate 15s slack so terminal
-        # artifacts+done always arrive before client abort.
-        try:
-            overall_timeout = float(os.environ.get("SARD_CHAT_OVERALL_TIMEOUT", "35"))
-            overall_timeout = max(5.0, min(60.0, overall_timeout))
-        except ValueError:
-            overall_timeout = 35.0
+        # Hierarchical SSE budget: 35s request -> 25s pipeline + 10s reserve
+        # for artifacts+delta+done+flush. Hard stop at request-2s.
+        overall_timeout, chat_reserve_s = chat_request_budget()
+        hard_end = t_start + max(1.0, overall_timeout - 2.0)
+        import threading as _threading
+
+        chat_cancel = _threading.Event()
+        chat_dl = Deadline(
+            monotonic_end=t_start + overall_timeout,
+            reserve_s=chat_reserve_s,
+            cancel_event=chat_cancel,
+            label="chat",
+        )
+        _run_record_put(run_id, "running", [], False, {"session_id": session_id_out})
+
+        async def _chat_is_disconnected() -> bool:
+            try:
+                return await asyncio.wait_for(request.is_disconnected(), timeout=0.2)
+            except Exception:
+                return False
+
+        _terminal_status: list[str] = []
 
         try:
-            # 1. Initial Status Event (language-aware)
+            # 1. Initial Status Event (language-aware). run_id is emitted in
+            # the FIRST status event (poll-after-abort joins on it).
             init_msg = "جارٍ تحليل السؤال واستكشاف المعارف والوثائق المعتمدة..." if resolved_lang == "ar" else "Analyzing question and gathering verified heritage knowledge..."
             yield {
                 "event": "status",
                 "data": json.dumps({
                     "stage": "init",
-                    "message": init_msg
+                    "message": init_msg,
+                    "run_id": run_id,
                 }, ensure_ascii=False)
             }
             await asyncio.sleep(0.02)
@@ -1103,13 +1267,13 @@ async def chat_endpoint(req: ChatRequest):
                     chat_service = ChatService()
                     history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
 
-                    # Overall deadline shared with orchestrator for orphan discard (G11).
-                    deadline = t_start + overall_timeout
-                    # Launch chat_service.ask in executor with bounded timeout (pass resolved language & resolved attachments)
+                    # Hierarchical deadline object shared with planner +
+                    # orchestrator for orphan discard (G11) + reserve.
+                    # Launch chat_service.ask in executor with bounded wait (pass resolved language & resolved attachments)
                     # Real uploaded paths go to the real extractor via uploaded_files (not mocks).
                     future = loop.run_in_executor(
                         None,
-                        lambda _dl=deadline: chat_service.ask(
+                        lambda: chat_service.ask(
                             effective_query,
                             messages=history_dicts,
                             attachments=all_attachments,
@@ -1118,16 +1282,24 @@ async def chat_endpoint(req: ChatRequest):
                             session_id=req.session_id,
                             status_callback=_sync_status_callback,
                             lang=resolved_lang,
-                            deadline_monotonic=_dl,
+                            deadline=chat_dl,
+                            cancel_event=chat_cancel,
                         ),
                     )
 
-                    # Stream status events as emitted, with overall deadline on the future
-                    # We poll status_queue while waiting, but bound the total wait.
+                    # Stream status events as emitted, bounded by the pipeline
+                    # slice. Itinerary-style disconnect poll (0.2s): a gone
+                    # client sets the flag (plumbed into planner/RAG/render)
+                    # instead of future.cancel()-only, which cannot stop a
+                    # running worker thread.
                     while not future.done():
-                        if time.monotonic() > deadline:
-                            future.cancel()
-                            logger.warning("Chat SSE overall timeout reached (run_id=%s). Cancelling hybrid future.", run_id)
+                        if await _chat_is_disconnected():
+                            chat_cancel.set()
+                            logger.info("Chat SSE client disconnected (run_id=%s). Flag set; draining.", run_id)
+                            break
+                        if chat_dl.reserve_remaining() <= 0:
+                            chat_cancel.set()
+                            logger.warning("Chat SSE pipeline slice exhausted (run_id=%s). Flag set; preserving reserve.", run_id)
                             break
                         try:
                             stage_info = await asyncio.wait_for(status_queue.get(), timeout=0.08)
@@ -1136,6 +1308,7 @@ async def chat_endpoint(req: ChatRequest):
                                 "data": json.dumps({
                                     "stage": stage_info[0],
                                     "message": stage_info[1],
+                                    "run_id": run_id,
                                 }, ensure_ascii=False),
                             }
                         except asyncio.TimeoutError:
@@ -1149,14 +1322,18 @@ async def chat_endpoint(req: ChatRequest):
                             "data": json.dumps({
                                 "stage": stage_info[0],
                                 "message": stage_info[1],
+                                "run_id": run_id,
                             }, ensure_ascii=False),
                         }
 
-                    # Await future with timeout; cancellation is fallback, not abort
+                    # Await future within the reserve-preserving budget; flag +
+                    # deadline checks per stage replace cancel()-only.
                     if not future.done():
                         try:
-                            hybrid_chat_res = await asyncio.wait_for(future, timeout=max(0.5, deadline - time.monotonic()))
+                            wait_budget = max(0.5, chat_dl.remaining())
+                            hybrid_chat_res = await asyncio.wait_for(future, timeout=wait_budget)
                         except asyncio.TimeoutError:
+                            chat_cancel.set()
                             future.cancel()
                             logger.warning("Hybrid chat future timed out (run_id=%s).", run_id)
                             hybrid_chat_res = None
@@ -1252,28 +1429,32 @@ async def chat_endpoint(req: ChatRequest):
                         "event": "status",
                         "data": json.dumps({
                             "stage": "generating",
-                            "message": gen_msg
+                            "message": gen_msg,
+                            "run_id": run_id,
                         }, ensure_ascii=False)
                     }
                     chat_service = ChatService()
                     loop = asyncio.get_event_loop()
                     history_dicts = [{"role": m.role, "content": m.content} for m in req.messages] if req.messages else None
                     try:
-                        _dl2 = t_start + overall_timeout
                         future2 = loop.run_in_executor(
                             None,
-                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id, lang=resolved_lang, deadline_monotonic=_dl2),
+                            lambda: chat_service.ask(effective_query, messages=history_dicts, use_hybrid_retrieval=False, session_id=req.session_id, lang=resolved_lang, deadline=chat_dl, cancel_event=chat_cancel),
                         )
-                        # Bounded wait for direct fallback: strict monotonic deadline
-                        remaining = (t_start + overall_timeout) - time.monotonic()
-                        if remaining <= 0.2:
-                            future2.cancel()
-                            logger.warning("Monotonic deadline expired before direct fallback (run_id=%s).", run_id)
+                        # Bounded wait for direct fallback: reserve-preserving budget
+                        remaining = chat_dl.remaining()
+                        if remaining <= 0.2 or chat_cancel.is_set():
+                            try:
+                                future2.cancel()
+                            except Exception:
+                                pass
+                            logger.warning("Reserve expired before direct fallback (run_id=%s).", run_id)
                             chat_res2 = None
                         else:
                             try:
                                 chat_res2 = await asyncio.wait_for(future2, timeout=remaining)
                             except asyncio.TimeoutError:
+                                chat_cancel.set()
                                 future2.cancel()
                                 logger.warning("Direct fallback timed out (run_id=%s).", run_id)
                                 chat_res2 = None
@@ -1386,10 +1567,15 @@ async def chat_endpoint(req: ChatRequest):
                         "data": json.dumps({"artifacts": artifacts_sent}, ensure_ascii=False)
                     }
 
-            # Stream delta tokens smoothly (preserve current query text, not stale history)
+            # Stream delta tokens smoothly (preserve current query text, not stale history).
+            # Internal hard stop (request-2s): if the flush budget is gone,
+            # skip remaining deltas so done still beats the platform kill.
             chunk_size = 4
             words = full_response_text.split(" ")
             for i in range(0, len(words), chunk_size):
+                if time.monotonic() >= hard_end:
+                    logger.warning("Chat SSE hard stop reached (run_id=%s). Truncating delta to preserve done.", run_id)
+                    break
                 chunk = " ".join(words[i : i + chunk_size])
                 if i + chunk_size < len(words):
                     chunk += " "
@@ -1401,6 +1587,12 @@ async def chat_endpoint(req: ChatRequest):
 
         except asyncio.CancelledError:
             logger.info("SSE stream cancelled by client (run_id=%s).", run_id)
+            try:
+                chat_cancel.set()
+            except Exception:
+                pass
+            _terminal_status.append("cancelled")
+            _run_record_put(run_id, "cancelled", list(artifacts_sent), True, {"session_id": session_id_out})
             # Ensure downstream knows it was cancelled: emit error then done if not already sent
             # EventSourceResponse will close; we still attempt to yield a done with error flag if possible
             try:
@@ -1413,6 +1605,8 @@ async def chat_endpoint(req: ChatRequest):
             raise
         except Exception as exc:
             logger.exception("Unexpected SSE error (run_id=%s): %s", run_id, type(exc).__name__)
+            _terminal_status.append("failed")
+            _run_record_put(run_id, "failed", list(artifacts_sent), True, {"session_id": session_id_out})
             # Emit error event but still guarantee done (contract)
             try:
                 yield {
@@ -1424,6 +1618,11 @@ async def chat_endpoint(req: ChatRequest):
         finally:
             # 5. Final Done Event — always emitted even on empty/error (contract). Includes run_id, no secrets.
             total_time_ms = (time.monotonic() - t_start) * 1000
+            if not _terminal_status:
+                try:
+                    _run_record_put(run_id, "succeeded", list(artifacts_sent), True, {"session_id": session_id_out})
+                except Exception:
+                    pass
             try:
                 yield {
                     "event": "done",

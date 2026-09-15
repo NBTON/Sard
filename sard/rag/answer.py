@@ -207,7 +207,9 @@ class AnswerService:
                 "generation",
                 nvidia_candidates,
                 call,
-                max_retries_per_candidate=max(1, self._settings.max_retries),
+                # Workstream E: generation is not idempotent-cheap; one shot
+                # per candidate (AgentModelService default). Embeddings keep 2.
+                max_retries_per_candidate=1,
                 circuit_breaker=self._breaker,
             )
             return result, events

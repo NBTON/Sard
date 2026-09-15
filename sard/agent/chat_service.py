@@ -24,6 +24,11 @@ from sard.agent.cultural_router import (
     CulturalQueryResult,
     CulturalRouter,
 )
+from sard.agent.deadline import (
+    DeadlineCancelledError,
+    DeadlineTimeoutError,
+    coerce_deadline,
+)
 from sard.agent.lang_utils import resolve_language
 from sard.agent.scope_guard import check_scope_before_retrieval
 from sard.agent.util import sanitize_cultural_output
@@ -173,8 +178,16 @@ class ChatService:
         status_callback: Optional[Callable[[str, str], None]] = None,
         lang: str = "ar",
         uploaded_files: Optional[dict] = None,
+        deadline: Optional[Any] = None,
+        deadline_monotonic: Optional[Any] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> PlannerResult:
         """Run the isnād provenance planner to verify claims before generating."""
+        dl = coerce_deadline(deadline, cancel_event=cancel_event, label="ask_isnad")
+        if dl is None and deadline_monotonic is not None:
+            dl = coerce_deadline(deadline_monotonic, cancel_event=cancel_event, label="ask_isnad")
+        if dl is not None and cancel_event is None:
+            cancel_event = dl.cancel_event
         return self.planner.plan_and_execute(
             query=user_query,
             session_id=session_id,
@@ -183,6 +196,8 @@ class ChatService:
             status_callback=status_callback,
             lang=lang,
             uploaded_files=uploaded_files,
+            deadline=dl,
+            cancel_event=cancel_event,
         )
 
     def _can_load_model(self) -> bool:
@@ -228,8 +243,10 @@ class ChatService:
         status_callback: Optional[Callable[[str, str], None]] = None,
         attachments: Optional[Sequence[dict]] = None,
         lang: Optional[str] = None,
-        deadline_monotonic: Optional[float] = None,
+        deadline_monotonic: Optional[Any] = None,
         uploaded_files: Optional[dict] = None,
+        deadline: Optional[Any] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> ChatResult:
         """Route user query with Isnād provenance verification and artifact rendering."""
         # Check empty query early
@@ -238,6 +255,20 @@ class ChatService:
                 ok=False,
                 error_message="الرجاء إدخال سؤال قبل الإرسال." if (lang or "ar") == "ar" else "Please enter a question before sending.",
             )
+
+        # Hierarchical deadline (workstream E): Deadline object preferred;
+        # float monotonic_end accepted via compat shim.
+        dl = coerce_deadline(deadline, cancel_event=cancel_event, label="ask")
+        if dl is None and deadline_monotonic is not None:
+            dl = coerce_deadline(deadline_monotonic, cancel_event=cancel_event, label="ask")
+        if dl is not None and cancel_event is None:
+            cancel_event = dl.cancel_event
+
+        def _cancelled() -> bool:
+            try:
+                return bool(cancel_event is not None and cancel_event.is_set())
+            except Exception:
+                return False
 
         # 0. Resolve language explicitly
         resolved_lang = resolve_language(lang, user_query)
@@ -325,15 +356,59 @@ class ChatService:
                 return "image"
             return "document"
 
+        def _emit(stage: str, message: str) -> None:
+            if status_callback is not None:
+                try:
+                    status_callback(stage, message)
+                except Exception:
+                    pass
+
         def _maybe_orchestrate(text: str, sources: list[dict[str, str]]) -> list[dict[str, Any]]:
-            """Centralized helper: render requested artifact formats or return structured failure."""
+            """Centralized helper: render requested artifact formats or return structured failure.
+
+            Workstream E: checks the hierarchical deadline before each
+            format (never starts doomed renders); on expiry/cancel degrades
+            to a typed ``failed`` entry (``error_category`` timeout /
+            cancelled) instead of writing late output. Emits typed SSE
+            stages ``artifact_started`` / ``render_started`` /
+            ``verify_started`` / ``artifact_ready`` / ``artifact_failed``.
+            """
             local_artifacts: list[dict[str, Any]] = []
             target_fmts = getattr(intent, "target_formats", None) or getattr(intent, "requested_formats", ())
             if intent.explicit_artifact_request and target_fmts:
                 for fmt in target_fmts:
                     if fmt == "text":
                         continue
+                    if _cancelled():
+                        raise DeadlineCancelledError("cancelled before artifact render", stage="artifact_started")
+                    if dl is not None:
+                        try:
+                            dl.check("artifact_started")
+                        except DeadlineTimeoutError:
+                            _emit("artifact_failed", f"تعذر توليد {str(fmt).upper()} ضمن المهلة." if resolved_lang != "en" else f"{str(fmt).upper()} generation timed out.")
+                            local_artifacts.append({
+                                "id": f"art-failed-{fmt}",
+                                "kind": _format_to_kind(fmt),
+                                "format": fmt,
+                                "type": fmt,
+                                "title": f"مخرج ثقافي: {user_query[:40]}",
+                                "filename": f"sard-{fmt}",
+                                "mime_type": "application/octet-stream",
+                                "size_bytes": 0,
+                                "status": "failed",
+                                "download_url": None,
+                                "url": "",
+                                "error": "تجاوز المهلة المحددة؛ تم إلغاء التوليد دون حفظ ملفات يتيمة.",
+                                "error_category": "timeout",
+                                "warnings": [],
+                                "preview": None,
+                                "checksum": None,
+                                "data": None,
+                            })
+                            continue
                     topic_str = getattr(intent, "canonical_topic", None) or getattr(intent, "extracted_topic", None) or user_query
+                    _emit("artifact_started", f"بدء توليد {str(fmt).upper()}..." if resolved_lang != "en" else f"Starting {str(fmt).upper()} generation...")
+                    _emit("render_started", str(fmt))
                     # Map format to orchestrator call
                     art_req = ArtifactRequest(
                         format=fmt,
@@ -350,11 +425,39 @@ class ChatService:
                         },
                     )
                     try:
-                        res = self.orchestrator.generate_artifact(art_req, deadline_monotonic=deadline_monotonic)
+                        res = self.orchestrator.generate_artifact(art_req, deadline=dl, cancel_event=cancel_event)
                         if res:
-                            local_artifacts.append(res.to_dict())
+                            _emit("verify_started", str(fmt))
+                            d = res.to_dict()
+                            local_artifacts.append(d)
+                            _emit("artifact_ready" if d.get("status") == "created" else "artifact_failed", str(fmt))
+                    except DeadlineCancelledError:
+                        raise
+                    except DeadlineTimeoutError as exc:
+                        logger.warning("Artifact orchestration timed out for format '%s': %s", fmt, exc)
+                        _emit("artifact_failed", str(fmt))
+                        local_artifacts.append({
+                            "id": f"art-failed-{fmt}",
+                            "kind": _format_to_kind(fmt),
+                            "format": fmt,
+                            "type": fmt,
+                            "title": f"مخرج ثقافي: {topic_str}",
+                            "filename": f"sard-{fmt}",
+                            "mime_type": "application/octet-stream",
+                            "size_bytes": 0,
+                            "status": "failed",
+                            "download_url": None,
+                            "url": "",
+                            "error": "تجاوز المهلة المحددة؛ تم إلغاء التوليد دون حفظ ملفات يتيمة.",
+                            "error_category": "timeout",
+                            "warnings": [],
+                            "preview": None,
+                            "checksum": None,
+                            "data": None,
+                        })
                     except Exception as exc:
                         logger.error("Artifact orchestration failed for format '%s': %s", fmt, exc)
+                        _emit("artifact_failed", str(fmt))
                         failed_res = ArtifactResult(
                             id=f"art-failed-{fmt}",
                             kind=_format_to_kind(fmt),
@@ -402,6 +505,7 @@ class ChatService:
 
             # 2. Run Retrieval & Provenance Planning
             try:
+                _emit("research_started", "جارٍ البحث في المعارف الموثقة..." if resolved_lang != "en" else "Searching verified knowledge...")
                 plan_res = self.ask_isnad(
                     user_query=user_query,
                     session_id=session_id,
@@ -409,6 +513,8 @@ class ChatService:
                     status_callback=status_callback,
                     lang=resolved_lang,
                     uploaded_files=uploaded_files,
+                    deadline=dl,
+                    cancel_event=cancel_event,
                 )
                 for ev in plan_res.visible_sources:
                     citations.append({
@@ -430,6 +536,10 @@ class ChatService:
                     text_resp = sanitize_cultural_output(plan_res.answer_ar or plan_res.answer_en or "")
                 decision = plan_res.chain.decision
             except Exception as exc:
+                # Typed cancellation always propagates (never swallowed into
+                # a fallback that would write late output after abort).
+                if isinstance(exc, DeadlineCancelledError) or _cancelled():
+                    raise DeadlineCancelledError(str(exc) or "cancelled", stage="ask_isnad") from exc
                 is_timeout = (
                     isinstance(exc, (concurrent.futures.TimeoutError, TimeoutError))
                     or "timeout" in str(exc).lower()
@@ -469,6 +579,18 @@ class ChatService:
             )
 
         # Direct conversation path — MUST also support artifact intent
+        if _cancelled():
+            raise DeadlineCancelledError("cancelled before direct invoke", stage="ask_direct")
+        if dl is not None:
+            try:
+                dl.check("ask_direct")
+            except DeadlineTimeoutError:
+                msg = (
+                    "Server response timeout: please try again later."
+                    if resolved_lang == "en"
+                    else "تعذّر استلام رد من النموذج بسبب تجاوز المهلة المحددة. يرجى المحاولة لاحقاً."
+                )
+                return ChatResult(ok=False, error_message=msg, artifacts=[])
         try:
             model = self._get_model()
         except ModelConfigError as exc:
@@ -524,6 +646,8 @@ class ChatService:
 
         except Exception as exc:
             logger.warning("Chat model direct invoke failed or timed out: %s", exc)
+            if isinstance(exc, DeadlineCancelledError) or _cancelled():
+                raise DeadlineCancelledError(str(exc) or "cancelled", stage="ask_direct") from exc
             is_timeout = (
                 isinstance(exc, (concurrent.futures.TimeoutError, TimeoutError))
                 or "timeout" in str(exc).lower()

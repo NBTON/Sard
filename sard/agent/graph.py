@@ -46,6 +46,12 @@ class GraphDependencies:
     ``rag_service`` is the public Step 3 ``RAGService`` interface; nodes never
     touch Zvec or provider SDKs directly.  ``model_service`` is the centralized
     agent model service (inject offline fakes for tests).
+
+    Workstream E (additive): ``deadline`` (a
+    :class:`sard.agent.deadline.Deadline` or float ``monotonic_end``) and
+    ``cancel_event`` (threading.Event, plumbed from the server cancel flag)
+    are polled before each node and before render/store so cancelled runs
+    write no late artifacts.
     """
 
     rag_service: Optional[Any] = None
@@ -58,6 +64,8 @@ class GraphDependencies:
     caller_dates: tuple[str, ...] = ()
     preview_calendar: bool = False
     compose_max_retries: int = 2
+    deadline: Optional[Any] = None
+    cancel_event: Optional[Any] = None
 
 
 def default_dependencies(open_rag: bool = False) -> GraphDependencies:
@@ -77,6 +85,61 @@ def _guard_node(name: str, fn: Callable, deps: GraphDependencies) -> Callable:
     def run(state: dict) -> dict:
         run = state.get("run_id") or ""
         start = time.monotonic()
+        # Workstream E: poll hierarchical deadline + server cancel flag
+        # before each node; a cancelled/expired run degrades to a typed
+        # node failure (no new stages, no late renders) instead of running.
+        try:
+            _cancel = getattr(deps, "cancel_event", None)
+            if _cancel is not None:
+                try:
+                    if _cancel.is_set():
+                        from sard.agent.deadline import DeadlineCancelledError as _DC
+
+                        raise _DC(f"cancelled before node '{name}'", stage=name)
+                except _DC:
+                    raise
+                except Exception:
+                    pass
+            _dl = getattr(deps, "deadline", None)
+            if _dl is not None:
+                try:
+                    from sard.agent.deadline import coerce_deadline as _coerce
+
+                    _dl_obj = _coerce(_dl, label=name)
+                    if _dl_obj is not None:
+                        _dl_obj.check(name)
+                except Exception:
+                    # coerce/check raises typed Timeout/Cancelled — let the
+                    # handler below convert to a typed node failure.
+                    raise
+        except Exception as exc:
+            kind = classify_failure_to_kind(exc)
+            duration_ms = (time.monotonic() - start) * 1000
+            return {
+                "errors": [
+                    make_error(
+                        run,
+                        name,
+                        kind,
+                        safe_chain_message(exc),
+                        kind not in NON_RETRYABLE_FAILURE_KINDS,
+                    )
+                ],
+                "node_failures": [name],
+                "progress_events": [
+                    make_event(
+                        EVENT_FAILED,
+                        run,
+                        name,
+                        "failed",
+                        summary=f"توقف {name}: انتهت المهلة أو أُلغي الطلب.",
+                        duration_ms=duration_ms,
+                        degraded=True,
+                    )
+                ],
+                "warnings": [f"توقف {name} بسبب انتهاء المهلة أو الإلغاء؛ حُفظ المتاح فقط."],
+                "timings": {f"{name}_node_ms": duration_ms},
+            }
         try:
             updates = fn(state, deps)
             duration_ms = (time.monotonic() - start) * 1000
@@ -150,11 +213,38 @@ def run_pipeline(
     *,
     caller_dates: Optional[list[str] | tuple[str, ...]] = None,
     preview_calendar: Optional[bool] = None,
+    deadline: Optional[Any] = None,
+    deadline_monotonic: Optional[Any] = None,
+    cancel_event: Optional[Any] = None,
 ) -> dict:
-    """Convenient runner: compile, seed state, invoke, return final state dict."""
+    """Convenient runner: compile, seed state, invoke, return final state dict.
+
+    Workstream E (additive): ``deadline`` / ``deadline_monotonic`` /
+    ``cancel_event`` are stored on a shallow copy of ``dependencies`` so
+    node guards poll them without changing node signatures.
+    """
     if not request or not request.strip():
         raise ValueError("request must be a non-empty string.")
     deps = dependencies or default_dependencies()
+    if deadline is not None or deadline_monotonic is not None or cancel_event is not None:
+        import dataclasses as _dc
+
+        try:
+            deps = _dc.replace(
+                deps,
+                deadline=deadline if deadline is not None else deadline_monotonic,
+                cancel_event=cancel_event if cancel_event is not None else getattr(deps, "cancel_event", None),
+            )
+        except Exception:
+            try:
+                deps.deadline = deadline if deadline is not None else deadline_monotonic
+            except Exception:
+                pass
+            try:
+                if cancel_event is not None:
+                    deps.cancel_event = cancel_event
+            except Exception:
+                pass
     graph = build_graph(deps)
     state = initial_state(
         request,

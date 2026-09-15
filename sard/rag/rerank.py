@@ -138,7 +138,8 @@ class RerankService:
                 "rerank",
                 nvidia_candidates,
                 call,
-                max_retries_per_candidate=max(1, self._settings.max_retries),
+                # Workstream E: one shot per candidate; embeddings keep 2.
+                max_retries_per_candidate=1,
                 circuit_breaker=self._breaker,
             )
             model_used = next(

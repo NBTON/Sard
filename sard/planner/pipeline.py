@@ -10,9 +10,11 @@ for UI status progression (waving 13-region strips).
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
+from sard.agent.deadline import DeadlineCancelledError, coerce_deadline
 from sard.memory import IsnadMemory
 from sard.planner.assemble_isnad import IsnadAssembler
 from sard.planner.classify import classify_request
@@ -47,8 +49,28 @@ class IsnadPlanner:
         status_callback: Optional[Callable[[str, str], None]] = None,
         lang: str = "ar",
         uploaded_files: Optional[Dict[str, Any]] = None,
+        deadline: Optional[Any] = None,
+        deadline_monotonic: Optional[Any] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> PlannerResult:
         """Synchronous execution of the Isnād planning loop."""
+        dl = coerce_deadline(deadline, cancel_event=cancel_event, label="planner")
+        if dl is None and deadline_monotonic is not None:
+            dl = coerce_deadline(deadline_monotonic, cancel_event=cancel_event, label="planner")
+        if dl is not None and cancel_event is None:
+            cancel_event = dl.cancel_event
+
+        def _gate(stage: str) -> None:
+            if cancel_event is not None:
+                try:
+                    if cancel_event.is_set():
+                        raise DeadlineCancelledError(f"cancelled at planner stage '{stage}'", stage=stage)
+                except DeadlineCancelledError:
+                    raise
+                except Exception:
+                    pass
+            if dl is not None:
+                dl.check(stage)
         # Scope guardrail first (do not let retrieval override confident out-of-scope)
         try:
             from sard.agent.scope_guard import check_scope_before_retrieval
@@ -86,6 +108,7 @@ class IsnadPlanner:
                 status_callback(stage, msg_ar)
 
         # Stage 1: Classify
+        _gate("classify")
         canvas.set_stage_status("classify", "running")
         _notify("classify", "جارٍ تصنيف الاستفسار وفحص المرفقات والوسائط...")
         classification, cls_conf = classify_request(query, has_media=bool(mock_multimodal_files or uploaded_files))
@@ -96,6 +119,7 @@ class IsnadPlanner:
         )
 
         # Stage 2: Locate
+        _gate("locate")
         canvas.set_stage_status("locate", "running")
         _notify("locate", "جارٍ تحديد المنطقة والسياق التراثي وهوية السائل...")
         location = locate_cultural_context(query)
@@ -113,6 +137,7 @@ class IsnadPlanner:
         )
 
         # Stage 3: Retrieve
+        _gate("retrieve")
         canvas.set_stage_status("retrieve", "running")
         _notify("retrieving", "جارٍ استرجاع الشواهد من موسوعة المعارف والوثائق المعتمدة...")
         evidence, logs = self.retriever.retrieve(
@@ -120,6 +145,8 @@ class IsnadPlanner:
             target_region=location.region,
             mock_multimodal_files=mock_multimodal_files,
             uploaded_files=uploaded_files,
+            deadline=dl,
+            cancel_event=cancel_event,
         )
         # Dialect/proverb weak-evidence filter: require lexical overlap, otherwise treat as no evidence to force clarification
         if classification == "dialect":
@@ -172,6 +199,7 @@ class IsnadPlanner:
         )
 
         # Stage 4: Assemble Isnād Chain
+        _gate("assemble_isnad")
         canvas.set_stage_status("assemble_isnad", "running")
         _notify("assembling_isnad", "جارٍ تجميع سلسلة الإسناد وتدقيق نسبة الشواهد...")
         chain = self.assembler.assemble(
@@ -189,6 +217,7 @@ class IsnadPlanner:
         )
 
         # Stage 5: Score Chain
+        _gate("score_chain")
         canvas.set_stage_status("score_chain", "running")
         _notify("scoring", "جارٍ احتساب درجة الإسناد وفحص موثوقية الأصول...")
         score = score_isnad_chain(chain)
@@ -200,6 +229,7 @@ class IsnadPlanner:
         )
 
         # Stage 6: Decide
+        _gate("decide")
         canvas.set_stage_status("decide", "running")
         _notify("deciding", "جارٍ اتخاذ القرار التوثيقي (توليد / تحوط / رفض)...")
         decision, reason = decide_action(chain, query_text=query)
@@ -211,6 +241,7 @@ class IsnadPlanner:
         )
 
         # Stage 7: Generate
+        _gate("generate")
         canvas.set_stage_status("generate", "running")
         _notify("generating", "جارٍ صياغة الرواية المعتمدة مع إظهار الإسناد والمصادر...")
         result = generate_isnad_response(

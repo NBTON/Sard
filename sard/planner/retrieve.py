@@ -97,13 +97,38 @@ class GroundedRetriever:
         mock_multimodal_files: Optional[Dict[str, Any]] = None,
         allow_web_search: bool = True,
         uploaded_files: Optional[Dict[str, Any]] = None,
+        deadline: Optional[Any] = None,
+        deadline_monotonic: Optional[Any] = None,
+        cancel_event: Optional[Any] = None,
     ) -> Tuple[List[Evidence], List[str]]:
         """Retrieve evidence across RAG, Web, and Multimodal extractors."""
+        from sard.agent.deadline import DeadlineCancelledError as _Cancelled
+        from sard.agent.deadline import coerce_deadline as _coerce
+
+        dl = _coerce(deadline, cancel_event=cancel_event, label="retrieve")
+        if dl is None and deadline_monotonic is not None:
+            dl = _coerce(deadline_monotonic, cancel_event=cancel_event, label="retrieve")
+        if dl is not None and cancel_event is None:
+            cancel_event = dl.cancel_event
+
+        def _gate(stage: str) -> None:
+            if cancel_event is not None:
+                try:
+                    if cancel_event.is_set():
+                        raise _Cancelled(f"cancelled at retrieval stage '{stage}'", stage=stage)
+                except _Cancelled:
+                    raise
+                except Exception:
+                    pass
+            if dl is not None:
+                dl.check(stage)
+
         evidence_list: List[Evidence] = []
         retrieval_logs: List[str] = []
 
         # 1. Multimodal media inspection (real uploaded paths go to the real
         # extractor, never served from mock canned text).
+        _gate("retrieve:multimodal")
         media_items = self.multimodal_extract(
             query,
             mock_files=mock_multimodal_files,
@@ -133,6 +158,7 @@ class GroundedRetriever:
             retrieval_logs.append(f"تم فحص المرفق {m.filename} وتوثيقه بسند {ev.source_id}")
 
         # 2. Curated RAG Search
+        _gate("retrieve:rag")
         rag_hits = self.rag_search(query, 5)
         for h in rag_hits:
             meta = h.get("metadata") or {}
@@ -163,6 +189,13 @@ class GroundedRetriever:
         # through the research router even when RAG hits exist; otherwise web
         # is invoked only if RAG hits are completely empty.
         needs_fresh = is_time_sensitive_query(query)
+        # Workstream E: never start the slow web leg on a doomed budget —
+        # preserve the reserve for terminal SSE work instead.
+        if dl is not None:
+            try:
+                dl.check("retrieve:web")
+            except Exception:
+                allow_web_search = False
         if allow_web_search and (len(rag_hits) == 0 or needs_fresh):
             try:
                 web_hits = self.parallel_search(
