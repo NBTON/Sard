@@ -137,3 +137,12 @@ left no worktree checkouts under `.herdr/worktrees/Sard_Agent` — no output to 
 - Live proof after restart: chat created art-d301d109982f; `/api/artifacts/revise` 200 created;
   versions count=2; v1 bytes intact; v2 new. E2E evidence: desktop-after-gen.png (workspace),
   ui-download.txt (64 B real bytes), chat_raw.txt (SSE progress + done 91 ms).
+
+## 12. Final integration and release gates
+
+- `origin/main` @ `3c9d738` was merged into `work/release-integration` as `0ac8be9`; cultural proposal, relevance, and offline-serving changes were retained alongside artifact deadlines, revision storage, and renderer fixes.
+- Final integration fixes committed as `516d69d`: restored session-scoped follow-up retrieval, planner evidence filtering, typed organization proposals over SSE, medical qualification, fail-closed product rendering, uncertainty-only fallback text, and unconstrained web dedup compatibility.
+- Python: `uv run pytest -q` passed with exit code 0; `uv run ruff check sard/ tests/` passed with exit code 0.
+- Frontend: `npm run lint`, `npm run typecheck`, `npm run build`, and `npm test` passed; Node suite 11/11.
+- Release tree is clean. Primary checkout-only `.claude-flow` runtime state, `.swarm/hnsw.index`, `.zed/`, and `pyrightconfig.json` were not included.
+- Publish target: tested `work/release-integration` HEAD `516d69d` to `origin/main`.
