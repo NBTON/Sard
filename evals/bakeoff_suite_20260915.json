@@ -1,0 +1,174 @@
+{
+  "bakeoff": "sard-arabic-artifact-bakeoff",
+  "budget_notes": "Short prompts only. Default max_tokens 220 (long-form 400, long-context input ~3-4k tokens but output capped 300). Per-model per-task timeout 30s, single attempt, no retries. Temperature 0.2 to match Sard prod. Exclude TTS/music/code-only models from Arabic composition tasks.",
+  "excluded_from_arabic_composition": [
+    "google/lyria-3-pro-preview",
+    "google/lyria-3-clip-preview",
+    "cohere/north-mini-code:free",
+    "poolside/laguna-s-2.1:free",
+    "poolside/laguna-xs-2.1:free",
+    "nvidia/nemotron-3.5-content-safety:free"
+  ],
+  "global_params": {
+    "max_tokens_default": 220,
+    "temperature": 0.2,
+    "timeout_s": 30
+  },
+  "scoring_axes": {
+    "arabic_fluency_fidelity": "0-2: 0 broken/mixed, 1 fluent with minor MSA slips, 2 fluent MSA, Saudi-aware, no fabrication beyond prompt",
+    "citation_obedience": "0-2: 0 fabricates CIT-/URLs, 1 hedges but leaks, 2 abstains-or-grounds correctly, drops unknown CIT-",
+    "failure_rate": "Share of empty/timeout/malformed per model across 11 tasks (lower is better)",
+    "json_reliability": "0-2: 0 unparseable, 1 parseable after repair, 2 first-pass parse + schema-valid",
+    "latency_s": "Wall-clock per call (median across tasks); gate: p50 <= 30s, fail = timeout",
+    "markdown_structure": "0-2: 0 wall of text, 1 headings/lists present, 2 clean headings+lists+no HTML breaks",
+    "tables": "0-2: 0 no/broken table, 1 table present with minor alignment issues, 2 valid GFM table, correct columns"
+  },
+  "tasks": [
+    {
+      "gen": {
+        "max_tokens": 200
+      },
+      "id": "T1-arabic-factual",
+      "prompt_ar": "ما هي واحة الأحساء ولماذا هي مهمة ثقافياً؟ أجب في 4-6 جمل بالعربية الفصحى دون اختلاق أسماء أو تواريخ.",
+      "scored_axes": [
+        "arabic_fluency_fidelity",
+        "citation_obedience",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 220
+      },
+      "id": "T2-cultural-explanation",
+      "prompt_ar": "اشرح باختصار حرفة تجفيف الروبيان في تاروت: ما هي خطواتها العامة؟ لا تخترع أسماء أشخاص أو إحصاءات.",
+      "scored_axes": [
+        "arabic_fluency_fidelity",
+        "citation_obedience",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 400
+      },
+      "id": "T3-longform-report",
+      "prompt_ar": "اكتب تقريراً قصيراً (مقدمة + 3 عناوين فرعية + خاتمة) عن حي الطريف في الدرعية، بالعربية، دون ادعاء مصادر.",
+      "scored_axes": [
+        "arabic_fluency_fidelity",
+        "markdown_structure",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 300
+      },
+      "id": "T4-itinerary",
+      "prompt_ar": "اقترح برنامجاً سياحياً لمدة يومين في المنطقة الشرقية (اليوم 1: الأحساء، اليوم 2: القطيف) بنقاط موجزة. لا تخترع أسعاراً أو مواعيد.",
+      "scored_axes": [
+        "arabic_fluency_fidelity",
+        "markdown_structure",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 220
+      },
+      "id": "T5-bilingual",
+      "prompt_ar": "Translate the following to natural English, then add one Arabic summary sentence. Text: «تُعد الدرعية مهد الدولة السعودية الأولى».",
+      "scored_axes": [
+        "arabic_fluency_fidelity",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 220
+      },
+      "id": "T6-table",
+      "prompt_ar": "أنشئ جدول ماركداون من 3 أعمدة (الموقع | المنطقة | ملاحظة) لثلاثة مواقع: الدرعية، العلا، جدة التاريخية. دون اختلاق تواريخ دقيقة.",
+      "scored_axes": [
+        "tables",
+        "markdown_structure",
+        "arabic_fluency_fidelity",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 250
+      },
+      "id": "T7-citation-heavy",
+      "prompt_ar": "أجب عن: ما المواقع السعودية في قائمة اليونسكو؟ القاعدة: إن لم تكن متأكداً من مصدر، قل «يحتاج توثيقاً» ولا تخترع روابط أو وسوم [CIT-].",
+      "scored_axes": [
+        "citation_obedience",
+        "arabic_fluency_fidelity",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 200,
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "id": "T8-structured-json",
+      "prompt_ar": "أخرج JSON فقط بالمخطط: {\"topic\": string, \"region\": string, \"days\": number, \"stops\": string[2]}. الموضوع: برنامج يومين في الشرقية.",
+      "scored_axes": [
+        "json_reliability",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 150
+      },
+      "id": "T9-query-rewrite",
+      "prompt_ar": "أعد كتابة الاستعلام التالي إلى متغيرين بحثيين قصيرين بالعربية (سطر لكل متغير): «تجفيف الروبيان في تاروت».",
+      "scored_axes": [
+        "arabic_fluency_fidelity",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 200
+      },
+      "id": "T10-fact-verification",
+      "prompt_ar": "تحقق: «واحة الأحساء مدرجة في اليونسكو منذ 2018». أجب: صحيحة/تحتاج توثيقاً/غير صحيحة، مع جملة تعليل واحدة دون روابط مختلقة.",
+      "scored_axes": [
+        "citation_obedience",
+        "arabic_fluency_fidelity",
+        "latency_s",
+        "failure_rate"
+      ]
+    },
+    {
+      "gen": {
+        "max_tokens": 300
+      },
+      "id": "T11-longcontext-synthesis",
+      "prompt_ar": "لخّص المقاطع الثلاثة التالية في 5 نقاط عربية دون إضافة حقائق جديدة. [مقطع1: الطريف عمارة نجدية] [مقطع2: العلا مدافن لحيانية] [مقطع3: جدة التاريخية رواشين]. (المدخلات ملصقة حرفياً في المشغّل؛ المخرج ≤300 توكن).",
+      "scored_axes": [
+        "arabic_fluency_fidelity",
+        "markdown_structure",
+        "citation_obedience",
+        "latency_s",
+        "failure_rate"
+      ]
+    }
+  ],
+  "version": "20260915"
+}
