@@ -40,6 +40,42 @@ FONT_HEADING = "Noto Naskh Arabic"
 FONT_BODY = "IBM Plex Sans Arabic"
 FONT_FALLBACK = "Arial"
 
+# Pagination caps (layout, not content caps): at most this many items per
+# slide; overflow auto-paginates into "(تابع)" continuation slides.  Content
+# is NEVER dropped to fit — it continues.  Minimum readable body size is
+# Pt(13); renderers must paginate instead of shrinking text below it.
+MAX_CARDS_PER_SLIDE = 3
+MAX_TIMELINE_PER_SLIDE = 4
+MAX_BULLETS_PER_SLIDE = 6
+MAX_CHARS_PER_SLIDE = 900
+MIN_BODY_PT = 13
+
+
+class DeckBuildError(ValueError):
+    """Raised when a deck has no real content; renderers fail visibly instead
+    of hallucinating filler bullets, summaries, or quotes."""
+
+
+def _chunk_items(items: list, size: int) -> list[list]:
+    return [items[i : i + size] for i in range(0, len(items), size)] or [[]]
+
+
+def _chunk_paragraphs(paragraphs: list[str], max_chars: int = MAX_CHARS_PER_SLIDE) -> list[list[str]]:
+    """Split long body text across slides by character budget, never dropping text."""
+
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for para in paragraphs:
+        if current and current_len + len(para) > max_chars:
+            chunks.append(current)
+            current, current_len = [], 0
+        current.append(para)
+        current_len += len(para)
+    if current:
+        chunks.append(current)
+    return chunks or [[]]
+
 
 def _set_paragraph_rtl(paragraph) -> None:
     """Set base direction RTL + complex-script typeface for Arabic paragraphs.
@@ -94,13 +130,14 @@ class TimelineItem:
 @dataclass
 class SlideContent:
     """Represents the semantic content of a single slide."""
-    slide_type: str  # title, briefing, comparison, timeline, key_points, summary
+    slide_type: str  # title, briefing, content, section, comparison, timeline, table, image, sources, key_points, summary
     title: str
     subtitle: str = ""
     body_paragraphs: List[str] = field(default_factory=list)
     bullets: List[str] = field(default_factory=list)
     cards: List[SlideCard] = field(default_factory=list)
     timeline: List[TimelineItem] = field(default_factory=list)
+    table_rows: List[List[str]] = field(default_factory=list)
     quote: str = ""
     quote_author: str = ""
     footer_text: str = "سرد — المستشار الثقافي للمملكة العربية السعودية"
@@ -159,6 +196,10 @@ class PresentationGenerator:
                 )
             ]
 
+        # Auto-paginate: overflow content continues on "(تابع)" slides instead
+        # of being silently capped (previous cards[:3]/timeline[:4] behavior).
+        slides = self._expand_pagination(slides)
+
         for slide_data in slides:
             slide = prs.slides.add_slide(blank_slide_layout)
             self._render_slide(prs, slide, slide_data, deck)
@@ -166,6 +207,43 @@ class PresentationGenerator:
         stream = io.BytesIO()
         prs.save(stream)
         return stream.getvalue()
+
+    def _expand_pagination(self, slides: list) -> list:
+        """Expand over-cap slides into continuation slides; never drop content."""
+
+        from dataclasses import replace
+
+        expanded: list = []
+        for slide_data in slides:
+            if slide_data.slide_type == "comparison" and len(slide_data.cards) > MAX_CARDS_PER_SLIDE:
+                for idx, chunk in enumerate(_chunk_items(list(slide_data.cards), MAX_CARDS_PER_SLIDE)):
+                    title = slide_data.title if idx == 0 else f"{slide_data.title} (تابع)"
+                    expanded.append(replace(slide_data, title=title, cards=chunk))
+            elif slide_data.slide_type == "timeline" and len(slide_data.timeline) > MAX_TIMELINE_PER_SLIDE:
+                for idx, chunk in enumerate(_chunk_items(list(slide_data.timeline), MAX_TIMELINE_PER_SLIDE)):
+                    title = slide_data.title if idx == 0 else f"{slide_data.title} (تابع)"
+                    expanded.append(replace(slide_data, title=title, timeline=chunk))
+            elif slide_data.slide_type in {"briefing", "summary", "content"} and (
+                len(slide_data.bullets) > MAX_BULLETS_PER_SLIDE
+                or sum(len(p) for p in slide_data.body_paragraphs) > MAX_CHARS_PER_SLIDE
+            ):
+                bullet_chunks = _chunk_items(list(slide_data.bullets), MAX_BULLETS_PER_SLIDE) or [[]]
+                para_chunks = _chunk_paragraphs(list(slide_data.body_paragraphs)) or [[]]
+                # Zip chunks: first slide keeps body+bullets head, rest continue.
+                total = max(len(bullet_chunks), len(para_chunks))
+                for idx in range(total):
+                    chunk_bullets = bullet_chunks[idx] if idx < len(bullet_chunks) else []
+                    chunk_paras = para_chunks[idx] if idx < len(para_chunks) else []
+                    if idx > 0 and not chunk_bullets and not chunk_paras:
+                        continue
+                    title = slide_data.title if idx == 0 else f"{slide_data.title} (تابع)"
+                    quote = slide_data.quote if idx == total - 1 else ""
+                    expanded.append(
+                        replace(slide_data, title=title, bullets=chunk_bullets, body_paragraphs=chunk_paras, quote=quote)
+                    )
+            else:
+                expanded.append(slide_data)
+        return expanded
 
     def _set_background(self, slide, color: RGBColor = COLOR_PAPER):
         """Sets a full-slide solid background shape."""
@@ -177,6 +255,129 @@ class PresentationGenerator:
         bg.line.fill.background()
         return bg
 
+    def build_from_document(self, doc) -> bytes:
+        """Build a deck from a canonical ArtifactDocument (artifact agent shape).
+
+        Mapping: title slide (metadata title/topic) -> one briefing slide per
+        section (paragraphs + bullets, auto-paginated) -> table slides for
+        table blocks -> image slides for local image blocks -> sources slide.
+        Long content summarizes nothing away: it continues on "(تابع)" slides.
+        """
+
+        from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+
+        if not isinstance(doc, _ArtifactDocument):
+            raise DeckBuildError("build_from_document requires an ArtifactDocument.")
+        meta = doc.metadata
+        title = (meta.title or "").strip()
+        topic = (meta.topic or "").strip()
+        if not title:
+            raise DeckBuildError("Artifact title is required.")
+        if not topic and not doc.sections:
+            raise DeckBuildError("Artifact content is missing; refusing to render filler.")
+        deck = PresentationDeck(title=title, topic=topic or title, region=meta.region)
+        deck.slides.append(
+            SlideContent(slide_type="title", title=title, subtitle=topic if topic != title else "")
+        )
+        for section in doc.sections:
+            paras: list[str] = []
+            bullets: list[str] = []
+            tables: list[list[list[str]]] = []
+            images: list[str] = []
+            quote = ""
+            for block in section.blocks:
+                btype = str(getattr(block, "block_type", "") or "").lower()
+                text = (getattr(block, "text", "") or "").strip()
+                data = getattr(block, "data", None)
+                data = data if isinstance(data, dict) else {}
+                if btype == "heading":
+                    if paras or bullets:
+                        deck.slides.append(
+                            SlideContent(
+                                slide_type="briefing",
+                                title=section.title or title,
+                                body_paragraphs=paras,
+                                bullets=bullets,
+                                region_badge=meta.region,
+                            )
+                        )
+                        paras, bullets = [], []
+                    deck.slides.append(
+                        SlideContent(
+                            slide_type="briefing",
+                            title=text or section.title,
+                            region_badge=meta.region,
+                        )
+                    )
+                elif btype in {"bullet", "item", "point", "takeaway"}:
+                    if text:
+                        bullets.append(text)
+                elif btype == "quote":
+                    quote = text or quote
+                elif btype in {"table", "table_row", "row"}:
+                    rows = data.get("rows") or data.get("table_data") or data.get("table")
+                    if isinstance(rows, (list, tuple)) and rows:
+                        tables.append([[str(c or "") for c in r] if isinstance(r, (list, tuple)) else [str(r)] for r in rows])
+                    elif text:
+                        paras.append(text)
+                elif btype in {"image", "diagram"}:
+                    src = str(data.get("src") or data.get("url") or "").strip()
+                    if src:
+                        images.append(src)
+                    elif text:
+                        paras.append(text)
+                elif btype == "attachment":
+                    continue
+                elif text:
+                    paras.append(text)
+            if paras or bullets or quote:
+                deck.slides.append(
+                    SlideContent(
+                        slide_type="briefing",
+                        title=section.title or title,
+                        body_paragraphs=paras,
+                        bullets=bullets,
+                        quote=quote,
+                        region_badge=meta.region,
+                    )
+                )
+            for table_rows in tables:
+                deck.slides.append(
+                    SlideContent(
+                        slide_type="table",
+                        title=section.title or title,
+                        body_paragraphs=[],
+                        bullets=[],
+                        region_badge=meta.region,
+                    )
+                )
+                deck.slides[-1].cards = []
+                deck.slides[-1].table_rows = table_rows
+            for src in images:
+                deck.slides.append(
+                    SlideContent(
+                        slide_type="image",
+                        title=section.title or title,
+                        body_paragraphs=[src],
+                        region_badge=meta.region,
+                    )
+                )
+        if doc.sources:
+            deck.slides.append(
+                SlideContent(
+                    slide_type="sources",
+                    title="المراجع والتوثيق",
+                    bullets=[
+                        f"[{s.citation_id}] {s.title}" + (f" — {s.url}" if s.url else "")
+                        for s in doc.sources
+                    ],
+                    region_badge=meta.region,
+                )
+            )
+        if len(deck.slides) <= 1:
+            raise DeckBuildError("Artifact content is missing; refusing to render filler.")
+        return self.build_pptx(deck)
+
     def _render_slide(self, prs, slide, data: SlideContent, deck: PresentationDeck):
         if data.slide_type == "title":
             self._set_background(slide, COLOR_INK)
@@ -187,6 +388,15 @@ class PresentationGenerator:
         elif data.slide_type == "timeline":
             self._set_background(slide, COLOR_PAPER)
             self._render_timeline_slide(slide, data)
+        elif data.slide_type == "table":
+            self._set_background(slide, COLOR_PAPER)
+            self._render_table_slide(slide, data)
+        elif data.slide_type == "image":
+            self._set_background(slide, COLOR_PAPER)
+            self._render_image_slide(slide, data)
+        elif data.slide_type == "sources":
+            self._set_background(slide, COLOR_PAPER_2)
+            self._render_sources_slide(slide, data)
         elif data.slide_type == "summary":
             self._set_background(slide, COLOR_PAPER_2)
             self._render_summary_slide(slide, data)
@@ -317,13 +527,14 @@ class PresentationGenerator:
         self._add_slide_header(slide, data.title, data.region_badge or "مقارنة تراثية")
 
         cards = data.cards or []
-        num_cards = max(1, min(len(cards), 3))
+        # Pagination is handled upstream (_expand_pagination); render all cards given.
+        num_cards = max(1, len(cards))
         gap = Inches(0.4)
         total_width = Inches(11.733)
         card_width = (total_width - (gap * (num_cards - 1))) / num_cards
         start_x = Inches(0.8)
 
-        for idx, card in enumerate(cards[:3]):
+        for idx, card in enumerate(cards):
             x = start_x + (idx * (card_width + gap))
             y = Inches(1.8)
             h = Inches(4.8)
@@ -386,7 +597,8 @@ class PresentationGenerator:
         self._add_slide_header(slide, data.title, data.region_badge or "تسلسل تاريخي")
 
         timeline = data.timeline or []
-        num_steps = max(1, min(len(timeline), 4))
+        # Pagination is handled upstream (_expand_pagination); render all items given.
+        num_steps = max(1, len(timeline))
         step_width = Inches(11.733) / num_steps
         start_x = Inches(0.8)
 
@@ -397,7 +609,7 @@ class PresentationGenerator:
         line.fill.fore_color.rgb = COLOR_GOLD
         line.line.fill.background()
 
-        for idx, item in enumerate(timeline[:4]):
+        for idx, item in enumerate(timeline):
             x = start_x + (idx * step_width)
 
             circle = slide.shapes.add_shape(
@@ -451,6 +663,75 @@ class PresentationGenerator:
                 r_dd.font.size = Pt(13)
                 r_dd.font.color.rgb = COLOR_INK
 
+        self._add_slide_footer(slide, data.footer_text)
+
+    def _render_table_slide(self, slide, data: SlideContent):
+        """Renders an RTL data table slide (logical-first column rightmost)."""
+
+        self._add_slide_header(slide, data.title, data.region_badge or "جدول")
+        rows = [list(r) for r in (data.table_rows or []) if r]
+        if not rows:
+            raise DeckBuildError(f"Table slide '{data.title}' has no rows; refusing filler.")
+        width = max(len(r) for r in rows)
+        normalized = [r + [""] * (width - len(r)) for r in rows]
+        rtl_rows = [list(reversed(r)) for r in normalized][:12]
+        left, top = Inches(0.8), Inches(1.8)
+        table_width, table_height = Inches(11.733), Inches(4.6)
+        shape = slide.shapes.add_table(len(rtl_rows), width, left, top, table_width, table_height)
+        table = shape.table
+        for row_idx, row in enumerate(rtl_rows):
+            for col_idx, cell_text in enumerate(row):
+                cell = table.cell(row_idx, col_idx)
+                cell.text = ""
+                para = cell.text_frame.paragraphs[0]
+                _set_paragraph_rtl(para)
+                run = para.add_run()
+                run.text = cell_text
+                run.font.name = FONT_BODY
+                run.font.size = Pt(14 if row_idx == 0 else MIN_BODY_PT)
+                run.font.bold = row_idx == 0
+                run.font.color.rgb = COLOR_DATE if row_idx == 0 else COLOR_INK
+                if row_idx == 0:
+                    cell.fill.solid()
+                    cell.fill.fore_color.rgb = COLOR_PAPER_2
+        self._add_slide_footer(slide, data.footer_text)
+
+    def _render_image_slide(self, slide, data: SlideContent):
+        """Renders a full-bleed-ish image slide; fails visibly when missing."""
+
+        from pathlib import Path as _Path
+
+        self._add_slide_header(slide, data.title, data.region_badge or "صورة")
+        src = (data.body_paragraphs[0] if data.body_paragraphs else "").strip()
+        candidate = _Path(src)
+        if not src or not candidate.is_file():
+            raise DeckBuildError(f"Image slide '{data.title}' has no readable image; refusing filler.")
+        try:
+            slide.shapes.add_picture(str(candidate), Inches(1.5), Inches(1.8), width=Inches(10.333), height=Inches(4.6))
+        except Exception as exc:
+            raise DeckBuildError(f"Image slide '{data.title}' could not embed image.") from exc
+        self._add_slide_footer(slide, data.footer_text)
+
+    def _render_sources_slide(self, slide, data: SlideContent):
+        """Renders the bibliography slide from caller-supplied sources only."""
+
+        self._add_slide_header(slide, data.title, "المراجع")
+        if not data.bullets:
+            raise DeckBuildError("Sources slide has no sources; refusing filler.")
+        box = slide.shapes.add_textbox(Inches(0.8), Inches(1.8), Inches(11.733), Inches(4.8))
+        tf = box.text_frame
+        tf.word_wrap = True
+        first = True
+        for source in data.bullets:
+            para = tf.paragraphs[0] if first else tf.add_paragraph()
+            first = False
+            _set_paragraph_rtl(para)
+            para.space_after = Pt(6)
+            run = para.add_run()
+            run.text = source
+            run.font.name = FONT_BODY
+            run.font.size = Pt(13)
+            run.font.color.rgb = COLOR_MUTED
         self._add_slide_footer(slide, data.footer_text)
 
     def _render_summary_slide(self, slide, data: SlideContent):
@@ -565,15 +846,27 @@ def create_cultural_briefing_deck(
     topic: str,
     region: str = "المملكة العربية السعودية",
     overview_text: str = "",
+    overview_bullets: Optional[List[str]] = None,
     comparison_cards: Optional[List[Dict[str, Any]]] = None,
     timeline_items: Optional[List[Dict[str, Any]]] = None,
     key_takeaways: Optional[List[str]] = None,
     quote: str = "",
+    quote_author: str = "",
 ) -> PresentationDeck:
-    """Creates a complete multi-slide cultural briefing presentation deck."""
+    """Creates a cultural briefing deck from caller-supplied content ONLY.
+
+    No filler is invented: overview bullets default to [] (not hallucinated
+    heritage claims), the summary slide is emitted only when ``key_takeaways``
+    are supplied, and ``quote`` renders only when provided.  Raises
+    :class:`DeckBuildError` when there is nothing real to render.
+    """
+
+    clean_topic = (topic or "").strip()
+    if not clean_topic:
+        raise DeckBuildError("Deck topic is required; refusing to render filler.")
     deck = PresentationDeck(
-        title=f"الإيجاز الثقافي: {topic}",
-        topic=topic,
+        title=f"الإيجاز الثقافي: {clean_topic}",
+        topic=clean_topic,
         region=region,
     )
 
@@ -581,30 +874,38 @@ def create_cultural_briefing_deck(
     deck.slides.append(
         SlideContent(
             slide_type="title",
-            title=topic,
-            subtitle=f"إيجاز توثيقي شامل حول التراث والأصالة في {region}",
+            title=clean_topic,
+            subtitle=f"إيجاز توثيقي حول {clean_topic} في {region}" if overview_text else "",
             region_badge=region,
         )
     )
 
-    # 2. Overview Slide
-    overview_bullets = [
-        f"استعراض شامل للجذور التاريخية والمعالم الثقافية في {region}.",
-        "توثيق العادات والتقاليد المتوارثة عبر الأجيال وصيانتها.",
-        "التوافق مع أحدث معايير هيئة التراث ووزارة الثقافة السعودية.",
-    ]
-    deck.slides.append(
-        SlideContent(
-            slide_type="briefing",
-            title=f"مدخل إلى {topic}",
-            body_paragraphs=[overview_text] if overview_text else [
-                f"يمثل «{topic}» ركيزة أساسية من ركائز الهوية الثقافية السعودية التي تعكس عمق التاريخ وتنوع البيئات والمناطق."
-            ],
-            bullets=overview_bullets,
-            quote=quote,
-            region_badge=region,
-        )
+    has_content = bool(
+        overview_text.strip()
+        or (overview_bullets or [])
+        or (comparison_cards or [])
+        or (timeline_items or [])
+        or (key_takeaways or [])
+        or quote.strip()
     )
+    if not has_content:
+        raise DeckBuildError(
+            "Deck has no content (overview, cards, timeline, takeaways, quote); refusing filler."
+        )
+
+    # 2. Overview Slide (caller content only)
+    if overview_text.strip() or (overview_bullets or []):
+        deck.slides.append(
+            SlideContent(
+                slide_type="briefing",
+                title=f"مدخل إلى {clean_topic}",
+                body_paragraphs=[overview_text.strip()] if overview_text.strip() else [],
+                bullets=[b for b in (overview_bullets or []) if str(b or "").strip()],
+                quote=quote.strip(),
+                quote_author=quote_author,
+                region_badge=region,
+            )
+        )
 
     # 3. Comparative Analysis Slide (if provided)
     if comparison_cards:
@@ -649,20 +950,15 @@ def create_cultural_briefing_deck(
             )
         )
 
-    # 5. Summary / Takeaways Slide
-    summary_bullets = key_takeaways or [
-        f"أهمية صون عناصر {topic} ونقلها للأجيال القادمة كرمز للأصالة.",
-        "الارتباط الوثيق بين البيئة الطبيعية والابتكار الإنساني في المملكة.",
-        "الاستناد إلى المراجع المعتمدة (دارة الملك عبد العزيز، هيئة التراث، وزارة الثقافة).",
-    ]
-    deck.slides.append(
-        SlideContent(
-            slide_type="summary",
-            title="الخلاصة والتوصيات التراثية",
-            bullets=summary_bullets,
-            quote="تراثنا هويتنا، وأصالتنا جسر نحو المستقبل.",
-            region_badge=region,
+    # 5. Summary / Takeaways Slide (caller takeaways only; no invented bullets/quote)
+    if key_takeaways:
+        deck.slides.append(
+            SlideContent(
+                slide_type="summary",
+                title="الخلاصة والتوصيات",
+                bullets=[t for t in key_takeaways if str(t or "").strip()],
+                region_badge=region,
+            )
         )
-    )
 
     return deck
