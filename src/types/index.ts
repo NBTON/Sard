@@ -21,6 +21,11 @@ export interface ArtifactVersion {
   status?: ArtifactStatus;
   created_at?: number;
   checksum?: string | null;
+  title?: string;
+  filename?: string;
+  format?: string;
+  html?: string | null;
+  size_bytes?: number;
 }
 
 /** Canonical preview payload. Accepts `to_preview` / `html` / `card_data` legacy aliases. */
@@ -183,8 +188,104 @@ export function artifactHtml(preview: ArtifactPreview | undefined): string | nul
   if (typeof preview === "string") return preview;
   const html =
     asNonEmptyString((preview as any).html) ??
-    asNonEmptyString((preview as any).to_preview);
-  return html;
+    asNonEmptyString((preview as any).to_preview) ??
+    asNonEmptyString((preview as any).raw_html) ??
+    asNonEmptyString((preview as any).content);
+  if (html) return html;
+  const text = asNonEmptyString((preview as any).text);
+  if (text && (/<(!DOCTYPE|html|head|body|div|article|section)[\s>]/i.test(text))) {
+    return text;
+  }
+  return null;
+}
+
+/** Shared ArtifactDocument CSS tokens — also injected into the preview iframe. */
+export const ARTIFACT_DOC_CSS = `
+:root{--sard-paper:#FAF7F1;--sard-ink:#141210;--sard-gold:#C4A46A;--sard-clay:#BE4A24;--sard-sage:#4A513C;}
+body{background:var(--sard-paper);color:var(--sard-ink);font-family:'Noto Naskh Arabic','IBM Plex Sans Arabic',serif;line-height:1.85;margin:0;padding:24px;}
+h1,h2,h3{color:var(--sard-ink);}a{color:var(--sard-clay);}
+.sard-card{background:#fff;border:1px solid #E0D8C8;border-radius:14px;padding:18px;margin:12px 0;}
+.sard-badge{display:inline-block;background:var(--sard-ink);color:var(--sard-paper);border-radius:6px;padding:2px 8px;font-size:12px;}
+table{border-collapse:collapse;width:100%;}th,td{border:1px solid #D4CBBD;padding:8px 12px;text-align:start;}
+blockquote{border-inline-start:3px solid var(--sard-gold);background:#F3EEE4;border-radius:8px;padding:8px 14px;margin:12px 0;}
+`;
+
+/** Construct iframe srcDoc safely without nested <html> / <!DOCTYPE> tags. */
+export function buildArtifactSrcDoc(html: string, dir: "rtl" | "ltr" = "rtl"): string {
+  if (!html) return "";
+  const isFullDoc = /<!DOCTYPE\s+html/i.test(html) || /<html[\s>]/i.test(html);
+  if (isFullDoc) {
+    let doc = html;
+    if (!/<html[^>]*\sdir=/i.test(doc)) {
+      doc = doc.replace(/<html([^>]*)>/i, `<html$1 dir="${dir}">`);
+    }
+    const styleTag = `<style>${ARTIFACT_DOC_CSS}</style>`;
+    if (/<head[^>]*>/i.test(doc)) {
+      return doc.replace(/<head([^>]*)>/i, `<head$1>${styleTag}`);
+    } else if (/<body[^>]*>/i.test(doc)) {
+      return doc.replace(/<body([^>]*)>/i, `<head>${styleTag}</head><body$1>`);
+    }
+    return `${styleTag}${doc}`;
+  }
+  return `<!DOCTYPE html><html dir="${dir}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${ARTIFACT_DOC_CSS}</style></head><body>${html}</body></html>`;
+}
+
+export interface CalendarEventFields {
+  title: string;
+  start: string;
+  end: string;
+  location: string;
+  description: string;
+  googleCalendarUrl?: string;
+}
+
+export function resolveCalendarEvent(ev: any, fallbackTitle = "مخرج ثقافي"): CalendarEventFields {
+  if (!ev || typeof ev !== "object") {
+    return { title: fallbackTitle, start: "", end: "", location: "", description: "" };
+  }
+  const title =
+    pickFirstString(ev.title_ar, ev.title_en, ev.summary, ev.title, ev.name) || fallbackTitle;
+  const start = pickFirstString(ev.start_date, ev.start, ev.datetime, ev.date) || "";
+  const end = pickFirstString(ev.end_date, ev.end) || "";
+  const location = pickFirstString(ev.location_name, ev.location, ev.venue, ev.place) || "";
+  const description = pickFirstString(ev.description_ar, ev.description_en, ev.description, ev.details) || "";
+  const googleCalendarUrl = pickFirstString(ev.google_calendar_url, ev.google_cal_url) || undefined;
+  return { title, start, end, location, description, googleCalendarUrl };
+}
+
+export function buildGoogleCalendarUrl(ev: any, fallbackTitle = "مخرج ثقافي"): string {
+  const resolved = resolveCalendarEvent(ev, fallbackTitle);
+  if (resolved.googleCalendarUrl) {
+    return resolved.googleCalendarUrl;
+  }
+  const text = encodeURIComponent(resolved.title);
+  const details = encodeURIComponent(resolved.description);
+  const loc = encodeURIComponent(resolved.location);
+  let dates = "";
+  const s = resolved.start.replace(/[-:]/g, "").split(".")[0].replace(" ", "T");
+  const e = resolved.end ? resolved.end.replace(/[-:]/g, "").split(".")[0].replace(" ", "T") : s;
+  if (s) {
+    dates = `&dates=${encodeURIComponent(s + (e ? "/" + e : "/" + s))}`;
+  }
+  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}${dates}&details=${details}&location=${loc}`;
+}
+
+export function buildWebcalUrl(url: string, origin?: string): string {
+  if (!url) return "";
+  let full = url;
+  if (full.startsWith("/")) {
+    const base = origin || "";
+    full = base ? `${base.replace(/\/+$/, "")}${full}` : full;
+  }
+  return full.replace(/^https?:/i, "webcal:");
+}
+
+export function qualifyDownloadUrl(url: string | null | undefined, apiBase?: string): string {
+  if (!url) return "";
+  if (url.startsWith("/") && apiBase) {
+    return `${apiBase.replace(/\/+$/, "")}${url}`;
+  }
+  return url;
 }
 
 /** Human revision hint, if the backend supplied one. */
@@ -199,6 +300,57 @@ export function artifactRevisionHint(raw: any): string | null {
       p && typeof p === "object" ? p.revision_hint : null
     )
   );
+}
+
+/** Normalize one single version object. */
+export function normalizeArtifactVersion(raw: any, fallbackIndex = 0): ArtifactVersion | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const versionNum =
+    typeof raw.version === "number" && Number.isFinite(raw.version) && raw.version > 0
+      ? Math.floor(raw.version)
+      : fallbackIndex + 1;
+  const rawUrl = pickFirstString(raw.download_url, raw.url);
+  const download_url = rawUrl && rawUrl !== "#" ? rawUrl : null;
+  const preview = canonicalPreview(raw);
+  const status = (asNonEmptyString(raw.status)?.toLowerCase() as ArtifactStatus) ?? undefined;
+  return {
+    version: versionNum,
+    id: pickFirstString(raw.id, raw.artifact_id) ?? undefined,
+    download_url: status === "failed" ? null : download_url,
+    preview,
+    status,
+    created_at: typeof raw.created_at === "number" ? raw.created_at : undefined,
+    checksum: asNonEmptyString(raw.checksum) ?? undefined,
+    title: pickFirstString(raw.title, raw.display_label) ?? undefined,
+    filename: pickFirstString(raw.filename) ?? undefined,
+    format: pickFirstString(raw.format, raw.type, raw.artifact_type)?.toLowerCase() ?? undefined,
+    html: artifactHtml(preview) ?? asNonEmptyString(raw.html) ?? undefined,
+    size_bytes:
+      typeof raw.size_bytes === "number" && Number.isFinite(raw.size_bytes) && raw.size_bytes >= 0
+        ? Math.floor(raw.size_bytes)
+        : undefined,
+  };
+}
+
+/** Normalize raw versions list (unwrapped array or wrapped { versions: [...] }). */
+export function normalizeArtifactVersions(input: unknown): ArtifactVersion[] {
+  let list: unknown[] = [];
+  if (Array.isArray(input)) {
+    list = input;
+  } else if (input && typeof input === "object") {
+    const obj = input as any;
+    if (Array.isArray(obj.versions)) list = obj.versions;
+    else if (Array.isArray(obj.data?.versions)) list = obj.data.versions;
+    else if (Array.isArray(obj.data)) list = obj.data;
+    else if (Array.isArray(obj.result)) list = obj.result;
+    else if (obj.version !== undefined) list = [obj];
+  }
+  const result: ArtifactVersion[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const norm = normalizeArtifactVersion(list[i], i);
+    if (norm) result.push(norm);
+  }
+  return result.sort((a, b) => a.version - b.version);
 }
 
 /**
@@ -237,34 +389,54 @@ export function normalizeArtifact(raw: any, fallbackIndex = 0): Artifact {
     typeof sizeRaw === "number" && Number.isFinite(sizeRaw) && sizeRaw >= 0
       ? Math.floor(sizeRaw)
       : 0;
-  const versionsRaw = Array.isArray(raw.versions) ? raw.versions : [];
-  const versions: ArtifactVersion[] = versionsRaw
-    .map((v: any, i: number) => {
-      if (!v || typeof v !== "object") return null;
-      const vUrl = pickFirstString(v.download_url, v.url);
-      return {
-        version: typeof v.version === "number" ? v.version : i + 1,
-        id: asNonEmptyString(v.id) ?? undefined,
-        download_url: vUrl && vUrl !== "#" ? vUrl : null,
-        preview: canonicalPreview(v),
-        status: (asNonEmptyString(v.status)?.toLowerCase() as ArtifactStatus) ?? undefined,
-        created_at: typeof v.created_at === "number" ? v.created_at : undefined,
-        checksum: asNonEmptyString(v.checksum) ?? undefined,
-      } as ArtifactVersion;
-    })
-    .filter((v: ArtifactVersion | null): v is ArtifactVersion => v !== null);
+  const rawVersions = Array.isArray(raw.versions)
+    ? raw.versions
+    : raw.data?.versions || raw.versions || [];
+  const versions: ArtifactVersion[] = normalizeArtifactVersions(rawVersions);
+
   // Seed versions[] from the artifact itself so every artifact has ≥1 snapshot.
   if (versions.length === 0) {
+    const rootVersionNum =
+      typeof raw.version === "number" && Number.isFinite(raw.version) && raw.version > 0
+        ? Math.floor(raw.version)
+        : 1;
     versions.push({
-      version: 1,
+      version: rootVersionNum,
       id,
       download_url,
       preview,
       status,
-      created_at: Date.now(),
+      created_at: typeof raw.created_at === "number" ? raw.created_at : Date.now(),
       checksum: asNonEmptyString(raw.checksum) ?? undefined,
+      title: pickFirstString(raw.title, raw.display_label) ?? undefined,
+      filename: pickFirstString(raw.filename) ?? undefined,
+      format,
+      html: artifactHtml(preview) ?? asNonEmptyString(raw.html) ?? undefined,
+      size_bytes,
     });
+  } else if (typeof raw.version === "number" && !versions.some((v) => v.version === raw.version)) {
+    versions.push({
+      version: Math.floor(raw.version),
+      id,
+      download_url,
+      preview,
+      status,
+      created_at: typeof raw.created_at === "number" ? raw.created_at : Date.now(),
+      checksum: asNonEmptyString(raw.checksum) ?? undefined,
+      title: pickFirstString(raw.title, raw.display_label) ?? undefined,
+      filename: pickFirstString(raw.filename) ?? undefined,
+      format,
+      html: artifactHtml(preview) ?? asNonEmptyString(raw.html) ?? undefined,
+      size_bytes,
+    });
+    versions.sort((a, b) => a.version - b.version);
   }
+
+  const activeVersion =
+    typeof raw.version === "number" && Number.isFinite(raw.version)
+      ? Math.floor(raw.version)
+      : versions.length;
+
   return {
     id,
     kind,
@@ -277,8 +449,8 @@ export function normalizeArtifact(raw: any, fallbackIndex = 0): Artifact {
     download_url: status === "failed" ? null : download_url,
     preview,
     versions,
-    activeVersion: versions.length,
-    html: artifactHtml(preview) ?? undefined,
+    activeVersion,
+    html: artifactHtml(preview) ?? asNonEmptyString(raw.html) ?? asNonEmptyString(raw.to_preview) ?? undefined,
     revisionHint: artifactRevisionHint(raw) ?? undefined,
     warnings: Array.isArray(raw.warnings)
       ? raw.warnings.filter((w: unknown): w is string => typeof w === "string")
@@ -301,7 +473,8 @@ export function normalizeArtifactsList(input: unknown): Artifact[] {
 
 /**
  * Accumulate incoming artifacts into the existing list WITHOUT overwriting.
- * Same id → append a new version snapshot (cap 10) and refresh live fields.
+ * Same id → append a new version snapshot (cap 20) and refresh live fields.
+ * Preserves old versions on failure.
  * New id → append. Returns a new array.
  */
 export function mergeArtifactVersions(
@@ -320,36 +493,195 @@ export function mergeArtifactVersions(
       byId.set(inc.id, next[next.length - 1]);
       continue;
     }
+
+    // Merge version snapshots by version number to preserve historical snapshots
+    const versionsByNum = new Map<number, ArtifactVersion>();
+    const initialCount = (cur.versions ?? []).length;
+    for (const v of cur.versions ?? []) {
+      versionsByNum.set(v.version, v);
+    }
+    if (inc.status !== "failed") {
+      for (const v of inc.versions ?? []) {
+        versionsByNum.set(v.version, v);
+      }
+    }
+
     const latest = cur.versions?.[cur.versions.length - 1];
     const changed =
       !latest ||
       latest.download_url !== inc.download_url ||
       latest.status !== inc.status ||
       JSON.stringify(latest.preview ?? null) !== JSON.stringify(inc.preview ?? null);
-    if (changed) {
-      cur.versions = [
-        ...(cur.versions ?? []),
-        {
-          version: (cur.versions?.length ?? 0) + 1,
-          id: inc.id,
-          download_url: inc.download_url,
-          preview: inc.preview,
-          status: inc.status,
-          created_at: Date.now(),
-          checksum: inc.checksum,
-        },
-      ].slice(-10);
-      cur.activeVersion = cur.versions.length;
+
+    // If incoming changed, is not failed, and no new version was introduced by inc.versions, append new snapshot
+    if (changed && inc.status !== "failed" && versionsByNum.size <= initialCount) {
+      const nextVerNum = Math.max(0, ...Array.from(versionsByNum.keys())) + 1;
+      versionsByNum.set(nextVerNum, {
+        version: nextVerNum,
+        id: inc.id,
+        download_url: inc.download_url,
+        preview: inc.preview,
+        status: inc.status,
+        created_at: Date.now(),
+        checksum: inc.checksum,
+        title: inc.title,
+        filename: inc.filename,
+        format: inc.format,
+        html: inc.html,
+      });
     }
-    // Refresh live (non-versioned) fields from the newest event.
-    cur.status = inc.status;
-    cur.download_url = inc.download_url;
-    cur.preview = inc.preview;
-    cur.html = inc.html;
-    cur.title = inc.title || cur.title;
-    cur.filename = inc.filename || cur.filename;
-    cur.error = inc.error;
-    cur.error_category = inc.error_category;
+
+
+    cur.versions = Array.from(versionsByNum.values())
+      .sort((a, b) => a.version - b.version)
+      .slice(-20);
+    cur.activeVersion = cur.versions.length;
+
+    // Refresh live (non-versioned) fields from newest event, but preserve old versions on failure.
+    if (inc.status === "failed") {
+      cur.status = "failed";
+      cur.error = inc.error || cur.error;
+      cur.error_category = inc.error_category || cur.error_category;
+      // Do NOT erase cur.download_url if old version was successful
+      if (!cur.download_url && cur.versions.length > 0) {
+        const lastOk = [...cur.versions].reverse().find((v) => v.status === "created" && v.download_url);
+        if (lastOk) cur.download_url = lastOk.download_url;
+      }
+    } else {
+      cur.status = inc.status;
+      cur.download_url = inc.download_url;
+      cur.preview = inc.preview;
+      cur.html = inc.html || cur.html;
+      cur.title = inc.title || cur.title;
+      cur.filename = inc.filename || cur.filename;
+      cur.error = inc.error;
+      cur.error_category = inc.error_category;
+    }
   }
   return next;
 }
+
+/** Core revision submission logic with normalized wrapped/unwrapped response handling. */
+export async function postArtifactRevisionCore(
+  fetchFn: (input: string, init?: any) => Promise<Response>,
+  apiBase: string,
+  artifactId: string,
+  instruction: string,
+  format?: string
+): Promise<Artifact> {
+  const safeId = encodeURIComponent(artifactId.trim());
+  const body = JSON.stringify({
+    instruction,
+    ...(format ? { format } : {}),
+  });
+
+  const base = apiBase ? apiBase.replace(/\/+$/, "") : "";
+  const endpoints = [
+    `${base}/api/artifacts/${safeId}/revisions`,
+    `${base}/artifacts/${safeId}/revisions`,
+  ];
+
+  let lastResponse: Response | null = null;
+  let successData: any = null;
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetchFn(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body,
+      });
+      lastResponse = res;
+      if (res.status === 404 && endpoint !== endpoints[endpoints.length - 1]) {
+        continue;
+      }
+      if (!res.ok) {
+        let detail = `Revision failed (${res.status})`;
+        let category: string | undefined;
+        try {
+          const errJson = await res.json();
+          detail = errJson.detail || errJson.error || detail;
+          category = errJson.error_category || errJson.category;
+        } catch {
+          // ignore
+        }
+        const err = new Error(detail) as any;
+        err.status = res.status;
+        err.category = category || (res.status === 422 ? "validation" : "http_error");
+        err.code = res.status === 422 ? "validation" : "http_error";
+        throw err;
+      }
+      successData = await res.json();
+      break;
+    } catch (err: any) {
+      if (err.status || err.code) throw err;
+      if (endpoint === endpoints[endpoints.length - 1]) {
+        const wrap = new Error(err?.message || "Failed to submit artifact revision") as any;
+        wrap.code = "http_error";
+        throw wrap;
+      }
+    }
+  }
+
+  if (!successData && lastResponse && !lastResponse.ok) {
+    let detail = `Revision failed (${lastResponse.status})`;
+    let category: string | undefined;
+    try {
+      const errJson = await lastResponse.json();
+      detail = errJson.detail || errJson.error || detail;
+      category = errJson.error_category || errJson.category;
+    } catch {}
+    const err = new Error(detail) as any;
+    err.status = lastResponse.status;
+    err.category = category || (lastResponse.status === 422 ? "validation" : "http_error");
+    err.code = lastResponse.status === 422 ? "validation" : "http_error";
+    throw err;
+  }
+
+  const raw =
+    (successData &&
+      typeof successData === "object" &&
+      (successData.artifact || successData.data || successData.result)) ||
+    successData;
+
+  return normalizeArtifact(raw);
+}
+
+/** Core version retrieval logic with normalized wrapped/unwrapped response handling. */
+export async function fetchArtifactVersionsCore(
+  fetchFn: (input: string, init?: any) => Promise<Response>,
+  apiBase: string,
+  artifactId: string
+): Promise<ArtifactVersion[]> {
+  if (!artifactId) return [];
+  const safeId = encodeURIComponent(artifactId.trim());
+  const base = apiBase ? apiBase.replace(/\/+$/, "") : "";
+  const endpoints = [
+    `${base}/api/artifacts/${safeId}/versions`,
+    `${base}/artifacts/${safeId}/versions`,
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetchFn(endpoint, {
+        headers: { Accept: "application/json" },
+      });
+      if (res.status === 404) {
+        if (endpoint !== endpoints[endpoints.length - 1]) continue;
+        return [];
+      }
+      if (!res.ok) return [];
+      const data = await res.json();
+      return normalizeArtifactVersions(data);
+    } catch {
+      if (endpoint !== endpoints[endpoints.length - 1]) continue;
+      return [];
+    }
+  }
+  return [];
+}
+
+

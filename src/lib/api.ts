@@ -1,4 +1,13 @@
-import { Citation, Artifact, Attachment, SystemStatus, normalizeArtifactsList } from "@/types";
+import {
+  Citation,
+  Artifact,
+  ArtifactVersion,
+  Attachment,
+  SystemStatus,
+  normalizeArtifact,
+  normalizeArtifactVersions,
+  normalizeArtifactsList,
+} from "@/types";
 import { PersistentSSEParser, SSEEvent } from "./sseParser";
 
 const API_BASE =
@@ -222,6 +231,7 @@ export async function fetchRunStatus(runId: string): Promise<{
 /**
  * Controlled download: fetch → blob → object URL → a[download].
  * Never uses a bare cross-origin <a download target=_blank> (unreliable).
+ * Qualifies relative URLs with API_BASE when cross-origin.
  * Throws SardApiError("expired" category on 404/410, "http_error" otherwise).
  */
 export async function downloadArtifactFile(
@@ -229,8 +239,10 @@ export async function downloadArtifactFile(
   filename: string
 ): Promise<{ objectUrl: string; blob: Blob }> {
   let response: Response;
+  const targetUrl =
+    url.startsWith("/") && API_BASE ? `${API_BASE.replace(/\/+$/, "")}${url}` : url;
   try {
-    response = await fetch(url, { credentials: "same-origin" });
+    response = await fetch(targetUrl, { credentials: "same-origin" });
   } catch (err: any) {
     throw new SardApiError(err?.message || "Network error during download", {
       code: "http_error",
@@ -267,6 +279,116 @@ export async function downloadArtifactFile(
   }
   return { objectUrl, blob };
 }
+
+/**
+ * Submit an instruction-driven revision for an artifact.
+ * Calls POST /api/artifacts/{id}/revisions (with fallback to /artifacts/{id}/revisions).
+ * Normalizes wrapped or unwrapped response envelopes.
+ */
+export async function postArtifactRevision(
+  artifactId: string,
+  instruction: string,
+  format?: string
+): Promise<Artifact> {
+  const safeId = encodeURIComponent(artifactId.trim());
+  const body = JSON.stringify({
+    instruction,
+    ...(format ? { format } : {}),
+  });
+
+  const endpoints = [
+    `${API_BASE}/api/artifacts/${safeId}/revisions`,
+    `${API_BASE}/artifacts/${safeId}/revisions`,
+  ];
+
+  let lastResponse: Response | null = null;
+  let successData: any = null;
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body,
+      });
+      lastResponse = res;
+      if (res.status === 404 && endpoint !== endpoints[endpoints.length - 1]) {
+        continue;
+      }
+      if (!res.ok) {
+        const { detail, category } = await readErrorDetail(res, `Revision failed (${res.status})`);
+        throw new SardApiError(detail, {
+          code: res.status === 422 ? "validation" : "http_error",
+          status: res.status,
+          category: category || (res.status === 422 ? "validation" : "http_error"),
+        });
+      }
+      successData = await res.json();
+      break;
+    } catch (err: any) {
+      if (err instanceof SardApiError) throw err;
+      if (endpoint === endpoints[endpoints.length - 1]) {
+        throw new SardApiError(err?.message || "Failed to submit artifact revision", {
+          code: "http_error",
+        });
+      }
+    }
+  }
+
+  if (!successData && lastResponse && !lastResponse.ok) {
+    const { detail, category } = await readErrorDetail(lastResponse, `Revision failed (${lastResponse.status})`);
+    throw new SardApiError(detail, {
+      code: lastResponse.status === 422 ? "validation" : "http_error",
+      status: lastResponse.status,
+      category,
+    });
+  }
+
+  const raw =
+    (successData &&
+      typeof successData === "object" &&
+      (successData.artifact || successData.data || successData.result)) ||
+    successData;
+
+  return normalizeArtifact(raw);
+}
+
+/**
+ * Retrieve retained version history for an artifact.
+ * Calls GET /api/artifacts/{id}/versions (with fallback to /artifacts/{id}/versions).
+ * Normalizes wrapped or unwrapped response envelopes.
+ */
+export async function fetchArtifactVersions(artifactId: string): Promise<ArtifactVersion[]> {
+  if (!artifactId) return [];
+  const safeId = encodeURIComponent(artifactId.trim());
+  const endpoints = [
+    `${API_BASE}/api/artifacts/${safeId}/versions`,
+    `${API_BASE}/artifacts/${safeId}/versions`,
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        headers: { Accept: "application/json" },
+      });
+      if (res.status === 404) {
+        if (endpoint !== endpoints[endpoints.length - 1]) continue;
+        return [];
+      }
+      if (!res.ok) return [];
+      const data = await res.json();
+      return normalizeArtifactVersions(data);
+    } catch {
+      if (endpoint !== endpoints[endpoints.length - 1]) continue;
+      return [];
+    }
+  }
+  return [];
+}
+
 
 export const SSE_ORDER = ["status", "citations", "artifacts", "delta", "done"] as const;
 export type SSEOrderPhase = (typeof SSE_ORDER)[number];

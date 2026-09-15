@@ -8,7 +8,7 @@ interface ArtifactModalProps {
   artifact: Artifact | null;
   onClose: () => void;
   lang: Lang;
-  onRevise?: (artifact: Artifact, instruction: string) => void;
+  onRevise?: (artifact: Artifact, instruction: string, format?: string) => Promise<void> | void;
 }
 
 /**

@@ -7,7 +7,7 @@ import { ChatMessages } from "@/components/ChatMessages";
 import { Composer } from "@/components/Composer";
 import { DirectionProvider, StageTurnContainer, useDirection } from "@/lib/direction";
 import { Artifact, Attachment, Message, View, mergeArtifactVersions } from "@/types";
-import { fetchRunStatus, streamChat, DoneMeta, StatusDetail } from "@/lib/api";
+import { fetchRunStatus, streamChat, postArtifactRevision, DoneMeta, StatusDetail } from "@/lib/api";
 import { ArtifactPanel } from "@/components/ArtifactPanel";
 import {
   getActiveArtifactId,
@@ -248,18 +248,21 @@ function ChatAppContent() {
       signal: controller.signal,
       onStatus: (statusText: string, detail?: StatusDetail) => {
         if (detail?.runId) persistRunId(detail.runId);
-        setRunProgress({
+        const newProgress = detail?.progress ?? 0.4;
+        setRunProgress((prev) => ({
           stage: detail?.stage || "working",
-          progress: detail?.progress ?? 0.4,
+          progress: Math.max(prev?.progress ?? 0, Math.min(1, newProgress)),
           message: statusText,
-        });
+        }));
         setMessages((prev) =>
           prev.map((m) =>
             m.id === thinkId
               ? {
                   ...m,
                   statusStage: statusText,
-                  statusProgress: detail?.progress ?? m.statusProgress ?? null,
+                  statusProgress: detail?.progress
+                    ? Math.max(m.statusProgress ?? 0, Math.min(1, detail.progress))
+                    : m.statusProgress ?? null,
                   runId: detail?.runId || m.runId || lastRunId,
                 }
               : m
@@ -304,18 +307,27 @@ function ChatAppContent() {
       onArtifacts: (arts) => {
         // ACCUMULATE versions[] — never overwrite the existing list.
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === thinkId ? { ...m, artifacts: mergeArtifactVersions(m.artifacts || [], arts) } : m
-          )
+          prev.map((m) => {
+            if (m.id === thinkId) {
+              const merged = mergeArtifactVersions(m.artifacts || [], arts);
+              // If selectedArtifact is one of these, update to merged instance with all versions
+              const curSelId = selectedArtifactRef.current?.id;
+              if (curSelId) {
+                const updated = merged.find((a) => a.id === curSelId);
+                if (updated) setSelectedArtifact(updated);
+              }
+              return { ...m, artifacts: merged };
+            }
+            return m;
+          })
         );
-        // No manual reload: open the newest ready artifact without destroying chat.
+        // Auto-select newest ready artifact if no artifact was previously open
         const ready = [...arts].reverse().find((a) => a.status === "created") || arts[arts.length - 1];
         if (ready && !selectedArtifactRef.current) {
           setSelectedArtifact(ready);
-        } else if (ready && selectedArtifactRef.current?.id === ready.id) {
-          setSelectedArtifact(ready);
         }
       },
+
       onDone: (meta: DoneMeta) => {
         clearTimeout(timeoutId);
         if (meta?.run_id) persistRunId(meta.run_id);
@@ -423,13 +435,25 @@ function ChatAppContent() {
     setMessages((prev) => prev.map((m) => (m.id === thinkId ? { ...m, stopped: false } : m)));
   }
 
-  /** Revise entry: prefill composer with artifact_id + instruction, keep panel open. */
-  function handleRevise(artifact: Artifact, instruction: string) {
-    const prefix = `Revise ${artifact.id}: ${instruction}`;
-    const context = artifact.title ? ` (re: "${artifact.title}")` : "";
-    setInput(`${prefix}${context} `);
-    setView("chat");
+  /** Real revision execution: POST /api/artifacts/{id}/revisions */
+  async function handleRevise(artifact: Artifact, instruction: string, format?: string) {
+    const revised = await postArtifactRevision(artifact.id, instruction, format);
+    // Update message turn containing this artifact
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.artifacts?.some((a) => a.id === artifact.id)) {
+          return {
+            ...m,
+            artifacts: mergeArtifactVersions(m.artifacts, [revised]),
+          };
+        }
+        return m;
+      })
+    );
+    // Update active selection to revised artifact (preserving accumulated versions)
+    setSelectedArtifact(revised);
   }
+
 
   // Auto-scroll on update
   const lastMessageContent = messages[messages.length - 1]?.content;
