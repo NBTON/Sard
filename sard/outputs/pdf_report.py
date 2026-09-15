@@ -179,6 +179,68 @@ class _ArabicTextFlowable(Flowable):
         canvas.restoreState()
 
 
+def _table_cell(text: str, font: str, latin_font: str, size: float, bold: bool = False) -> _ArabicTextFlowable:
+    cell = _ArabicTextFlowable(
+        text=str(text or ""),
+        font=font,
+        latin_font=latin_font,
+        size=size,
+        leading=size + 5,
+        color=COLOR_INK,
+        align="right",
+    )
+    cell.font = font
+    return cell
+
+
+def _build_rtl_table(
+    table_data: list[list[str]],
+    font: str,
+    latin_font: str,
+    content_width: float,
+) -> Table | None:
+    """Render ``ReportSection.table_data`` (previously dead schema) as an RTL table.
+
+    Columns are reversed so the first logical column appears at the right,
+    matching Arabic reading order.  Returns None for empty input.
+    """
+
+    rows = [[str(cell or "") for cell in row] for row in (table_data or []) if row]
+    if not rows:
+        return None
+    width = max(len(row) for row in rows)
+    normalized = [row + [""] * (width - len(row)) for row in rows]
+    # RTL: reverse column order so logical-first renders rightmost.
+    rtl_rows = [list(reversed(row)) for row in normalized]
+    col_width = content_width / max(width, 1)
+    body: list[list[Flowable]] = []
+    for row_index, row in enumerate(rtl_rows):
+        body.append(
+            [
+                _table_cell(cell, font, latin_font, 10.5 if row_index == 0 else 9.5)
+                for cell in row
+            ]
+        )
+    table = Table(body, colWidths=[col_width] * width, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), COLOR_PAPER_2),
+                ("TEXTCOLOR", (0, 0), (-1, 0), COLOR_DATE),
+                ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("GRID", (0, 0), (-1, -1), 0.6, COLOR_BORDER),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_CARD]),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    return table
+
+
 class _NumberedCanvas(Canvas):
     """Adds header, footer, and page numbering to the document."""
 
@@ -405,6 +467,14 @@ def render_cultural_pdf_report(
                 )
                 story.append(Spacer(1, 4))
 
+            table_data = sec.get("table_data")
+            if isinstance(table_data, list) and any(table_data):
+                rtl_table = _build_rtl_table(table_data, ar_font, lat_font, content_width)
+                if rtl_table is not None:
+                    story.append(Spacer(1, 6))
+                    story.append(KeepTogether(rtl_table) if len(table_data) <= 8 else rtl_table)
+                    story.append(Spacer(1, 6))
+
     # 5. Key Takeaways Card
     if key_takeaways:
         story.append(Spacer(1, 14))
@@ -488,6 +558,10 @@ def render_cultural_pdf_report(
     if output_path:
         p = Path(output_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(pdf_data)
+        try:
+            p.write_bytes(pdf_data)
+        except Exception:
+            p.unlink(missing_ok=True)
+            raise
 
     return pdf_data

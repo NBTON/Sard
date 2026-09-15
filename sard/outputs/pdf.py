@@ -14,7 +14,17 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
-from reportlab.platypus import CondPageBreak, Flowable, KeepTogether, SimpleDocTemplate, Spacer
+from reportlab.platypus import (
+    CondPageBreak,
+    Flowable,
+    HRFlowable,
+    Image,
+    KeepTogether,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from sard.outputs.arabic import append_citations, contains_arabic, shape_rtl, visual_runs
 from sard.outputs.fonts import require_arabic_font, require_latin_font
@@ -659,3 +669,551 @@ def render_pdf_atomic(itinerary: Itinerary, output_path: str | Path) -> Rendered
     """
 
     return render_pdf(itinerary, output_path)
+
+
+# ---------------------------------------------------------------------------
+# Generic ArtifactDocument report renderer (enhanced ReportLab path)
+# ---------------------------------------------------------------------------
+#
+# HTML->PDF was evaluated for this deployment and REJECTED for server-side
+# use: no headless Chromium/puppeteer/playwright is installed, adding one
+# would pull huge/broken native deps incompatible with the Vercel serverless
+# target, and no weasyprint/pdfkit/xhtm2pdf stack is available either.
+# The canonical HTML renderer (sard/outputs/html.py) remains the browser
+# path (users can print-to-PDF client-side); this ReportLab path is the
+# server-side PDF renderer until a deployment-compatible HTML->PDF option
+# is verified.  The itinerary ``render_pdf`` above is kept as fallback.
+
+_MD_FENCE_RE = re.compile(r"^\s*```")
+_MD_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+
+def parse_markdown_blocks(text: str) -> list[tuple[str, int, str]]:
+    """Convert structural Markdown to typed blocks instead of stripping it.
+
+    Returns ``(kind, level, text)`` triples where kind is one of
+    ``heading``/``paragraph``/``bullet``/``quote``/``code``/``table_row``.
+    Inline markers (``**``, backticks, links) are left in place — each
+    block's text still passes through :func:`clean_pdf_text` at render
+    time, which removes inline markers idempotently.  Hierarchy (headings,
+    bullets, quotes, tables) survives instead of being flattened.
+    """
+
+    blocks: list[tuple[str, int, str]] = []
+    if not text or not text.strip():
+        return blocks
+    in_code = False
+    code_lines: list[str] = []
+    paragraph_lines: list[str] = []
+
+    def flush_paragraph() -> None:
+        if paragraph_lines:
+            blocks.append(("paragraph", 0, " ".join(paragraph_lines).strip()))
+            paragraph_lines.clear()
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if _MD_FENCE_RE.match(line):
+            if in_code:
+                blocks.append(("code", 0, "\n".join(code_lines)))
+                code_lines.clear()
+                in_code = False
+            else:
+                flush_paragraph()
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(raw_line)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            flush_paragraph()
+            continue
+        heading = re.match(r"^(#{1,3})\s+(.*)$", stripped)
+        if heading:
+            flush_paragraph()
+            blocks.append(("heading", len(heading.group(1)), heading.group(2).strip()))
+            continue
+        bullet = re.match(r"^([-*+•]|\d+[.)])\s+(.*)$", stripped)
+        if bullet:
+            flush_paragraph()
+            blocks.append(("bullet", 0, bullet.group(2).strip()))
+            continue
+        if stripped.startswith(">"):
+            flush_paragraph()
+            blocks.append(("quote", 0, stripped.lstrip(">").strip()))
+            continue
+        if _MD_TABLE_SEP_RE.match(stripped):
+            continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            flush_paragraph()
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            blocks.append(("table_row", 0, "\u0001".join(cells)))
+            continue
+        if re.match(r"^\s{0,3}(---|\*\*\*|___)\s*$", line):
+            flush_paragraph()
+            continue
+        paragraph_lines.append(stripped)
+    if in_code:
+        blocks.append(("code", 0, "\n".join(code_lines)))
+    flush_paragraph()
+    return [(kind, level, content) for kind, level, content in blocks if content.strip()]
+
+
+def markdown_to_flowables(
+    text: str, font: str, latin_font: str
+) -> list[Flowable]:
+    """Render Markdown text as hierarchy-preserving flowables."""
+
+    flowables: list[Flowable] = []
+    table_accum: list[list[str]] = []
+
+    def flush_table() -> None:
+        if table_accum:
+            flowables.append(_rtl_data_table(table_accum, font, latin_font))
+            table_accum.clear()
+
+    for kind, level, content in parse_markdown_blocks(text):
+        if kind == "table_row":
+            table_accum.append(content.split("\u0001"))
+            continue
+        flush_table()
+        if kind == "heading":
+            size = {1: 20, 2: 17, 3: 14}.get(level, 15)
+            flowables.append(
+                _TextFlowable(
+                    content,
+                    font=font,
+                    latin_font=latin_font,
+                    size=size,
+                    leading=size + 8,
+                    color=colors.HexColor("#6E1F1F"),
+                    top_padding=8,
+                    bottom_padding=6,
+                )
+            )
+        elif kind == "bullet":
+            flowables.append(_block_flowable_text(f"• {content}", font, latin_font))
+        elif kind == "quote":
+            flowables.append(
+                _TextFlowable(
+                    f"«{content}»",
+                    font=font,
+                    latin_font=latin_font,
+                    size=11,
+                    leading=18,
+                    color=colors.HexColor("#6E1F1F"),
+                    bottom_padding=5,
+                )
+            )
+        elif kind == "code":
+            flowables.append(
+                _TextFlowable(
+                    content,
+                    font=font,
+                    latin_font=latin_font,
+                    size=9,
+                    leading=14,
+                    color=colors.HexColor("#37474F"),
+                    rtl=False,
+                    bottom_padding=5,
+                )
+            )
+        else:
+            flowables.append(_block_flowable_text(content, font, latin_font))
+    flush_table()
+    return flowables
+
+
+def _block_flowable_text(text: str, font: str, latin_font: str) -> _TextFlowable:
+    return _TextFlowable(
+        text,
+        font=font,
+        latin_font=latin_font,
+        size=11,
+        leading=18,
+        bottom_padding=5,
+    )
+
+
+def _rtl_data_table(
+    rows: Sequence[Sequence[str]], font: str, latin_font: str
+) -> Table:
+    """Build an RTL platypus table: logical-first column renders rightmost."""
+
+    cleaned = [[clean_pdf_text(str(cell or "")) for cell in row] for row in rows if row]
+    if not cleaned:
+        cleaned = [[""]]
+    width = max(len(row) for row in cleaned)
+    normalized = [row + [""] * (width - len(row)) for row in cleaned]
+    rtl_rows = [list(reversed(row)) for row in normalized]
+    available = A4[0] - 100
+    col_width = available / max(width, 1)
+    body = [
+        [_block_flowable_text(cell, font, latin_font) for cell in row] for row in rtl_rows
+    ]
+    table = Table(body, colWidths=[col_width] * width, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8E0D2")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#6E1F1F")),
+                ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#D4CBBD")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAF7F1")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    return table
+
+
+def _callout_table(
+    title: str, body_flowables: list[Flowable], font: str, latin_font: str, *, fill: str = "#FAF7F1", border: str = "#C4A46A"
+) -> Table:
+    inner: list[list[Flowable]] = [
+        [
+            _TextFlowable(
+                title,
+                font=font,
+                latin_font=latin_font,
+                size=12,
+                leading=18,
+                color=colors.HexColor("#BE4A24"),
+                bottom_padding=4,
+            )
+        ]
+    ]
+    for flowable in body_flowables:
+        inner.append([flowable])
+    table = Table(inner, colWidths=[A4[0] - 100])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(fill)),
+                ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor(border)),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ]
+        )
+    )
+    return table
+
+
+def _image_flowable(image_path: str, max_width: float = 400.0) -> Flowable | None:
+    """Best-effort local image; missing/unreadable images render nothing."""
+
+    candidate = Path(image_path)
+    if not candidate.is_file():
+        return None
+    try:
+        from PIL import Image as _PILImage
+
+        with _PILImage.open(candidate) as picture:
+            width, height = picture.size
+        if width <= 0 or height <= 0:
+            return None
+        scale = min(1.0, max_width / float(width))
+        return Image(
+            str(candidate), width=float(width) * scale, height=float(height) * scale
+        )
+    except Exception:
+        return None
+
+
+def render_document_pdf(
+    title: str,
+    topic: str,
+    content_paragraphs: Sequence[str] | None = None,
+    sections: Sequence[dict] | None = None,
+    key_takeaways: Sequence[str] | None = None,
+    sources: Sequence[dict] | None = None,
+    region: str = "المملكة العربية السعودية",
+    summary: str = "",
+    subtitle: str = "",
+    generated_at: str = "",
+    output_path: str | Path | None = None,
+) -> RenderedArtifact | bytes:
+    """Render a general cultural report PDF with cover, TOC, tables, bibliography.
+
+    Target: cover, subtitle, AR typography RTL, TOC (section listing), headings,
+    tables (``ReportSection.table_data``), cards/callouts, images, page numbers,
+    headers/footers, bibliography, and clean page breaks.  Returns raw bytes
+    when ``output_path`` is None, else a :class:`RenderedArtifact`.  Partial
+    files are deleted on failure.  Fonts fail loudly (no tofu fallback).
+    """
+
+    clean_title = (title or "").strip()
+    clean_topic = (topic or "").strip()
+    if not clean_title:
+        raise ValueError("PDF report requires a title; refusing to render filler.")
+    if not clean_topic:
+        raise ValueError("PDF report requires a topic; refusing to render filler.")
+    paragraphs = [p for p in (content_paragraphs or []) if str(p or "").strip()]
+    section_list = [s for s in (sections or []) if isinstance(s, dict)]
+    takeaways = [t for t in (key_takeaways or []) if str(t or "").strip()]
+    if not paragraphs and not section_list and not takeaways and not summary.strip():
+        raise ValueError("PDF report content is missing; refusing to render filler.")
+
+    font_path = require_arabic_font()
+    latin_font_path = require_latin_font()
+    font_name = "SardNotoNaskhArabic"
+    latin_font_name = "SardNotoSans"
+    if font_name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+    if latin_font_name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(latin_font_name, str(latin_font_path)))
+
+    story: list[Flowable] = [
+        _TextFlowable(
+            "المملكة العربية السعودية • وزارة الثقافة",
+            font=font_name,
+            latin_font=latin_font_name,
+            size=9,
+            leading=13,
+            color=colors.HexColor("#BE4A24"),
+            bottom_padding=4,
+        ),
+        _TextFlowable(
+            clean_title,
+            font=font_name,
+            latin_font=latin_font_name,
+            size=24,
+            leading=32,
+            color=colors.HexColor("#141210"),
+            bottom_padding=6,
+        ),
+    ]
+    if subtitle.strip():
+        story.append(
+            _TextFlowable(
+                subtitle.strip(),
+                font=font_name,
+                latin_font=latin_font_name,
+                size=13,
+                leading=21,
+                color=colors.HexColor("#607D8B"),
+                bottom_padding=6,
+            )
+        )
+    meta_line = f"الموضوع: {clean_topic} | المنطقة: {region}"
+    if generated_at:
+        meta_line += f" | أُنشئ في: {generated_at}"
+    story.append(
+        _TextFlowable(
+            meta_line,
+            font=font_name,
+            latin_font=latin_font_name,
+            size=9,
+            leading=14,
+            color=colors.HexColor("#8A8178"),
+            bottom_padding=8,
+        )
+    )
+    story.append(
+        HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#C4A46A"), spaceAfter=12)
+    )
+
+    if summary.strip() or paragraphs:
+        summary_text = summary.strip() or paragraphs[0]
+        summary_body = [_block_flowable_text(summary_text, font_name, latin_font_name)]
+        story.append(
+            _callout_table("ملخص التقرير", summary_body, font_name, latin_font_name)
+        )
+        story.append(Spacer(1, 12))
+
+    # Table of contents (section listing; single-pass platypus has no page refs).
+    titled_sections = [s for s in section_list if str(s.get("title") or "").strip()]
+    if titled_sections:
+        story.append(
+            _TextFlowable(
+                "المحتويات",
+                font=font_name,
+                latin_font=latin_font_name,
+                size=18,
+                leading=25,
+                color=colors.HexColor("#6E1F1F"),
+                bottom_padding=6,
+            )
+        )
+        for index, section in enumerate(titled_sections, 1):
+            story.append(
+                _TextFlowable(
+                    f"{index}. {section.get('title', '')}",
+                    font=font_name,
+                    latin_font=latin_font_name,
+                    size=11,
+                    leading=17,
+                    bottom_padding=2,
+                )
+            )
+        story.append(Spacer(1, 10))
+
+    start_index = 1 if (not summary.strip() and len(paragraphs) > 1) else 0
+    for paragraph in paragraphs[start_index:]:
+        story.extend(markdown_to_flowables(paragraph, font_name, latin_font_name))
+
+    for section in section_list:
+        section_title = str(section.get("title") or "").strip()
+        badge = str(section.get("badge") or "").strip()
+        story.append(Spacer(1, 8))
+        story.append(CondPageBreak(180))
+        header = f"◆ {section_title}" + (f" ({badge})" if badge else "")
+        story.append(
+            _TextFlowable(
+                header,
+                font=font_name,
+                latin_font=latin_font_name,
+                size=18,
+                leading=25,
+                color=colors.HexColor("#6E1F1F"),
+                bottom_padding=6,
+            )
+        )
+        story.append(
+            HRFlowable(
+                width="100%",
+                thickness=0.8,
+                color=colors.HexColor("#D4CBBD"),
+                spaceAfter=8,
+            )
+        )
+        content = str(section.get("content") or "")
+        if content.strip():
+            story.extend(markdown_to_flowables(content, font_name, latin_font_name))
+        for bullet in section.get("bullets") or []:
+            if str(bullet or "").strip():
+                story.extend(
+                    markdown_to_flowables(f"• {bullet}", font_name, latin_font_name)
+                )
+        table_data = section.get("table_data")
+        if isinstance(table_data, list) and any(table_data):
+            story.append(Spacer(1, 6))
+            story.append(_rtl_data_table(table_data, font_name, latin_font_name))
+            story.append(Spacer(1, 6))
+        image_src = section.get("image") or section.get("image_path") or ""
+        if isinstance(image_src, str) and image_src.strip():
+            picture = _image_flowable(image_src.strip())
+            if picture is not None:
+                story.append(Spacer(1, 6))
+                story.append(picture)
+                story.append(Spacer(1, 6))
+
+    if takeaways:
+        story.append(Spacer(1, 12))
+        takeaway_flows: list[Flowable] = []
+        for item in takeaways:
+            takeaway_flows.append(_block_flowable_text(f"• {item}", font_name, latin_font_name))
+        story.append(
+            _callout_table(
+                "الخلاصات المعرفية",
+                takeaway_flows,
+                font_name,
+                latin_font_name,
+                fill="#E8E0D2",
+                border="#4A513C",
+            )
+        )
+
+    source_list = [s for s in (sources or []) if isinstance(s, dict)]
+    if source_list:
+        story.append(Spacer(1, 12))
+        story.append(CondPageBreak(180))
+        story.append(
+            _TextFlowable(
+                "المراجع والتوثيق",
+                font=font_name,
+                latin_font=latin_font_name,
+                size=20,
+                leading=28,
+                color=colors.HexColor("#BE4A24"),
+                bottom_padding=10,
+            )
+        )
+        for source in source_list:
+            source_title = (
+                source.get("title") or source.get("source_name") or source.get("id") or ""
+            )
+            source_url = source.get("url") or source.get("source_url") or ""
+            story.append(
+                _TextFlowable(
+                    f"[{source.get('citation_id', 'مرجع')}] {source_title}",
+                    font=font_name,
+                    latin_font=latin_font_name,
+                    size=11,
+                    leading=18,
+                )
+            )
+            if str(source_url or "").strip():
+                story.append(
+                    _TextFlowable(
+                        str(source_url).strip(),
+                        font=font_name,
+                        latin_font=latin_font_name,
+                        size=8.5,
+                        leading=13,
+                        color=colors.HexColor("#1565C0"),
+                        rtl=False,
+                    )
+                )
+            story.append(Spacer(1, 8))
+
+    if output_path is None:
+        import io as _io
+
+        stream = _io.BytesIO()
+        document = SimpleDocTemplate(
+            stream,
+            pagesize=A4,
+            rightMargin=50,
+            leftMargin=50,
+            topMargin=48,
+            bottomMargin=70,
+            title=clean_title,
+            author="Sard",
+        )
+        document.build(
+            story,
+            canvasmaker=lambda *args, **kwargs: _FooterCanvas(
+                *args, arabic_font=font_name, latin_font=latin_font_name, **kwargs
+            ),
+        )
+        return stream.getvalue()
+
+    root, destination = _resolve_output_path(output_path)
+    root.mkdir(parents=True, exist_ok=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    document = SimpleDocTemplate(
+        str(destination),
+        pagesize=A4,
+        rightMargin=50,
+        leftMargin=50,
+        topMargin=48,
+        bottomMargin=70,
+        title=clean_title,
+        author="Sard",
+    )
+    try:
+        document.build(
+            story,
+            canvasmaker=lambda *args, **kwargs: _FooterCanvas(
+                *args, arabic_font=font_name, latin_font=latin_font_name, **kwargs
+            ),
+        )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    _normalize_pdf_id(destination)
+    return RenderedArtifact(
+        filename=destination.name,
+        path=destination,
+        mime_type=MIME_TYPE,
+        size_bytes=destination.stat().st_size,
+        warnings=(),
+    )
