@@ -1,4 +1,22 @@
-"""Arabic shaping and bidi helpers used exactly once at the drawing boundary."""
+"""Centralized RTL policy + shaping/bidi helpers for ``sard/outputs``.
+
+RTL POLICY (binding on every renderer in this package):
+
+* HTML/browser output: native Unicode ONLY.  Emit logical text with
+  ``dir="rtl"`` / ``direction: rtl`` and logical CSS properties
+  (``margin-inline-start``, ``padding-inline-end``, ``text-align: start``).
+  NEVER call :func:`shape_rtl` for browser output — browsers shape Arabic
+  natively and pre-shaped (presentation-form) text renders corrupted.
+* ReportLab PDF: keep text LOGICAL through measurement and wrapping
+  (``wrap_logical_lines`` on logical text), then call :func:`shape_rtl`
+  ONLY at the draw boundary (inside ``Flowable.draw``).  Keep
+  :func:`visual_runs` font-splitting so Arabic runs use the Arabic font
+  and Latin/digit runs use the Latin companion font.
+* DOCX/PPTX: native Unicode + RTL properties (``w:bidi``/``w:rtl``,
+  ``a:pPr rtl="1"``).  No pre-reshaping — Word/PowerPoint shape natively.
+
+Shaping helpers below are therefore PDF-draw-boundary-only.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +35,13 @@ PROTECTED_RE = re.compile(
 
 
 def contains_arabic(text: str) -> bool:
-    return bool(ARABIC_RE.search(text))
+    return bool(ARABIC_RE.search(text or ""))
+
+
+def needs_rtl(text: str) -> bool:
+    """Alias expressing renderer intent: True when the run needs RTL base direction."""
+
+    return contains_arabic(text or "")
 
 
 def escape_reportlab_markup(text: str) -> str:

@@ -84,30 +84,32 @@ def download_pinned_font(destination: Path | None = None) -> Path:
     return target
 
 
-def ensure_fonts_registered(arabic_name: str = "NotoNaskhArabic-Regular", latin_name: str = "NotoSans-Regular") -> tuple[str, str]:
-    """Ensures Noto Naskh Arabic and Noto Sans fonts are registered in ReportLab with safe fallbacks."""
+def ensure_fonts_registered(arabic_name: str = "NotoNaskhArabic-Regular", latin_name: str = "NotoSans-Regular", *, strict: bool = True) -> tuple[str, str]:
+    """Register Noto Naskh Arabic + Noto Sans with ReportLab.
+
+    ``strict=True`` (default) fails loudly via :class:`ArabicFontError`
+    when a pinned font is missing or corrupt — renderers must surface a
+    ``failed`` artifact instead of silently falling back to Helvetica,
+    which renders Arabic as tofu.  Pass ``strict=False`` only for
+    explicitly degraded, non-Arabic local previews.
+    """
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
-    actual_arabic = "Helvetica"
-    actual_latin = "Helvetica"
-
     registered = pdfmetrics.getRegisteredFontNames()
 
-    try:
-        if arabic_name not in registered:
-            font_path = require_arabic_font()
-            pdfmetrics.registerFont(TTFont(arabic_name, str(font_path)))
-        actual_arabic = arabic_name
-    except Exception:
-        actual_arabic = "Helvetica"
+    if arabic_name not in registered:
+        font_path = require_arabic_font()
+        pdfmetrics.registerFont(TTFont(arabic_name, str(font_path)))
+    if latin_name not in registered:
+        latin_path = require_latin_font()
+        pdfmetrics.registerFont(TTFont(latin_name, str(latin_path)))
 
-    try:
-        if latin_name not in registered:
-            latin_path = require_latin_font()
-            pdfmetrics.registerFont(TTFont(latin_name, str(latin_path)))
-        actual_latin = latin_name
-    except Exception:
-        actual_latin = "Helvetica"
-
-    return actual_arabic, actual_latin
+    if not strict:
+        return arabic_name, latin_name
+    # Strict path re-verifies registration so a half-registered state still fails loudly.
+    registered_now = pdfmetrics.getRegisteredFontNames()
+    missing = [name for name in (arabic_name, latin_name) if name not in registered_now]
+    if missing:
+        raise ArabicFontError(f"Failed to register required fonts: {', '.join(missing)}.")
+    return arabic_name, latin_name

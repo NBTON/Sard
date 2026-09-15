@@ -2,6 +2,14 @@
 
 from sard.outputs.artifacts import ArtifactManager, ArtifactWriteResult
 from sard.outputs.calendar import CalendarRenderResult, render_calendar
+from sard.outputs.html import (
+    HtmlRenderError,
+    render_html_bytes,
+    render_html_document,
+    render_html_from_request,
+    write_html,
+)
+from sard.outputs.office import DeckBuildError
 from sard.outputs.office_docx import CulturalDocxDocument, DocxGenerator, render_cultural_docx_report
 from sard.outputs.orchestrator import (
     ArtifactGeneratorRegistry,
@@ -15,7 +23,7 @@ from sard.outputs.orchestrator import (
     get_artifact_store,
     set_artifact_store,
 )
-from sard.outputs.pdf import RenderedArtifact, render_pdf
+from sard.outputs.pdf import RenderedArtifact, parse_markdown_blocks, render_document_pdf, render_pdf
 from sard.outputs.pdf_report import render_cultural_pdf_report
 from sard.outputs.raw import RawTextResult, render_raw_text
 from sard.outputs.schemas import (
@@ -53,6 +61,14 @@ __all__ = [
     "render_raw_text",
     "TextBlock",
     "render_pdf",
+    "render_document_pdf",
+    "parse_markdown_blocks",
+    "render_html_document",
+    "render_html_bytes",
+    "render_html_from_request",
+    "write_html",
+    "HtmlRenderError",
+    "DeckBuildError",
     "render_cultural_pdf_report",
     "render_cultural_docx_report",
     "CulturalDocxDocument",
