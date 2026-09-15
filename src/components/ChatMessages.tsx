@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 import { Artifact, Citation, Lang, Message } from "@/types";
 import { SardMiniMark, ThinkingWeave } from "./SardMark";
 import { t } from "@/lib/copy";
-import { getUniqueDisplayNames } from "@/lib/api";
+import { downloadArtifactFile, getUniqueDisplayNames } from "@/lib/api";
 
 function isValidHttpUrl(url: string | undefined | null): boolean {
   if (!url || typeof url !== "string") return false;
@@ -79,6 +79,52 @@ function CitationList({ citations, lang }: { citations: Citation[]; lang: Lang }
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Controlled download pill action: fetch → blob → object URL → a[download].
+ * Surfaces expired/404/blob errors inline instead of a fragile cross-origin anchor.
+ */
+function ArtifactDownloadButton({
+  url,
+  filename,
+  lang,
+}: {
+  url: string;
+  filename: string;
+  lang: Lang;
+}) {
+  const isAr = lang === "ar";
+  const [state, setState] = useState<{ kind: "idle" | "busy" | "error"; msg?: string }>({ kind: "idle" });
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <button
+        onClick={async () => {
+          setState({ kind: "busy" });
+          try {
+            const { objectUrl } = await downloadArtifactFile(url, filename);
+            setState({ kind: "idle" });
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+          } catch (err: any) {
+            setState({ kind: "error", msg: err?.message || (isAr ? "فشل التحميل" : "Download failed") });
+          }
+        }}
+        disabled={state.kind === "busy"}
+        title={state.kind === "error" && state.msg ? state.msg : undefined}
+        style={{
+          background: "#4A513C", color: "#FFFFFF", border: "none", borderRadius: 6,
+          padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer",
+          display: "inline-flex", alignItems: "center", gap: 3,
+        }}
+      >
+        <span>⬇</span>
+        <span>{state.kind === "busy" ? "…" : isAr ? "تحميل" : "Download"}</span>
+      </button>
+      {state.kind === "error" && state.msg && (
+        <span role="status" style={{ fontSize: 10, color: "#BE4A24", maxWidth: 160 }}>⚠️ {state.msg}</span>
+      )}
+    </span>
   );
 }
 
@@ -561,22 +607,25 @@ function AgentCard({
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
                 {m.artifacts.map((a, i) => {
+                  // Canonical fields first (normalizeArtifact), legacy aliases as fallback.
                   const fmt = (a.format || a.type || "").toLowerCase();
                   const kind = (a.kind || "").toLowerCase();
+                  const canonicalUrl = a.download_url || a.url || null;
+                  const hasFile = !!canonicalUrl && canonicalUrl !== "#";
                   const isPptx = fmt === "pptx" || kind === "presentation";
                   const isDocx = fmt === "docx";
                   const isPdf = fmt === "pdf";
                   const isCal = fmt === "ics" || kind === "calendar";
-                  const isCard = kind === "card" || a.type === "card";
-                  const isRecipe = kind === "recipe" || a.type === "recipe_craft_card";
-                  const isMemoir = kind === "memoir" || a.type === "family_memoir_booklet";
+                  const isCard = kind === "card" || fmt === "card" || fmt === "greeting_card";
+                  const isRecipe = kind === "recipe" || fmt === "recipe_craft_card";
+                  const isMemoir = kind === "memoir" || fmt === "family_memoir_booklet";
                   const isDiagram = kind === "diagram" || fmt === "svg";
                   const isSvg = fmt === "svg";
                   const isPng = fmt === "png";
                   const isJson = fmt === "json";
                   const isCsv = fmt === "csv";
                   const isTxt = fmt === "txt";
-                  const isRes = kind === "verified_research" || a.type === "verified_research";
+                  const isRes = kind === "verified_research" || fmt === "verified_research";
 
                   const icon = isPptx
                     ? "📊"
@@ -702,10 +751,8 @@ function AgentCard({
                         <span style={{ fontWeight: 600 }}>{displayName}</span>
                         <span style={{ fontSize: 11, background: "#C4A46A", color: "#141210", padding: "2px 6px", borderRadius: 4 }}>{isAr ? "جودة منخفضة" : "Degraded"}</span>
                         <span style={{ fontSize: 10, background: "#141210", color: "#FAF7F1", padding: "2px 5px", borderRadius: 4 }}>{formatLabel}</span>
-                        {a.download_url && a.download_url !== "#" && (
-                          <a href={a.download_url} download={a.filename} target="_blank" rel="noreferrer" style={{ background: "#4A513C", color: "#FFFFFF", borderRadius: 6, padding: "4px 8px", fontSize: 11, fontWeight: 700, textDecoration: "none" }}>
-                            <span>⬇</span> <span>{isAr ? "تحميل" : "Download"}</span>
-                          </a>
+                        {hasFile && canonicalUrl && (
+                          <ArtifactDownloadButton url={canonicalUrl} filename={a.filename} lang={lang} />
                         )}
                       </div>
                     );
@@ -804,36 +851,9 @@ function AgentCard({
                         {isAr ? "معاينة" : "Preview"}
                       </button>
 
-                      {/* Direct Download Action if URL is valid */}
-                      {a.download_url && a.download_url !== "#" && (
-                        <a
-                          href={a.download_url}
-                          download={a.filename}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{
-                            background: "#4A513C",
-                            color: "#FFFFFF",
-                            borderRadius: 6,
-                            padding: "4px 8px",
-                            fontSize: 11,
-                            fontWeight: 700,
-                            textDecoration: "none",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 3,
-                            transition: "background 0.15s ease",
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.background = "#353B2B";
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.background = "#4A513C";
-                          }}
-                        >
-                          <span>⬇</span>
-                          <span>{isAr ? "تحميل" : "Download"}</span>
-                        </a>
+                      {/* Controlled Download Action if URL is valid */}
+                      {hasFile && canonicalUrl && (
+                        <ArtifactDownloadButton url={canonicalUrl} filename={a.filename} lang={lang} />
                       )}
                     </div>
                   );

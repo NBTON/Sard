@@ -1,4 +1,4 @@
-import { Citation, Artifact, Attachment, SystemStatus } from "@/types";
+import { Citation, Artifact, Attachment, SystemStatus, normalizeArtifactsList } from "@/types";
 import { PersistentSSEParser, SSEEvent } from "./sseParser";
 
 const API_BASE =
@@ -88,6 +88,28 @@ export async function uploadAttachment(file: File): Promise<Attachment> {
   };
 }
 
+/** Structured progress detail for a backend `status` event. */
+export interface StatusDetail {
+  stage: string;
+  /** 0-1 progress. Backend may omit it — then derived from the stage name. */
+  progress: number;
+  message: string;
+  artifactStatus?: string | null;
+  runId?: string | null;
+  raw?: unknown;
+}
+
+export interface DoneMeta {
+  verified?: boolean;
+  sources_count?: number;
+  timings_ms?: { total_ms?: number };
+  updated_at?: string;
+  artifacts_count?: number;
+  run_id?: string | null;
+  session_id?: string | null;
+  versions?: unknown;
+}
+
 export interface StreamChatOptions {
   messages: Array<{
     role: string;
@@ -100,12 +122,150 @@ export interface StreamChatOptions {
   itineraryMode?: boolean;
   lang?: string;
   signal?: AbortSignal;
-  onStatus?: (statusText: string) => void;
+  onStatus?: (statusText: string, detail?: StatusDetail) => void;
   onCitations?: (citations: Citation[]) => void;
   onDelta?: (deltaText: string) => void;
   onArtifacts?: (artifacts: Artifact[]) => void;
-  onDone?: (meta: { verified?: boolean; sources_count?: number; timings_ms?: { total_ms?: number }; updated_at?: string; artifacts_count?: number }) => void;
+  onDone?: (meta: DoneMeta) => void;
   onError?: (error: Error) => void;
+}
+
+/**
+ * Backend stage → progress estimate (0-1). Used when the backend omits
+ * `progress` (current contract sends {stage, message} only — forward
+ * compatible with a future {stage, progress, artifact_status, run_id} shape).
+ */
+export function stageProgress(stage: string): number {
+  const s = (stage || "").toLowerCase().trim();
+  if (!s) return 0.05;
+  if (s === "init" || s === "start" || s === "started") return 0.05;
+  if (s.includes("understand")) return 0.15;
+  if (s.includes("plan")) return 0.25;
+  if (s.includes("retriev") || s.includes("search") || s.includes("isnad")) return 0.35;
+  if (s.includes("compose") || s.includes("draft")) return 0.5;
+  if (s.includes("verif")) return 0.62;
+  if (s.includes("render") || s.includes("artifact")) return 0.74;
+  if (s.includes("generat") || s.includes("compos") || s.includes("writ")) return 0.85;
+  if (s.includes("fallback") || s.includes("direct")) return 0.88;
+  if (s.includes("done") || s.includes("complet") || s.includes("finish")) return 1;
+  return 0.4;
+}
+
+/** Parse a raw `status` payload tolerantly (old {message} and new {stage,progress,...}). */
+export function parseStatusDetail(data: any, fallbackMessage: string): StatusDetail {
+  const stage =
+    (typeof data?.stage === "string" && data.stage) ||
+    (typeof data?.status === "string" && data.status) ||
+    "working";
+  const message =
+    (typeof data?.message === "string" && data.message) || fallbackMessage;
+  const rawProgress = data?.progress;
+  const progress =
+    typeof rawProgress === "number" && Number.isFinite(rawProgress)
+      ? Math.min(1, Math.max(0, rawProgress))
+      : stageProgress(stage);
+  const artifactStatus =
+    (typeof data?.artifact_status === "string" && data.artifact_status) || null;
+  const runId =
+    (typeof data?.run_id === "string" && data.run_id) ||
+    (typeof data?.runId === "string" && data.runId) ||
+    null;
+  return { stage, progress, message, artifactStatus, runId, raw: data };
+}
+
+/**
+ * Normalize one raw `artifacts` payload into canonical Artifacts.
+ * Enforces: failed ⇒ download_url null; created ⇒ warn when URL missing.
+ */
+export function normalizeIncomingArtifacts(input: unknown): Artifact[] {
+  const list = normalizeArtifactsList(Array.isArray(input) ? input : []);
+  for (const art of list) {
+    if (art.status === "failed" && art.download_url) {
+      console.warn("[SSE] Invalid artifact: failed artifact has download_url", art);
+      art.download_url = null;
+    }
+    if (art.status === "created" && !art.download_url) {
+      console.warn("[SSE] Invalid artifact: created artifact missing download_url", art);
+    }
+  }
+  return list;
+}
+
+/**
+ * Best-effort poll of a run (retry/resume). Returns null when the
+ * backend has no GET /api/runs/:id endpoint (404) or is unreachable —
+ * callers must fall back to re-sending the prompt.
+ */
+export async function fetchRunStatus(runId: string): Promise<{
+  run_id: string;
+  status?: string;
+  artifacts?: Artifact[];
+  [key: string]: unknown;
+} | null> {
+  if (!runId) return null;
+  try {
+    const res = await fetch(`${API_BASE}/api/runs/${encodeURIComponent(runId)}`, {
+      headers: { Accept: "application/json" },
+    });
+    if (res.status === 404 || res.status === 405) return null;
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && Array.isArray((data as any).artifacts)) {
+      (data as any).artifacts = normalizeIncomingArtifacts((data as any).artifacts);
+    }
+    return { run_id: runId, ...(data as object) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Controlled download: fetch → blob → object URL → a[download].
+ * Never uses a bare cross-origin <a download target=_blank> (unreliable).
+ * Throws SardApiError("expired" category on 404/410, "http_error" otherwise).
+ */
+export async function downloadArtifactFile(
+  url: string,
+  filename: string
+): Promise<{ objectUrl: string; blob: Blob }> {
+  let response: Response;
+  try {
+    response = await fetch(url, { credentials: "same-origin" });
+  } catch (err: any) {
+    throw new SardApiError(err?.message || "Network error during download", {
+      code: "http_error",
+    });
+  }
+  if (response.status === 404 || response.status === 410) {
+    throw new SardApiError(
+      "انتهت صلاحية رابط التحميل. أعد توليد المخرج ثم حاول مجدداً.",
+      { code: "http_error", status: response.status, category: "expired" }
+    );
+  }
+  if (!response.ok) {
+    const { detail, category } = await readErrorDetail(response, `Download failed (${response.status})`);
+    throw new SardApiError(detail, { code: "http_error", status: response.status, category });
+  }
+  let blob: Blob;
+  try {
+    blob = await response.blob();
+  } catch {
+    throw new SardApiError("تعذّر قراءة الملف المحمّل.", { code: "http_error", category: "blob_error" });
+  }
+  if (!blob || blob.size === 0) {
+    throw new SardApiError("الملف المحمّل فارغ.", { code: "http_error", category: "blob_error" });
+  }
+  const objectUrl = URL.createObjectURL(blob);
+  // Trigger via a temporary anchor so the filename is honored same-origin.
+  if (typeof document !== "undefined") {
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename || "sard-artifact";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+  return { objectUrl, blob };
 }
 
 export const SSE_ORDER = ["status", "citations", "artifacts", "delta", "done"] as const;
@@ -218,8 +378,8 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
     onError,
   } = options;
 
-  // Client-side dedup and order tracking
-  const seenArtifactIds = new Set<string>();
+  // Order tracking + run_id capture (first status event wins for resume).
+  const seenRunIds = new Set<string>();
   const eventOrder: string[] = [];
 
   const fetchWithRetry = async (attempt = 0): Promise<Response> => {
@@ -252,7 +412,10 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
     } catch (err: any) {
       // Network error could be backend restart; retry once with backoff if not aborted
       if (attempt < 1 && err.name !== "AbortError" && signal?.aborted !== true) {
-        if (onStatus) onStatus("جاري إعادة الاتصال بالخادم...");
+        if (onStatus) {
+          const msg = "جاري إعادة الاتصال بالخادم...";
+          onStatus(msg, { stage: "reconnect", progress: 0.02, message: msg });
+        }
         await new Promise((r) => setTimeout(r, 800));
         return fetchWithRetry(attempt + 1);
       }
@@ -266,7 +429,10 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
     if (!response.ok) {
       // Retry once for 502/503/504 (backend restart) unless aborted
       if ([502, 503, 504].includes(response.status) && signal?.aborted !== true) {
-        if (onStatus) onStatus("الخادم يعيد التشغيل، جارٍ إعادة المحاولة...");
+        if (onStatus) {
+          const msg = "الخادم يعيد التشغيل، جارٍ إعادة المحاولة...";
+          onStatus(msg, { stage: "reconnect", progress: 0.02, message: msg });
+        }
         await new Promise((r) => setTimeout(r, 900));
         const retryResp = await fetchWithRetry(1);
         if (!retryResp.ok) {
@@ -297,20 +463,15 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
           }
           try {
             const data = JSON.parse(rawData);
-            if (event === "status" && data.message && onStatus) onStatus(data.message);
-            else if (event === "citations" && data.citations && onCitations) onCitations(data.citations);
+            if (event === "status" && onStatus) {
+              const detail = parseStatusDetail(data, data.message);
+              if (detail.runId) seenRunIds.add(detail.runId);
+              onStatus(detail.message, detail);
+            } else if (event === "citations" && data.citations && onCitations) onCitations(data.citations);
             else if (event === "artifacts" && data.artifacts && onArtifacts) {
-              // Deduplicate artifacts by id to handle duplicate delivery
-              const incoming: Artifact[] = Array.isArray(data.artifacts) ? data.artifacts : [];
-              const deduped = incoming.filter((a) => {
-                const key = a.id || a.filename;
-                if (seenArtifactIds.has(key)) return false;
-                seenArtifactIds.add(key);
-                return true;
-              });
-              // We still pass full deduplicated list but accumulate seen ids
-              const all = deduplicateArtifacts(incoming);
-              onArtifacts(all);
+              // Canonical normalization (legacy aliases resolved here).
+              // Version accumulation happens in the consumer via mergeArtifactVersions.
+              onArtifacts(normalizeIncomingArtifacts(data.artifacts));
             } else if (event === "done" && onDone) onDone(data);
           } catch (parseErr) {
             console.warn(`[SSE] Failed to parse JSON for event "${event}":`, parseErr, rawData);
@@ -363,8 +524,13 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
         const data = JSON.parse(rawData);
 
         if (event === "status") {
-          if (data.message && onStatus) {
-            onStatus(data.message);
+          if (onStatus) {
+            const detail = parseStatusDetail(
+              data,
+              data.message || (lang === "en" ? "Working..." : "جارٍ العمل...")
+            );
+            if (detail.runId) seenRunIds.add(detail.runId);
+            if (detail.message) onStatus(detail.message, detail);
           }
         } else if (event === "citations") {
           if (data.citations && onCitations) {
@@ -381,28 +547,10 @@ export async function streamChat(options: StreamChatOptions): Promise<void> {
           }
         } else if (event === "artifacts") {
           if (data.artifacts && onArtifacts) {
-            // Deduplicate and preserve failed artifacts (download_url null must remain)
-            const incoming: Artifact[] = Array.isArray(data.artifacts) ? data.artifacts : [];
-            // Track seen ids for duplicate delivery detection
-            const filtered = incoming.filter((a) => {
-              const key = a.id || `${a.filename}__${a.format}`;
-              if (seenArtifactIds.has(key)) return false;
-              seenArtifactIds.add(key);
-              return true;
-            });
-            // If all were duplicates, still emit deduplicated full list to avoid empty emission on retry
-            const toEmit = filtered.length > 0 ? deduplicateArtifacts(incoming) : deduplicateArtifacts(incoming);
-            // Validate failed artifacts have no download_url
-            for (const art of toEmit) {
-              if (art.status === "failed" && art.download_url) {
-                console.warn("[SSE] Invalid artifact: failed artifact has download_url", art);
-                art.download_url = null;
-              }
-              if (art.status === "created" && !art.download_url) {
-                console.warn("[SSE] Invalid artifact: created artifact missing download_url", art);
-              }
-            }
-            onArtifacts(toEmit);
+            // Canonical normalization at the parse boundary (legacy aliases
+            // resolved here). The consumer ACCUMULATES via mergeArtifactVersions
+            // — same-id re-delivery becomes a new version snapshot, never a drop.
+            onArtifacts(normalizeIncomingArtifacts(data.artifacts));
           }
         } else if (event === "done") {
           if (onDone) {
