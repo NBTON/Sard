@@ -79,4 +79,6 @@ scratch/
 output/uploads/.attachment-index.json
 output/artifacts/
 .next/
+# Vercel CLI local state (may contain tokens)
+.vercel/
 

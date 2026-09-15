@@ -49,7 +49,7 @@ No confirmed Blocker. Two High accepted limitations remain open (hardcoded dev A
 
 ### Finding 2 — Hardcoded Parallel API dev key in source  [High, Accepted limitation]
 
-- **Files:** sard/agent/tools/cultural_tools.py:35 `DEFAULT_PARALLEL_API_KEY = "dxl5SMKxtkCCAZjJH_LobPTJ6rGbXYot7YX_JLKK"` used at 453-457 and 571-575 as fallback when env PARALLEL_API_KEY unset; .env.example:88-89 correctly leaves PARALLEL_API_KEY empty.
+- **Files:** sard/agent/tools/cultural_tools.py:35 `DEFAULT_PARALLEL_API_KEY = "[REDACTED]"` used at 453-457 and 571-575 as fallback when env PARALLEL_API_KEY unset; .env.example:88-89 correctly leaves PARALLEL_API_KEY empty.
 - **Evidence:** Key is committed since 2026-08-26 (git log -S). RAG handoff docs/handoffs/rag.md:84 already notes "DEFAULT_PARALLEL_API_KEY committed in source is a dev key." Tests pass because mocks avoid network; live path would use dev key if operator forgets env provisioning.
 - **Risk:** Secret in git history, quota abuse, insufficient isolation; not a classic secret leak of user data but violates "never commit secrets" rule (CLAUDE.md). Not rotated per review.
 - **Mitigation:** Remove constant from source; require env PARALLEL_API_KEY and fail closed (raise RAGServiceUnavailableError or return web_unavailable_warning) when missing. Provide .env.example placeholder only. Rotate key and purge history if real quota key (even dev). Gate in CI: grep for `dxl5` fails build.

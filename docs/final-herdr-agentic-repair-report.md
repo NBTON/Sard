@@ -176,7 +176,7 @@ Tests: `tests/outputs/test_artifact_foundation.py` 26 passed (9 formats parametr
 | ID | Severity | Area | File:Line | Status |
 |----|----------|------|-----------|--------|
 | 1 | High (Accepted+mitigated) | Prompt injection via `full_context` verbatim | `cultural_router.py:362`, `cultural_tools.py:486`, `util.py:189` | **Remediation `137e1b5`**: delimiter + instruction, `_sanitize_context_for_llm` stripping `ignore previous instructions/system:/assistant:` |
-| 2 | High (Accepted) | Hardcoded Parallel API dev key | `cultural_tools.py:35` `DEFAULT_PARALLEL_API_KEY = "dxl5..."` | **Remediation `137e1b5`**: removed, fail closed when `PARALLEL_API_KEY` missing, `.env.example` placeholder |
+| 2 | High (Accepted) | Hardcoded Parallel API dev key | `cultural_tools.py:35` `DEFAULT_PARALLEL_API_KEY = "[REDACTED]"` | **Remediation `137e1b5`**: removed, fail closed when `PARALLEL_API_KEY` missing, `.env.example` placeholder |
 | 3 | Medium | Unbounded `_ATTACHMENTS` | `server.py:78` | **Remediation `137e1b5`**: TTL 1h / cap 100, `_evict_expired_attachments()` |
 | 4-10 | Medium/Low | Unsafe SVG, SSRF, upload 25MB, path traversal `relative_to`, cross-user leakage sidecar+Link, citation fabrication `_repair_citations`, stale caches, unbounded retries, missing timeouts, leakage, serverless, concurrency, duplicate SSE, incomplete streams | Various | **Fixed** via validation, store hardening, timeouts, `finally done`, `run_id` |
 
