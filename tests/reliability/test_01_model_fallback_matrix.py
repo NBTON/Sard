@@ -118,3 +118,19 @@ def test_auth_failure_is_non_retryable_skips_wasted_retry(fresh_breaker, noop_sl
     assert calls.count("test-primary") == 1
     kinds = [e.failure_category for e in resp.events if e.outcome == "failure"]
     assert FailureCategory.AUTHENTICATION in kinds
+
+
+def test_03c_invalid_json_primary_yields_to_fallback_valid_json(fresh_breaker, noop_sleep):
+    """Bug #1: primary non-empty invalid JSON must yield to fallback (retry-then-switch)."""
+    plan = {"test-primary": "ok:not json at all {{{", "test-fallback": 'ok:{"city": "الرياض"}'}
+    svc, calls = _service(plan, fresh_breaker, noop_sleep, max_structured_attempts=2)
+    parsed, resp = svc.invoke_json("structured", "نظام", "أعد JSON", allowed_keys=("city",))
+    assert parsed == {"city": "الرياض"}
+    assert resp.success is True
+    assert resp.model_used == "test-fallback"
+    assert resp.degraded is True
+    # Bounded retry on the current candidate, then switch: exactly
+    # max_structured_attempts primary attempts before the fallback is tried.
+    assert calls.count("test-primary") == 2
+    assert "test-fallback" in calls
+    assert len(calls) <= 2 * 2  # structured_attempts * num_candidates

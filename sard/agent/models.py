@@ -186,40 +186,141 @@ class AgentModelService:
         user_text: str,
         allowed_keys: Sequence[str] = (),
         user_label: str = "",
+        deadline: Any = None,
     ) -> tuple[Optional[dict], AgentModelResponse]:
         """Call the model and return ``(parsed_json | None, response)``.
 
-        Retries parsing up to ``max_structured_attempts`` times on invalid
-        structured output, bounded by the route's candidate/retry machinery.
-        Returns ``None`` (never raises) so callers can degrade deterministically.
+        Retry-then-switch on invalid structured output: each candidate gets
+        up to ``max_structured_attempts`` parse attempts before advancing to
+        the next candidate, so a primary returning transport-successful but
+        non-JSON output can no longer starve the fallbacks. Total
+        transport-successful attempts are bounded by
+        ``max_structured_attempts * num_candidates``; an optional outer
+        ``deadline`` (a :class:`Deadline` or absolute monotonic float) stops
+        new attempts once exhausted. Returns ``None`` (never raises) so
+        callers can degrade deterministically (verification stays
+        advisory-only).
         """
-        attempt = 0
-        final_response: AgentModelResponse = AgentModelResponse(
-            success=False, use_case=use_case
-        )
-        while attempt < self.max_structured_attempts:
-            attempt += 1
-            response = self.invoke(use_case, system_prompt, user_text)
-            final_response = response
-            if not response.success:
-                break
-            parsed = extract_json_object(response.text)
-            if parsed is None:
-                final_response = AgentModelResponse(
-                    success=False,
-                    use_case=response.use_case,
-                    model_used=response.model_used,
-                    provider_used=response.provider_used,
-                    degraded=response.degraded,
-                    events=response.events,
-                    failure_category=FailureCategory.MALFORMED_OUTPUT,
-                    error_message="استجابة النموذج غير صالحة بصيغة JSON.",
+        from sard.agent.deadline import coerce_deadline
+
+        settings = self._resolved_settings()
+        use_case_key = f"agent_{use_case}"
+        if settings is None:
+            return None, AgentModelResponse(
+                success=False,
+                use_case=use_case_key,
+                error_message="تكوين النموذج غير متاح.",
+                failure_category=FailureCategory.MODEL_UNAVAILABLE,
+            )
+        if not user_text or not user_text.strip():
+            return None, AgentModelResponse(
+                success=False,
+                use_case=use_case_key,
+                error_message="الطلب فارغ.",
+                failure_category=FailureCategory.MALFORMED_OUTPUT,
+            )
+
+        candidates = self._candidates()
+        if not candidates:
+            return None, AgentModelResponse(
+                success=False,
+                use_case=use_case_key,
+                error_message="تعذّر الوصول إلى نماذج التوليد المكوّنة.",
+                failure_category=FailureCategory.MODEL_UNAVAILABLE,
+            )
+        try:
+            per_candidate = max(0, int(self.max_structured_attempts))
+        except (TypeError, ValueError):
+            per_candidate = 2
+        total_budget = per_candidate * len(candidates)
+        if total_budget <= 0:
+            return None, AgentModelResponse(
+                success=False,
+                use_case=use_case_key,
+                error_message="استجابة النموذج غير صالحة بصيغة JSON.",
+                failure_category=FailureCategory.MALFORMED_OUTPUT,
+            )
+
+        dl = coerce_deadline(deadline) if deadline is not None else None
+
+        def call(candidate: ModelCandidate) -> str:
+            model = self.chat_model_factory(candidate.model_id, settings)
+            response = model.invoke(
+                [SystemMessage(content=system_prompt), HumanMessage(content=user_text)]
+            )
+            content = _content_to_text(getattr(response, "content", ""))
+            if not content.strip():
+                raise FallbackClassifiedError(
+                    FailureCategory.MALFORMED_OUTPUT, "Model returned empty content."
                 )
-                continue
-            allowed = tuple(allowed_keys)
-            if allowed:
-                parsed = pick_allowed(parsed, allowed)
-            return parsed, final_response
+            return content
+
+        all_events: list[FallbackEvent] = []
+        final_response = AgentModelResponse(
+            success=False,
+            use_case=use_case_key,
+            failure_category=FailureCategory.MALFORMED_OUTPUT,
+            error_message="استجابة النموذج غير صالحة بصيغة JSON.",
+        )
+        attempts_done = 0
+        for candidate in candidates:
+            if attempts_done >= total_budget:
+                break
+            if dl is not None and dl.reserve_remaining() <= 0:
+                break
+            structured_left = per_candidate
+            while structured_left > 0 and attempts_done < total_budget:
+                if dl is not None and dl.reserve_remaining() <= 0:
+                    break
+                try:
+                    text, events = run_with_fallback(
+                        use_case_key,
+                        [candidate],
+                        call,
+                        max_retries_per_candidate=self.max_retries_per_candidate,
+                        circuit_breaker=self._breaker,
+                        sleep_fn=self.sleep_fn,
+                        deadline=dl,
+                    )
+                except AllCandidatesFailedError as exc:
+                    all_events.extend(exc.events)
+                    last = exc.events[-1].failure_category if exc.events else None
+                    final_response = AgentModelResponse(
+                        success=False,
+                        use_case=use_case_key,
+                        events=list(all_events),
+                        failure_category=last or FailureCategory.MODEL_UNAVAILABLE,
+                        error_message="تعذّر الوصول إلى نماذج التوليد المكوّنة.",
+                    )
+                    break
+                attempts_done += 1
+                structured_left -= 1
+                all_events.extend(events)
+                parsed = extract_json_object(text)
+                if parsed is None:
+                    final_response = AgentModelResponse(
+                        success=False,
+                        use_case=use_case_key,
+                        model_used=candidate.model_id,
+                        provider_used=provider_name_for_model(candidate.model_id),
+                        degraded=bool(candidate.degraded),
+                        events=list(all_events),
+                        failure_category=FailureCategory.MALFORMED_OUTPUT,
+                        error_message="استجابة النموذج غير صالحة بصيغة JSON.",
+                    )
+                    continue
+                allowed = tuple(allowed_keys)
+                if allowed:
+                    parsed = pick_allowed(parsed, allowed)
+                return parsed, AgentModelResponse(
+                    success=True,
+                    text=text,
+                    model_used=candidate.model_id,
+                    provider_used=provider_name_for_model(candidate.model_id),
+                    degraded=bool(candidate.degraded),
+                    use_case=use_case_key,
+                    events=list(all_events),
+                )
         return None, final_response
 
 
