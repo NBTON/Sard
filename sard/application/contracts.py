@@ -146,6 +146,7 @@ class UIArtifactView:
     warnings: tuple[str, ...] = ()
     error_category: Optional[str] = None
     download_bytes: Optional[bytes] = None
+    preview: Optional[dict] = None
 
 
 @dataclass(frozen=True)

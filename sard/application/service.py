@@ -559,9 +559,11 @@ class SardApplicationService:
         )
 
     def _artifact_view(self, artifact: object) -> Optional[UIArtifactView]:
-        status = str(getattr(artifact, "creation_status", "") or "")
+        status = str(getattr(artifact, "creation_status", "") or getattr(artifact, "status", "") or "")
         if status not in _ARTIFACT_STATUSES:
             return None
+        raw_preview = getattr(artifact, "preview", None)
+        preview = dict(raw_preview) if isinstance(raw_preview, dict) else None
         download: Optional[bytes] = None
         if status == "created":
             raw_path = getattr(artifact, "absolute_path", None) or getattr(
@@ -577,10 +579,10 @@ class SardApplicationService:
                     download = None
         return UIArtifactView(
             artifact_type=sanitize_ui_text(
-                getattr(artifact, "artifact_type", ""), limit=64
+                getattr(artifact, "artifact_type", "") or getattr(artifact, "kind", ""), limit=64
             ),
             display_label=sanitize_ui_text(
-                getattr(artifact, "display_label", ""), limit=120
+                getattr(artifact, "display_label", "") or getattr(artifact, "title", ""), limit=120
             ),
             filename=Path(str(getattr(artifact, "filename", "") or "")).name[:128],
             mime_type=sanitize_ui_text(
@@ -596,6 +598,7 @@ class SardApplicationService:
                 else None
             ),
             download_bytes=download,
+            preview=preview,
         )
 
     @staticmethod
