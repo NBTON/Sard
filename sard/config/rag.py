@@ -116,6 +116,11 @@ class RAGSettings:
     min_evidence_confidence: float = 0.60
     parallel_api_key: str = ""
     parallel_search_base_url: str = "https://api.parallel.ai/v1beta"
+    tavily_api_key: str = ""
+    exa_api_key: str = ""
+    search_timeout_s_parallel: float = 15.0
+    search_timeout_s_tavily: float = 10.0
+    search_timeout_s_exa: float = 10.0
 
     def validate(self) -> "RAGSettings":
         """Validate settings that would otherwise fail much later in a request.
@@ -241,8 +246,31 @@ def get_rag_settings() -> RAGSettings:
         min_evidence_confidence=_env_float("RAG_MIN_EVIDENCE_CONFIDENCE", 0.60),
         parallel_api_key=_env("PARALLEL_API_KEY"),
         parallel_search_base_url=_env("PARALLEL_SEARCH_BASE_URL", "https://api.parallel.ai/v1beta"),
+        tavily_api_key=_resolve_tavily_api_key(),
+        exa_api_key=_env("EXA_API_KEY"),
+        search_timeout_s_parallel=_env_float("SEARCH_TIMEOUT_S_PARALLEL", 15.0),
+        search_timeout_s_tavily=_env_float("SEARCH_TIMEOUT_S_TAVILY", 10.0),
+        search_timeout_s_exa=_env_float("SEARCH_TIMEOUT_S_EXA", 10.0),
     )
     return settings.validate()
+
+
+def _resolve_tavily_api_key() -> str:
+    """Canonical TAVILY_API_KEY with TIVALY_API_KEY deprecation fallback."""
+    canonical = _env("TAVILY_API_KEY")
+    if canonical:
+        return canonical
+    alias = _env("TIVALY_API_KEY")
+    if alias:
+        import logging as _logging
+        import warnings as _warnings
+
+        _warnings.warn("TIVALY_API_KEY is deprecated; use TAVILY_API_KEY.", DeprecationWarning, stacklevel=2)
+        _logging.getLogger("sard.config.rag").warning(
+            "TIVALY_API_KEY is deprecated; use TAVILY_API_KEY."
+        )
+        return alias
+    return ""
 
 
 def _require_api_key_if_hosted(base_url: Optional[str], api_key: str) -> None:

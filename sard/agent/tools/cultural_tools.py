@@ -16,7 +16,6 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -452,122 +451,91 @@ def _resolve_parallel_api_key(api_key: Optional[str] = None) -> str:
     return raw
 
 
+def _normalize_legacy_hit(item: dict[str, Any]) -> dict[str, Any]:
+    """Ensure a web hit carries BOTH planner and router field aliases.
+
+    Planner (sard/planner/retrieve.py) reads ``content``/``published_date``;
+    the cultural router reads ``excerpts``. Parallel historically returned
+    only ``excerpts``/``publish_date`` -- normalize here (adapter fix).
+    """
+    out = dict(item)
+    excerpts = out.get("excerpts")
+    if isinstance(excerpts, str):
+        excerpts = [excerpts]
+        out["excerpts"] = excerpts
+    excerpt_text = " ".join([e for e in (excerpts or []) if e]).strip()
+    if not out.get("content"):
+        out["content"] = excerpt_text or out.get("snippet") or out.get("text") or out.get("markdown") or ""
+    if not out.get("excerpts"):
+        fallback = out.get("content") or out.get("snippet") or ""
+        out["excerpts"] = [fallback] if fallback else []
+    if out.get("published_date") is None and out.get("publish_date") is not None:
+        out["published_date"] = out.get("publish_date")
+    if out.get("publish_date") is None and out.get("published_date") is not None:
+        out["publish_date"] = out.get("published_date")
+    return out
+
+
 def parallel_search(
     objective: str,
     search_queries: Sequence[str],
     max_results: int = 8,
     api_key: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Live web search via Parallel Search API.
+    """Live web search via the Parallel -> Tavily -> Exa failover chain.
 
-    Fails closed when PARALLEL_API_KEY is not configured (returns [] and
-    lets the router set web_unavailable_warning; no hardcoded fallback).
+    Adapter shim (workstream D): delegates to
+    ``sard.rag.search_providers.fanout_search`` and adapts ``SearchResult``
+    back to legacy dicts carrying BOTH ``excerpts``/``publish_date`` and
+    ``content``/``published_date`` aliases. Router budgets are unchanged
+    (callers still cap search calls/results; default max 3 results per call).
 
-    Args:
-        objective: Natural language information need describing the exact cultural context.
-        search_queries: 2-5 keyword queries.
-        max_results: Max number of returned items (default: 8).
-        api_key: Optional override for PARALLEL_API_KEY.
-
-    Returns:
-        List of ranked ``{"url": str, "title": str, "excerpts": list[str], "publish_date": str}``.
+    Fails closed when no provider key is configured (returns [] and lets
+    the router set web_unavailable_warning; never fabricates).
     """
     t0 = time.monotonic()
-    resolved_key = _resolve_parallel_api_key(api_key)
-    if not resolved_key:
-        logger.warning("PARALLEL_API_KEY not configured; parallel_search failing closed (no hardcoded fallback).")
-        return []
-
     search_queries_list = [q.strip() for q in search_queries if q and q.strip()]
     if not search_queries_list:
         search_queries_list = [objective.strip()]
-
-    # Format cultural query biases (Arabic + English, local institutions)
     sanitized_queries = _bias_queries_for_cultural_sources(search_queries_list, objective)
-
-    results: list[dict[str, Any]] = []
-    sdk_used = False
-
-    # 1. Try official Parallel SDK
     try:
-        from parallel import Parallel
-        client = Parallel(api_key=resolved_key)
-        sdk_res = client.search(
-            objective=objective,
-            search_queries=sanitized_queries,
-            max_chars_total=4000 * max_results,
+        from sard.rag.search_providers import (
+            ExaProvider,
+            ParallelProvider,
+            TavilyProvider,
+            fanout_search,
+            to_legacy_dict,
         )
-        sdk_used = True
-        # Extract items from SDK response
-        raw_items = getattr(sdk_res, "results", []) or getattr(sdk_res, "items", []) or []
-        for item in raw_items:
-            url = getattr(item, "url", "") or getattr(item, "link", "")
-            title = getattr(item, "title", "")
-            excerpts = getattr(item, "excerpts", []) or [getattr(item, "snippet", "")]
-            pub_date = getattr(item, "publish_date", "") or getattr(item, "published_date", "")
-            if isinstance(excerpts, str):
-                excerpts = [excerpts]
-            results.append({
-                "url": url,
-                "title": title,
-                "excerpts": [e for e in excerpts if e],
-                "publish_date": str(pub_date) if pub_date else None,
-            })
-    except Exception as sdk_exc:
-        logger.debug("Parallel SDK search failed or not available (%s); falling back to direct HTTP REST.", sdk_exc)
 
-    # 2. HTTP REST Fallback
-    if not results:
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": resolved_key,
-            "parallel-beta": PARALLEL_BETA_HEADER,
-        }
-        body = {
-            "objective": objective,
-            "search_queries": sanitized_queries,
-            "max_results": max_results,
-            "max_chars_per_result": 4000,
-        }
-        url = f"{PARALLEL_API_DEFAULT_BASE}/search"
+        settings = None
         try:
-            with httpx.Client(timeout=15.0) as http_client:
-                resp = http_client.post(url, headers=headers, json=body)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    raw_items = data.get("results") or data.get("items") or []
-                    for item in raw_items:
-                        item_url = item.get("url") or item.get("link") or ""
-                        title = item.get("title") or ""
-                        excerpts = item.get("excerpts") or [item.get("snippet", "")] or [item.get("text", "")]
-                        if isinstance(excerpts, str):
-                            excerpts = [excerpts]
-                        pub_date = item.get("publish_date") or item.get("published_date")
-                        results.append({
-                            "url": item_url,
-                            "title": title,
-                            "excerpts": [e for e in excerpts if e],
-                            "publish_date": str(pub_date) if pub_date else None,
-                        })
-                else:
-                    logger.warning("Parallel HTTP search returned status %d: %s", resp.status_code, resp.text[:200])
-        except Exception as http_exc:
-            logger.error("Parallel HTTP search request exception: %s", http_exc)
+            from sard.config.rag import get_rag_settings
 
-    # Apply Cultural Source Policy & Safety URL validation
-    filtered_results = _apply_cultural_source_policy(results, max_results=max_results)
+            settings = get_rag_settings()
+        except Exception as exc:
+            logger.debug("RAG settings unavailable for search shim (%s); using env.", type(exc).__name__)
 
-    latency_ms = (time.monotonic() - t0) * 1000
-    logger.info(
-        "parallel_search executed: objective='%s', queries=%s, raw_count=%d, filtered_count=%d, latency=%.1fms (SDK=%s)",
-        objective,
-        sanitized_queries,
-        len(results),
-        len(filtered_results),
-        latency_ms,
-        sdk_used,
-    )
-    return filtered_results
+        providers = [
+            ParallelProvider(api_key=api_key) if api_key
+            else ParallelProvider(),
+            TavilyProvider(),
+            ExaProvider(),
+        ]
+        ranked, telemetry, _flags = fanout_search(
+            objective, sanitized_queries, depth="normal", settings=settings,
+            max_results=max_results, providers=providers, run_extract=False,
+        )
+        legacy = [_normalize_legacy_hit(to_legacy_dict(r)) for r in ranked]
+        filtered = _apply_cultural_source_policy(legacy, max_results=max_results)
+        latency_ms = (time.monotonic() - t0) * 1000
+        logger.info(
+            "parallel_search executed: objective='%s', queries=%s, filtered_count=%d, latency=%.1fms, telemetry=%s",
+            objective, sanitized_queries, len(filtered), latency_ms, telemetry,
+        )
+        return filtered
+    except Exception as exc:
+        logger.warning("parallel_search chain failed gracefully: %s", type(exc).__name__)
+        return []
 
 
 def parallel_extract(
@@ -589,68 +557,18 @@ def parallel_extract(
     safe_urls = [safe_external_url(u) for u in urls if is_safe_external_url(u)][:3]
     if not safe_urls:
         return []
-
-    resolved_key = _resolve_parallel_api_key(api_key)
-    if not resolved_key:
-        logger.warning("PARALLEL_API_KEY not configured; parallel_extract failing closed.")
-        return []
-
-    results: list[dict[str, Any]] = []
-
-    # 1. Try official Parallel SDK
     try:
-        from parallel import Parallel
-        client = Parallel(api_key=resolved_key)
-        sdk_res = client.extract(
-            urls=safe_urls,
-            objective=objective,
-        )
-        raw_items = getattr(sdk_res, "results", []) or getattr(sdk_res, "items", []) or []
-        for item in raw_items:
-            u = getattr(item, "url", "")
-            t = getattr(item, "title", "")
-            md = getattr(item, "markdown", "") or getattr(item, "content", "")
-            results.append({
-                "url": u,
-                "title": t,
-                "markdown": md,
-                "content": md,
-            })
-    except Exception as sdk_exc:
-        logger.debug("Parallel SDK extract failed or not available (%s); falling back to direct HTTP REST.", sdk_exc)
+        from sard.rag.search_providers import ExaProvider, ParallelProvider, TavilyProvider, fanout_extract
 
-    # 2. HTTP REST Fallback
-    if not results:
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": resolved_key,
-            "parallel-beta": PARALLEL_BETA_HEADER,
-        }
-        body = {
-            "urls": safe_urls,
-            "objective": objective,
-        }
-        url = f"{PARALLEL_API_DEFAULT_BASE}/extract"
-        try:
-            with httpx.Client(timeout=20.0) as http_client:
-                resp = http_client.post(url, headers=headers, json=body)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    raw_items = data.get("results") or data.get("items") or []
-                    for item in raw_items:
-                        item_url = item.get("url") or ""
-                        title = item.get("title") or ""
-                        md = item.get("markdown") or item.get("content") or item.get("text") or ""
-                        results.append({
-                            "url": item_url,
-                            "title": title,
-                            "markdown": md,
-                            "content": md,
-                        })
-                else:
-                    logger.warning("Parallel HTTP extract returned status %d: %s", resp.status_code, resp.text[:200])
-        except Exception as http_exc:
-            logger.error("Parallel HTTP extract request exception: %s", http_exc)
+        providers = [
+            ParallelProvider(api_key=api_key) if api_key else ParallelProvider(),
+            TavilyProvider(),
+            ExaProvider(),
+        ]
+        results = fanout_extract(safe_urls, objective, providers=providers)
+    except Exception as exc:
+        logger.warning("parallel_extract chain failed gracefully: %s", type(exc).__name__)
+        return []
 
     latency_ms = (time.monotonic() - t0) * 1000
     logger.info(

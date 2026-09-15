@@ -104,6 +104,33 @@ def _sanitize_context_for_llm(text: str) -> str:
     return sanitized
 
 
+def _normalize_router_web_hit(item: dict[str, Any]) -> dict[str, Any]:
+    """Adapter normalization: guarantee planner + router field aliases.
+
+    The planner reads ``content``/``published_date``; this router reads
+    ``excerpts``. Provider-chain hits already carry both, but injected fakes
+    in tests (and any legacy caller) may carry only one side -- fill it here
+    so downstream code never sees a field mismatch. Never fabricates
+    evidence: empty stays empty.
+    """
+    out = dict(item)
+    excerpts = out.get("excerpts")
+    if isinstance(excerpts, str):
+        excerpts = [excerpts]
+        out["excerpts"] = excerpts
+    excerpt_text = " ".join([e for e in (excerpts or []) if e]).strip()
+    if not out.get("content"):
+        out["content"] = excerpt_text or out.get("snippet") or ""
+    if not out.get("excerpts"):
+        fallback = out.get("content") or out.get("snippet") or ""
+        out["excerpts"] = [fallback] if fallback else []
+    if out.get("published_date") is None and out.get("publish_date") is not None:
+        out["published_date"] = out.get("publish_date")
+    if out.get("publish_date") is None and out.get("published_date") is not None:
+        out["publish_date"] = out.get("published_date")
+    return out
+
+
 @dataclass
 class RetrievalDecision:
     """Diagnostic explanation of the router's decision."""
@@ -212,6 +239,10 @@ class CulturalRouter:
 
             for sq in search_queries[:max_search_calls]:
                 try:
+                    # Adapter shim (workstream D): parallel_search delegates to the
+                    # Parallel -> Tavily -> Exa failover chain. Router budgets are
+                    # unchanged (max 2 search calls, 3 results) until owners
+                    # approve a budget change.
                     res = self.parallel_search(
                         objective=search_objective,
                         search_queries=[sq],
@@ -221,8 +252,9 @@ class CulturalRouter:
                         if item.get("error"):
                             decision.web_unavailable_warning = True
                             continue
-                        if item.get("url") and not any(w.get("url") == item.get("url") for w in web_results):
-                            web_results.append(item)
+                        norm = _normalize_router_web_hit(item)
+                        if norm.get("url") and not any(w.get("url") == norm.get("url") for w in web_results):
+                            web_results.append(norm)
                     if len(web_results) >= 3:
                         break
                 except Exception as exc:
@@ -231,16 +263,29 @@ class CulturalRouter:
                     break
 
             decision.web_search_count = len(web_results)
-            # Fail-closed when PARALLEL_API_KEY not configured: mark warning so callers
-            # know web was unavailable (no hardcoded fallback is attempted).
+            # Fail-closed when no provider key is configured: mark warning so
+            # callers know web was unavailable (no hardcoded fallback attempted).
             if decision.web_search_triggered and not web_results:
                 try:
-                    from sard.agent.tools.cultural_tools import _resolve_parallel_api_key
+                    from sard.rag.search_providers import (
+                        resolve_exa_key,
+                        resolve_parallel_key,
+                        resolve_tavily_key,
+                    )
 
-                    if not _resolve_parallel_api_key():
+                    if not (
+                        resolve_parallel_key()
+                        or resolve_tavily_key()
+                        or resolve_exa_key()
+                    ):
                         decision.web_unavailable_warning = True
                 except Exception:
-                    if not os.environ.get("PARALLEL_API_KEY", "").strip():
+                    if not (
+                        os.environ.get("PARALLEL_API_KEY", "").strip()
+                        or os.environ.get("TAVILY_API_KEY", "").strip()
+                        or os.environ.get("TIVALY_API_KEY", "").strip()
+                        or os.environ.get("EXA_API_KEY", "").strip()
+                    ):
                         decision.web_unavailable_warning = True
 
             # Step C: Deep extract best 1-2 pages if needed
