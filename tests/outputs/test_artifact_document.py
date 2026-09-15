@@ -235,7 +235,6 @@ def test_markdown_table_parsed_to_table_block():
 
 def test_from_request_table_renders_once_in_every_renderer(tmp_path):
     import io
-    import zipfile
 
     from sard.outputs.document import ArtifactDocument
     from sard.outputs.html import render_html_document
