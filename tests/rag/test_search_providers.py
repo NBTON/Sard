@@ -112,7 +112,7 @@ def test_search_result_shape_and_ids():
         title="t", snippet="s" * 500, content="hello world",
         published_at="2024-01-01", author="a",
     )
-    assert r.canonical_url == "https://example.com/path"
+    assert r.canonical_url == "https://example.com/Path"
     assert len(r.snippet) <= 400
     assert r.content_hash == sp.content_hash_of("t", "hello world")
     assert len(r.content_hash) == 40
@@ -127,7 +127,9 @@ def test_language_bias_helper():
     assert detect_language("السلام عليكم ورحمة الله") == "ar"
     assert detect_language("hello world heritage") == "en"
     assert detect_language("12345 !!!") == "other"
-    assert canonicalize_url("https://A.com/X/?utm_medium=e&k=1") == "https://a.com/x?k=1"
+    # Path case is preserved (RFC 3986: paths are case-sensitive); only
+    # scheme/host are lowered. Distinct /X vs /x pages must not collide.
+    assert canonicalize_url("https://A.com/X/?utm_medium=e&k=1") == "https://a.com/X?k=1"
 
 
 def test_legacy_adapter_carries_both_aliases():
@@ -271,7 +273,10 @@ def test_dup_url_single_entry(clean_keys, fake_http, monkeypatch):
     fake_http.handler = handler
     results, _t, _f = fanout_search("obj", ["q"], run_extract=False)
     assert len(results) == 1
-    assert results[0].canonical_url == "https://example.com/dup"
+    # Path case preserved: /Dup vs /dup are distinct canonicals; the single
+    # entry comes from the content-hash dedup stage (same body), not from
+    # case-folding distinct pages together.
+    assert results[0].canonical_url == "https://example.com/Dup"
 
 
 def test_near_dup_keep_one(clean_keys, fake_http, monkeypatch):

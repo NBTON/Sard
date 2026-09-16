@@ -189,6 +189,28 @@ def query_profile(query: str) -> CulturalQueryProfile:
     )
 
 
+def alias_group_phrases() -> tuple[frozenset[str], ...]:
+    """Alias groups as raw phrases across topic/region/sector tables.
+
+    Verification layers reuse this so paraphrases that share an alias
+    group (e.g. ``الينابيع الحارة`` ~ ``العيون الحارة``) are not scored as
+    pure token misses. Callers tokenize phrases with their own normalizer;
+    this function adds no new topic, only the documented spellings.
+    """
+    groups: list[frozenset[str]] = []
+    for table in (_TOPIC_ALIASES, _REGION_ALIASES, _SECTOR_ALIASES):
+        try:
+            tables = table.values()
+        except Exception:
+            continue
+        for aliases in tables:
+            try:
+                groups.append(frozenset(aliases))
+            except Exception:
+                continue
+    return tuple(groups)
+
+
 def expanded_query_terms(query: str) -> frozenset[str]:
     """Return shared lexical terms for bundled and local retrieval.
 

@@ -271,8 +271,11 @@ class RetrievalService:
         for candidate in fused:
             calibrate_candidate_confidence(candidate, dense_thresh, min_conf)
 
-        raw_fused = fused[: settings.fused_candidates]
-        relevant_fused = [c for c in raw_fused if c.is_relevant]
+        # Filter-then-slice: a relevant candidate past the truncation window
+        # must not starve behind irrelevant head items (truncate-then-filter
+        # returned "no_relevant_evidence" while relevant hits existed).
+        relevant_fused = [c for c in fused if c.is_relevant]
+        raw_fused = relevant_fused[: settings.fused_candidates]
 
         has_relevant = bool(relevant_fused)
         top_confidence = raw_fused[0].confidence_score if raw_fused else 0.0
@@ -283,7 +286,7 @@ class RetrievalService:
             fused_to_return = []
         else:
             relevance_decision = "relevant"
-            fused_to_return = relevant_fused
+            fused_to_return = raw_fused
 
         return RetrievalResult(
             query=rewritten.original_question,

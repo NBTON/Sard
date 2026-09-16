@@ -20,7 +20,7 @@ import os
 import re
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Optional, Protocol, Sequence
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -62,7 +62,13 @@ def _utc_now_iso() -> str:
 
 
 def canonicalize_url(url: str) -> str:
-    """Lowered canonical URL with tracking params + fragments + trailing / stripped."""
+    """Canonical URL with tracking params + fragments + trailing / stripped.
+
+    Only scheme/host are case-insensitive per RFC 3986: the path keeps its
+    original case (paths can be case-sensitive), and the trailing ``.lower()``
+    applies to the recomposed ``scheme://netloc`` only. Lowering the path
+    used to collapse distinct pages into one dedup bucket.
+    """
     raw = (url or "").strip()
     if not raw:
         return ""
@@ -78,15 +84,13 @@ def canonicalize_url(url: str) -> str:
     path = parts.path or ""
     if len(path) > 1:
         path = path.rstrip("/")
-    path = path.lower()
     kept = [
         (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
         if k.lower() not in _TRACKING_PARAMS and not k.lower().startswith("utm_")
     ]
     query = urlencode(kept)
     netloc = f"{host}{port}".lower()
-    out = urlunparse((scheme, netloc, path, "", query, ""))
-    return out.lower()
+    return urlunparse((scheme, netloc, path, "", query, ""))
 
 
 def domain_of(url: str) -> str:
@@ -424,7 +428,10 @@ class TavilyProvider:
         if not key:
             return []
         qs = [q.strip() for q in (queries or []) if q and q.strip()] or [objective.strip()]
-        query_text = qs[0] if len(qs) == 1 else f"{objective} {' '.join(qs[1:2])}".strip()
+        # Single-query API: fold the objective + variants into one query
+        # string (deduped, capped) so every variant reaches the provider
+        # without multiplying API spend with one call per variant.
+        query_text = " ".join(dict.fromkeys([objective.strip(), *qs]))[:400].strip() or qs[0]
         body = {
             "api_key": key, "query": query_text, "search_depth": "advanced",
             "max_results": max_results, "include_answer": False,
@@ -481,12 +488,16 @@ class ExaProvider:
         if not key:
             return []
         qs = [q.strip() for q in (queries or []) if q and q.strip()] or [objective.strip()]
+        # Single-query API: fold the objective + variants into one query
+        # string (deduped, capped) so every variant reaches the provider
+        # without multiplying API spend with one call per variant.
+        query_text = " ".join(dict.fromkeys([objective.strip(), *qs]))[:400].strip() or qs[0]
         headers = {"Content-Type": "application/json", "x-api-key": key}
         with httpx.Client(timeout=timeout_s) as client:
             resp = client.post(
                 EXA_SEARCH_URL,
                 headers=headers,
-                json={"query": qs[0], "numResults": max_results, "type": "auto"},
+                json={"query": query_text, "numResults": max_results, "type": "auto"},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -551,18 +562,20 @@ def _classify_error(exc: BaseException, status_code: Optional[int] = None) -> tu
 
 
 def _dedup_and_rerank(candidates: list[SearchResult]) -> list[SearchResult]:
-    # 1. canonical_url -> keep highest institutional, tie earliest
+    # 1. canonical_url -> keep highest institutional, tie earliest.
+    # Hits with an empty canonical URL are kept under a per-URL fallback
+    # key (never silently dropped): relative/malformed URLs still carry
+    # content, and dropping them loses recall with zero telemetry.
     by_canon: dict[str, SearchResult] = {}
     order: dict[str, int] = {}
     for idx, res in enumerate(candidates):
-        if not res.canonical_url:
-            continue
-        prev = by_canon.get(res.canonical_url)
+        key = res.canonical_url or f"nocanon:{(res.url or '').strip().lower() or res.content_hash}"
+        prev = by_canon.get(key)
         if prev is None:
-            by_canon[res.canonical_url] = res
-            order[res.canonical_url] = idx
+            by_canon[key] = res
+            order[key] = idx
         elif institutional_boost(res.url) > institutional_boost(prev.url):
-            by_canon[res.canonical_url] = res
+            by_canon[key] = res
     stage = [by_canon[k] for k in sorted(by_canon, key=lambda k: order[k])]
     # 2. content_hash
     by_hash: dict[str, SearchResult] = {}
@@ -613,7 +626,10 @@ def is_duplicate_of_seen(
         return False
     body = content or snippet or ""
     if not body.strip():
-        return True  # empty web body adds nothing over the local record
+        # A known URL with an empty web body is NOT a duplicate: the empty
+        # snippet adds nothing, but dropping the hit would also skip the
+        # extract-enrichment pass that could fill it. Keep it.
+        return False
     for prior in prior_texts:
         if not prior:
             continue
@@ -727,10 +743,12 @@ def fanout_search(
 
     Request-aware depth: ``simple``/``normal``/``deep`` selects
     ``max_queries``/``per_provider``/``final_top``/``extract_n`` from
-    ``_DEPTH_BUDGETS`` and those budgets actually reach providers (queries
-    sliced, ``max_results`` passed through). When callers also cap
-    ``max_results``, providers are asked for at most that many each so we
-    never fetch-then-truncate (e.g. fetch 10 per provider only to keep 3).
+    ``_DEPTH_BUDGETS`` and those budgets actually reach providers
+    (multi-query APIs get the sliced variant list; single-query APIs get
+    the objective + variants folded into one query string; ``max_results``
+    passed through). When callers also cap ``max_results``, providers are
+    asked for at most that many each so we never fetch-then-truncate
+    (e.g. fetch 10 per provider only to keep 3).
 
     Hierarchical ``deadline`` (Deadline or absolute monotonic float),
     ``cancel_event``, and ``reserve_s`` bound the chain: no new provider is
@@ -897,10 +915,10 @@ def fanout_search(
             for res in ranked:
                 md = enriched.get(res.canonical_url)
                 if md:
-                    new_ranked.append(make_search_result(
-                        provider=res.provider, query=res.query, url=res.url,
-                        title=res.title, snippet=res.snippet, content=md,
-                        published_at=res.published_at, author=res.author,
+                    # Preserve the pre-enrichment identity (id/retrieved_at):
+                    # enriching content must not invalidate cached IDs.
+                    new_ranked.append(replace(
+                        res, content=md,
                         metadata={**(res.metadata or {}), "extract_enriched": True},
                     ))
                 else:

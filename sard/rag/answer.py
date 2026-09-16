@@ -156,7 +156,10 @@ class AnswerService:
         )
 
     def generate(self, question: str, candidates: list[RetrievedCandidate]) -> tuple[AnswerResult, list[FallbackEvent]]:
-        top = [c for c in candidates[: self._settings.final_top_k] if getattr(c, "is_relevant", True)]
+        # Filter-then-slice: relevance first so a relevant tail candidate is
+        # never starved by an irrelevant head within the top-K window.
+        relevant = [c for c in candidates if getattr(c, "is_relevant", True)]
+        top = relevant[: self._settings.final_top_k]
         if not top:
             return self._extractive_fallback(question, top, "لا توجد قطع مسترجعة ذات صلة لتغذية النموذج."), []
 

@@ -632,7 +632,7 @@ def test_infer_search_depth_request_aware():
 
 def test_canonical_cross_dedup_keeps_distinct_content():
     canon = canonicalize_url("https://Example.com/Page/?utm_source=x#frag")
-    assert canon == "https://example.com/page"
+    assert canon == "https://example.com/Page"
     seen = {canon: ["نص محلي عن العمارة النجدية والطين"]}
     assert is_duplicate_of_seen(canon, "نص محلي عن العمارة النجدية والطين", "", seen) is True
     assert is_duplicate_of_seen(canon, "تقرير مختلف تماما عن المهرجانات والمواعيد والفعاليات الجديدة", "", seen) is False

@@ -182,8 +182,11 @@ class BundledHybridRetriever:
             match_ratio = matched_terms / max(len(q_tokens), 1)
             raw_combined = (bm25_score / max(len(q_tokens), 1)) * 0.40 + match_ratio * 0.35 + bonus
 
-            # Calibrate confidence score between 0.70 and 0.96
-            calibrated_score = round(min(0.96, max(0.66, 0.70 + raw_combined * 0.26)), 4)
+            # Honest calibration: map raw_combined into [0, 1] without a
+            # floor. The old max(0.66, ...) floor reported >=0.70 for every
+            # single-term BM25 match, pushing weak generic overlap over the
+            # 0.65 confidence threshold and inflating is_in_corpus_topic.
+            calibrated_score = round(min(0.96, 0.30 + raw_combined * 0.55), 4)
 
             if calibrated_score < _CALIBRATED_THRESHOLD:
                 continue

@@ -56,12 +56,14 @@ class FailureKind(str, Enum):
     RERANKING_UNAVAILABLE = "reranking_unavailable"
     VERIFICATION_EXHAUSTED = "verification_exhausted"
     RENDERING_VALIDATION = "rendering_validation"
+    CANCELLED = "cancelled"
 
 
 NON_RETRYABLE_FAILURE_KINDS = frozenset(
     {
         FailureKind.AUTH,
         FailureKind.EMBEDDING_MISMATCH,
+        FailureKind.CANCELLED,
     }
 )
 

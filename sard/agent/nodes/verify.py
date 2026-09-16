@@ -2,8 +2,9 @@
 
 Per-scope survival replaces the old whole-document gate.  Deterministic
 layers L1-L6 are authoritative and short-circuit cheap->expensive; the
-constrained model (L7) runs ONLY for L4-L6 disagreements and all high-risk
-claims and may only narrow (see :func:`_status_choice`).
+constrained model (L7) runs ONLY for L4-L6 disagreements and SUPPORTED
+high-risk claims and may only narrow (see :func:`_status_choice`).
+Deterministic UNSUPPORTED is final and fail-closed, so it skips L7.
 """
 
 from __future__ import annotations
@@ -135,6 +136,38 @@ def _content_tokens(text: str) -> set[str]:
     return {t for t in cleaned.split() if len(t) >= 2 and t not in stop}
 
 
+def _alias_expanded_tokens(tokens: set[str]) -> set[str]:
+    """Expand a token set with same-alias-group spellings.
+
+    Verification compares claim tokens against evidence tokens; without
+    alias knowledge a paraphrase (``الينابيع الحارة`` vs ``العيون الحارة``)
+    shares ~1 token and misfires as ``lexical_gap`` even though retrieval
+    treats both as one topic. Any group contributing a token contributes
+    all its tokens, on both sides symmetrically.
+    """
+    if not tokens:
+        return tokens
+    try:
+        from sard.rag.relevance import alias_group_phrases as _groups_fn
+    except Exception:
+        return tokens
+    try:
+        groups = _groups_fn()
+    except Exception:
+        return tokens
+    out = set(tokens)
+    for group in groups:
+        group_tokens: set[str] = set()
+        for phrase in group:
+            try:
+                group_tokens.update(_content_tokens(phrase))
+            except Exception:
+                continue
+        if tokens & group_tokens:
+            out |= group_tokens
+    return out
+
+
 def _excerpt_supports_claim(claim_text: str, evidence_contents: list[str]) -> bool:
     """L4 lexical grounding: claim shares content tokens with cited excerpts."""
     claim_norm = (claim_text or "").strip()
@@ -143,6 +176,7 @@ def _excerpt_supports_claim(claim_text: str, evidence_contents: list[str]) -> bo
     claim_tokens = _content_tokens(claim_norm)
     if not claim_tokens:
         return False
+    claim_tokens = _alias_expanded_tokens(claim_tokens)
     for excerpt in evidence_contents:
         if not excerpt:
             continue
@@ -151,7 +185,7 @@ def _excerpt_supports_claim(claim_text: str, evidence_contents: list[str]) -> bo
             return True
         if len(excerpt_norm) >= 12 and excerpt_norm in claim_norm:
             return True
-        excerpt_tokens = _content_tokens(excerpt_norm)
+        excerpt_tokens = _alias_expanded_tokens(_content_tokens(excerpt_norm))
         if not excerpt_tokens:
             continue
         shared = claim_tokens & excerpt_tokens
@@ -198,13 +232,18 @@ def _entity_overlap_pass(claim_text: str, evidence_contents: list[str]) -> bool:
 
 
 def _semantic_similarity(claim_text: str, evidence_contents: list[str]) -> float:
-    """L5 deterministic semantic proxy: max Jaccard over content tokens."""
-    claim_tokens = _content_tokens(claim_text or "")
+    """L5 deterministic semantic proxy: max Jaccard over content tokens.
+
+    Token sets are alias-expanded first (same groups as retrieval), so the
+    score degrades gracefully on paraphrase instead of collapsing to noise.
+    Pure Jaccard remains the fallback when no alias group fires.
+    """
+    claim_tokens = _alias_expanded_tokens(_content_tokens(claim_text or ""))
     if not claim_tokens:
         return 0.0
     best = 0.0
     for excerpt in evidence_contents or ():
-        ev_tokens = _content_tokens(excerpt or "")
+        ev_tokens = _alias_expanded_tokens(_content_tokens(excerpt or ""))
         if not ev_tokens:
             continue
         inter = len(claim_tokens & ev_tokens)
@@ -288,7 +327,9 @@ def _claim_scope(draft: str, segment: str, seq: int) -> str:
             if stripped.startswith("|"):
                 return f"table:r{index}"
             return f"answer:p{index}"
-    return f"answer:p{seq % 3}"
+    # Fallback: unique per-claim bucket. (A modulo fallback would collide
+    # unrelated claims into 3 buckets and corrupt scope_survival accounting.)
+    return f"answer:p{seq}"
 
 
 def _build_scope_survival(records: list[ClaimRecord]) -> dict[str, dict]:
@@ -461,7 +502,14 @@ def verify(state: dict, deps) -> dict:
         )
         partial_state = {**state, "atomic_claims": []}
         existing_draft = (draft or "").strip()
-        final_text = existing_draft or _assemble_partial(partial_state)
+        # No-evidence must never echo the unverified draft as the final
+        # answer: assemble_partial abstains when nothing is verified
+        # (routing assemble contract). The draft is reused only when real
+        # evidence exists to back at least part of it.
+        if evidence and existing_draft:
+            final_text = existing_draft
+        else:
+            final_text = _assemble_partial(partial_state)
         return {
             "atomic_claims": [],
             "claim_citation_mapping": {},
@@ -591,8 +639,11 @@ def verify(state: dict, deps) -> dict:
                 sem = _semantic_similarity(text, cited_contents)
                 l5_ok = sem >= 0.18 or (len(_content_tokens(text)) <= 4 and sem >= 0.12)
                 topk = _reranker_topk(text, [item_by_cit[c] for c in citation_ids if c in item_by_cit] + [i for i in evidence if i.citation_id not in citation_ids], k=3)
-                top1 = topk[0].citation_id if topk else None
-                l6_ok = top1 in citation_ids if top1 else True
+                # A valid citation ranks in the cited top-3: requiring top-1
+                # flagged claims whose cited (correct) evidence merely scored
+                # below an uncited chunk. The candidate set stays the cited
+                # set plus uncited evidence (no invented sources).
+                l6_ok = any(item.citation_id in citation_ids for item in topk[:3]) if topk else True
                 if l4_ok != l5_ok or (l4_ok and not l6_ok):
                     l4_disagreement.add(claim_id)
                 if not l4_ok:
@@ -607,7 +658,7 @@ def verify(state: dict, deps) -> dict:
                     deterministic_status = ClaimStatus.UNSUPPORTED
                     flagged = True
                     reason_codes.append("entity_mismatch")
-                    explanation = "ادعاء عالي المخاطر خارج أعلى-1 في إعادة الترتيب — غير مدعوم والصف مُعلَّم."
+                    explanation = "ادعاء عالي المخاطر خارج أعلى-3 في إعادة الترتيب — غير مدعوم والصف مُعلَّم."
 
         supporting_chunks = tuple(dict.fromkeys(chunk_by_cit[c] for c in citation_ids if c in chunk_by_cit))
         record = ClaimRecord(
@@ -618,8 +669,13 @@ def verify(state: dict, deps) -> dict:
             reason_codes=tuple(reason_codes), flagged_row=flagged,
         )
         claim_records.append(record)
+        # L7 runs for L4-L6 disagreements and SUPPORTED high-risk claims.
+        # Deterministic UNSUPPORTED is final and fail-closed (the model may
+        # only narrow, never rescue), so high-risk UNSUPPORTED skips L7:
+        # no model call can change its verdict, and the deterministic
+        # reason codes already feed the compose-retry feedback.
         needs_l7 = (claim_id in l4_disagreement) or (claim_class == CLASS_HIGH_RISK and deterministic_status is ClaimStatus.SUPPORTED)
-        if needs_l7 and deterministic_status is ClaimStatus.SUPPORTED:
+        if needs_l7:
             entail_candidates.append(record)
 
     model_suggestions: dict[str, ClaimStatus] = {}
@@ -693,7 +749,13 @@ def verify(state: dict, deps) -> dict:
     covered = len(external_good)
     coverage_ratio = (covered / total_external) if total_external else 1.0
     scope_survival = _build_scope_survival(final_records)
-    ordinals = evidence_ordinals(evidence)
+    # Ordinals recomputed over the USED subset (cited by final records
+    # first, then remaining evidence in stable order) so state never shows
+    # gaps like {1,3} after unused sources are filtered at render.
+    _used_cits = [c for r in final_records for c in r.citation_ids]
+    _used_order = list(dict.fromkeys([*_used_cits, *(i.citation_id for i in evidence)]))
+    _by_cit = {i.citation_id: i for i in evidence}
+    ordinals = evidence_ordinals([_by_cit[c] for c in _used_order if c in _by_cit])
     isolated = _is_isolated_failure(total_external, len([r for r in removed if r.claim_class in (CLASS_FACTUAL, CLASS_HIGH_RISK, CLASS_INTERPRETIVE)]))
 
     claim_citation_mapping = {r.claim_id: list(r.citation_ids) for r in final_records}

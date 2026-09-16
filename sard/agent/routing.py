@@ -18,6 +18,15 @@ def classify_failure_to_kind(exc: BaseException) -> FailureKind:
     """Map any exception to a fixed :class:`FailureKind`."""
     if isinstance(exc, GraphNodeError):
         return exc.kind
+    # Cancellation is typed, never a timeout: callers match on kind, not on
+    # message substrings.
+    try:
+        from sard.agent.deadline import DeadlineCancelledError as _Cancelled
+
+        if isinstance(exc, _Cancelled):
+            return FailureKind.CANCELLED
+    except Exception:
+        pass
     category = classify_exception(exc)
     mapping = {
         FailureCategory.AUTHENTICATION: FailureKind.AUTH,

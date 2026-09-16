@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional
 
@@ -168,9 +169,11 @@ class QueryRewriteService:
         self._settings = settings or get_rag_settings()
         self._breaker = circuit_breaker or CircuitBreaker()
         self._chat_model_factory = chat_model_factory
-        # Stateless cache: key = (normalized_query, model_id), not session_id. Bounded growth mitigated
-        # by deterministic fallback path; LRU eviction could be added if growth observed in warm lambda.
-        self._cache: dict[tuple[str, str], RewrittenQuery] = {}
+        # Stateless cache: key = (normalized_query, model_id), not session_id.
+        # Bounded OrderedDict LRU (1024 entries): long server processes must
+        # not grow memory monotonically with distinct queries.
+        self._cache: OrderedDict[tuple[str, str], RewrittenQuery] = OrderedDict()
+        self._cache_max = 1024
 
     def _candidates(self) -> list[ModelCandidate]:
         route = self._settings.query_route
@@ -212,6 +215,7 @@ class QueryRewriteService:
         def call(candidate: ModelCandidate) -> RewrittenQuery:
             cache_key = (normalized_cache_key, candidate.model_id)
             if cache_key in self._cache:
+                self._cache.move_to_end(cache_key)
                 return self._cache[cache_key]
 
             model = self._build_chat_model(candidate)
@@ -262,6 +266,9 @@ class QueryRewriteService:
                 model_used=candidate.model_id,
             )
             self._cache[cache_key] = result
+            # Bounded LRU: evict oldest first so the cache never exceeds max.
+            while len(self._cache) > self._cache_max:
+                self._cache.popitem(last=False)
             return result
 
         try:

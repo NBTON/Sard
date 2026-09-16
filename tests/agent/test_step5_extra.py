@@ -85,7 +85,11 @@ def test_no_evidence():
     result = run_pipeline("الرياض", dependencies=deps)
     
     assert result["graph_outcome"] == "partial"
-    assert "لا دليل متاح" in result["final_answer"] or "أدلة كافية" in result["final_answer"]
+    # No-evidence abstention contract: the unverified draft must NOT be
+    # echoed as the final answer. The honest partial states that no verified
+    # facts are available instead of inventing or laundering the draft.
+    assert "لا تتوفر حقائق مُتحقق منها" in result["final_answer"]
+    assert "CIT-" not in result["final_answer"]
 
 
 def test_unknown_citation_rejection():

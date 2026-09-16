@@ -1,8 +1,8 @@
 """Constrained-entailment prompt for the verify node (workstream G).
 
 Deterministic layers (L1-L6) remain authoritative; the model (L7) is invoked
-ONLY for L4-L6 disagreements and for all high-risk claims, with temperature 0
-and no chain-of-thought.  Output is strict JSON per claim:
+ONLY for L4-L6 disagreements and for SUPPORTED high-risk claims, with
+temperature 0 and no chain-of-thought.  Output is strict JSON per claim:
 
     {"claims": [{"claim_id": "...", "verdict": "SUPPORTED|PARTIAL|UNSUPPORTED",
                  "reason_codes": [...], "correction": "...?"}]}
@@ -21,7 +21,7 @@ VERIFY_SYSTEM_PROMPT = (
     "القواعد:\n"
     "1) non_factual (انتقالات/صياغة تنظيمية/توصيات/أسلوب/رأي) لا يتطلب استشهادًا أبدًا.\n"
     "2) interpretive يحتاج استشهادًا + صياغة متحفظة (قد/ربما/يبدو) لا إزالة.\n"
-    "3) high_risk (سلامة/ساعات/أسعار/قانوني/تأشيرة/طبي/مالي/ديني/تواريخ/مسمّيات) يتطلب L4+(أعلى-1 في L6 أو SUPPORTED في L7) وإلا UNSUPPORTED + تعليم الصف.\n"
+    "3) high_risk (سلامة/ساعات/أسعار/قانوني/تأشيرة/طبي/مالي/ديني/تواريخ/مسمّيات) يتطلب L4+(ضمن أعلى-3 في L6 أو SUPPORTED في L7) وإلا UNSUPPORTED + تعليم الصف.\n"
     "4) أعد JSON صالحًا فقط دون أي نص إضافي بالشكل:\n"
     '\'{"claims": [{"claim_id": "...", "verdict": "SUPPORTED|PARTIAL|UNSUPPORTED", '
     '"reason_codes": ["lexical_gap"], "correction": "..."}]}\n'
