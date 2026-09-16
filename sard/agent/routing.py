@@ -7,11 +7,14 @@ classification, and the deterministic assembly of an honest partial answer.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from sard.agent.events import FailureKind, GraphNodeError
 from sard.agent.state import ClaimStatus, RAGMode
 from sard.rag.fallbacks import FailureCategory, classify_exception
+
+logger = logging.getLogger(__name__)
 
 
 def classify_failure_to_kind(exc: BaseException) -> FailureKind:
@@ -25,8 +28,11 @@ def classify_failure_to_kind(exc: BaseException) -> FailureKind:
 
         if isinstance(exc, _Cancelled):
             return FailureKind.CANCELLED
-    except Exception:
-        pass
+    except Exception as exc_reason:
+        logger.debug(
+            "Deadline-cancellation probe skipped (%s).",
+            type(exc_reason).__name__,
+        )
     category = classify_exception(exc)
     mapping = {
         FailureCategory.AUTHENTICATION: FailureKind.AUTH,

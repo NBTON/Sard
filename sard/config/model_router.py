@@ -298,8 +298,11 @@ def _reasoning_channel_text(response: Any) -> str:
                 text = (choices[0] or {}).get("text", "")
                 if isinstance(text, str) and text.strip():
                     return text
-        except Exception:
-            pass
+        except Exception as exc_reason:
+            logger.debug(
+                "response_metadata read skipped (%s).",
+                type(exc_reason).__name__,
+            )
     except Exception as exc_reason:
         logger.debug("Reasoning-channel read skipped (%s).", type(exc_reason).__name__)
     return ""

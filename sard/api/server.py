@@ -1438,7 +1438,7 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
             "timings": state.get("timings", {}),
             "verification_passed": getattr(state.get("verification_result"), "passed", True) if state.get("verification_result") else True,
         }
-    except Exception as exc:
+    except Exception:
         logger.exception("Error generating full itinerary")
         # Static public detail: raw exception text must never cross the API
         # boundary (paths/provider messages). Server-side log keeps it.
@@ -1761,8 +1761,12 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                     if _is_cancel_exc(exc) or chat_cancel.is_set():
                         try:
                             chat_cancel.set()
-                        except Exception:
-                            pass
+                        except Exception as exc_reason:
+                            logger.debug(
+                                "Chat cancel set skipped (run_id=%s): %s",
+                                run_id,
+                                type(exc_reason).__name__,
+                            )
                         hybrid_cancelled = True
                         logger.info("Hybrid chat cancelled (run_id=%s); skipping direct fallback.", run_id)
                     else:

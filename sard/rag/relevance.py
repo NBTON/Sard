@@ -14,11 +14,14 @@ facts still come from the retrieved source excerpt and its metadata.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from sard.rag.normalize import normalize_arabic
+
+logger = logging.getLogger(__name__)
 
 
 _STOP_WORDS = {
@@ -201,12 +204,20 @@ def alias_group_phrases() -> tuple[frozenset[str], ...]:
     for table in (_TOPIC_ALIASES, _REGION_ALIASES, _SECTOR_ALIASES):
         try:
             tables = table.values()
-        except Exception:
+        except Exception as exc_reason:
+            logger.debug(
+                "Alias table values skipped (%s).",
+                type(exc_reason).__name__,
+            )
             continue
         for aliases in tables:
             try:
                 groups.append(frozenset(aliases))
-            except Exception:
+            except Exception as exc_reason:
+                logger.debug(
+                    "Alias group skipped (%s).",
+                    type(exc_reason).__name__,
+                )
                 continue
     return tuple(groups)
 

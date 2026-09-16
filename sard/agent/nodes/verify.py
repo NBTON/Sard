@@ -161,7 +161,11 @@ def _alias_expanded_tokens(tokens: set[str]) -> set[str]:
         for phrase in group:
             try:
                 group_tokens.update(_content_tokens(phrase))
-            except Exception:
+            except Exception as exc_reason:
+                logger.debug(
+                    "Alias-expansion tokenize skipped (%s).",
+                    type(exc_reason).__name__,
+                )
                 continue
         if tokens & group_tokens:
             out |= group_tokens
