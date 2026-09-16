@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Pt, RGBColor, Inches
@@ -302,7 +302,7 @@ class DocxGenerator:
             _set_paragraph_rtl(heading)
             run = heading.add_run(text)
             _set_run_rtl(run, size=Pt(16), bold=True, color=COLOR_DATE, font=FONT_ARABIC)
-        elif btype in {"bullet", "item", "point", "takeaway"}:
+        elif btype in {"bullet", "item", "point", "takeaway", "list"}:
             _add_bullet(document, text)
         elif btype in {"quote", "callout", "note"}:
             prefix = "«" if btype == "quote" else ""
@@ -325,6 +325,27 @@ class DocxGenerator:
             rendered = _add_image(document, src) if src else False
             if not rendered and text.strip():
                 _add_paragraph(document, text)
+        elif btype == "timeline":
+            items = data.get("items") or data.get("entries") or data.get("events") or []
+            if isinstance(items, (list, tuple)) and items:
+                for it in items:
+                    if isinstance(it, dict):
+                        date = str(it.get("date") or "").strip()
+                        title = str(it.get("title") or it.get("text") or "").strip()
+                        line = f"{date}: {title}" if date and title else (title or date)
+                        if line:
+                            _add_bullet(document, line)
+                    elif str(it or "").strip():
+                        _add_bullet(document, str(it))
+            elif text.strip():
+                _add_bullet(document, text)
+        elif btype == "sources":
+            if text.strip():
+                _add_paragraph(document, text, size=10)
+        elif btype == "page-break":
+            para = document.add_paragraph()
+            run = para.add_run()
+            run.add_break(WD_BREAK.PAGE)
         elif btype == "attachment":
             return  # preview metadata, not visible content
         elif btype in {"slide", "event", "calendar_event"}:

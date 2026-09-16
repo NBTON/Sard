@@ -171,7 +171,26 @@ def _block_image(block: ArtifactBlock) -> tuple[str, str] | None:
     return src, alt
 
 
-_LIST_BLOCK_TYPES = {"bullet", "item", "point", "takeaway"}
+_LIST_BLOCK_TYPES = {"bullet", "item", "point", "takeaway", "list"}
+
+
+def _block_timeline_items(block: ArtifactBlock) -> list[dict[str, object]]:
+    """Timeline/sources items from block data (list of {date,title,text,url})."""
+    data = block.data if isinstance(block.data, dict) else None
+    if not data:
+        return []
+    for key in ("items", "entries", "events", "sources", "rows"):
+        vals = data.get(key)
+        if isinstance(vals, (list, tuple)) and vals:
+            out: list[dict[str, object]] = []
+            for v in vals[:100]:
+                if isinstance(v, dict):
+                    out.append({str(k): v[k] for k in v if isinstance(k, str)})
+                elif str(v or "").strip():
+                    out.append({"text": str(v)})
+            if out:
+                return out
+    return []
 
 
 def _render_block(block: ArtifactBlock, table_direction: str = "rtl") -> str:
@@ -225,6 +244,33 @@ def _render_block(block: ArtifactBlock, table_direction: str = "rtl") -> str:
             if details:
                 extra = f"<p{_dir_attr(str(details))}>{_esc(str(details))}</p>"
         return f"<div class=\"sard-card\"{_dir_attr(text)}><strong>{_esc(text)}</strong>{extra}</div>"
+    if btype == "timeline":
+        items = _block_timeline_items(block)
+        if not items and text.strip():
+            items = [{"text": line} for line in text.splitlines() if line.strip()]
+        if not items:
+            return ""
+        lis = "".join(
+            f"<li>{('<strong>' + _esc(str(it.get('date', ''))) + '</strong> ' if it.get('date') else '')}"
+            f"{('<em>' + _esc(str(it.get('title', ''))) + '</em> ' if it.get('title') else '')}"
+            f"{_esc(str(it.get('text', '')))}</li>"
+            for it in items
+        )
+        return f"<ol class=\"sard-timeline\"{_dir_attr(text)}>{lis}</ol>"
+    if btype == "sources":
+        items = _block_timeline_items(block)
+        if not items and text.strip():
+            items = [{"text": line} for line in text.splitlines() if line.strip()]
+        if not items:
+            return ""
+        lis = "".join(
+            f"<li>{_esc(str(it.get('title') or it.get('text', '')))}"
+            f"{(' — ' + _esc(str(it.get('url', ''))) if it.get('url') else '')}</li>"
+            for it in items
+        )
+        return f"<section class=\"sard-sources\"{_dir_attr(text)}><ul>{lis}</ul></section>"
+    if btype == "page-break":
+        return "<hr class=\"sard-page-break\" style=\"break-after:page;page-break-after:always\" />"
     if btype == "attachment":
         # Renderer-payload attachments are preview metadata, not visible content.
         return ""

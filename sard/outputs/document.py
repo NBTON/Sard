@@ -21,6 +21,32 @@ from sard.outputs.schemas import CITATION_ID_RE, INLINE_CITATION_RE, CitationSou
 _ALLOWED_BLOCK_STATUS = frozenset({"verified", "user_provided", "uncertain", "evidence_limited"})
 _RENDERABLE_UNCITED = frozenset({"user_provided", "uncertain"})
 
+# Canonical renderer-independent block vocabulary. Every renderer must
+# handle each canonical type explicitly (HTML/PDF/DOCX/PPTX branches);
+# legacy aliases normalize to canonical at block creation. Truly unknown
+# types pass through untouched and degrade to escaped paragraphs
+# downstream — never raw HTML, never silent loss of text.
+BLOCK_TYPES = frozenset({
+    "heading", "paragraph", "list", "table", "callout", "quote", "code",
+    "timeline", "image", "sources", "page-break", "slide", "event",
+    "summary", "attachment", "takeaway",
+})
+
+_BLOCK_TYPE_ALIASES = {
+    "bullet": "list",
+    "item": "list",
+    "point": "list",
+    "text": "paragraph",
+    "prose": "paragraph",
+    "description": "paragraph",
+}
+
+
+def normalize_block_type(raw: object) -> str:
+    """Lower/strip a block type and fold legacy aliases to canonical."""
+    btype = str(raw or "").lower().strip()
+    return _BLOCK_TYPE_ALIASES.get(btype, btype)
+
 
 def parse_markdown_table(paragraph: str) -> list[list[str]] | None:
     """Parse a GitHub-style markdown table paragraph into rows, else None.
@@ -103,11 +129,19 @@ class ArtifactBlock:
             raise ValueError("ArtifactBlock requires a block_id.")
         if not self.block_type or not str(self.block_type).strip():
             raise ValueError("ArtifactBlock requires a block_type.")
+        # Fold legacy aliases (bullet/item/point -> list, ...) so every
+        # renderer sees the canonical vocabulary.
+        object.__setattr__(self, "block_type", normalize_block_type(self.block_type))
         if self.verification_status not in _ALLOWED_BLOCK_STATUS:
             raise ValueError(f"Unknown block verification_status: {self.verification_status!r}")
 
     def is_renderable(self) -> bool:
-        """Evidence rule: uncited blocks render only when user-provided/uncertain."""
+        """Evidence rule: uncited blocks render only when user-provided/uncertain.
+
+        Structural ``page-break`` blocks carry no claims and always render.
+        """
+        if normalize_block_type(self.block_type) == "page-break":
+            return True
         if self.source_ids or self.evidence_ids:
             return True
         return self.verification_status in _RENDERABLE_UNCITED
@@ -693,7 +727,10 @@ class ArtifactDocument:
                     if not isinstance(b, dict):
                         continue
                     text = str(b.get("text", "") or "")
-                    if not text.strip() and not b.get("data"):
+                    # page-break is structural and textless by nature: it must
+                    # survive even with empty text and no data.
+                    is_break = normalize_block_type(b.get("type")) == "page-break"
+                    if not text.strip() and not b.get("data") and not is_break:
                         continue
                     sec_blocks.append(
                         ArtifactBlock(

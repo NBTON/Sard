@@ -119,21 +119,28 @@ export function ArtifactPanel({
 
   // Lazy fetch HTML for HTML artifacts if not in preview payload
   const [fetchedHtml, setFetchedHtml] = useState<string | null>(null);
+  const [htmlFetchFailed, setHtmlFetchFailed] = useState(false);
+  const [htmlFetchNonce, setHtmlFetchNonce] = useState(0);
   useEffect(() => {
     setFetchedHtml(null);
+    setHtmlFetchFailed(false);
     if (!inlineHtml && url && (fmt === "html" || fmt === "htm") && (artifact?.status === "created" || activeVersion?.status === "created")) {
       let cancelled = false;
       fetch(url, { credentials: "same-origin" })
         .then((r) => (r.ok ? r.text() : null))
         .then((text) => {
-          if (!cancelled && text) setFetchedHtml(text);
+          if (cancelled) return;
+          if (text) setFetchedHtml(text);
+          else setHtmlFetchFailed(true);
         })
-        .catch(() => {});
+        .catch(() => {
+          if (!cancelled) setHtmlFetchFailed(true);
+        });
       return () => {
         cancelled = true;
       };
     }
-  }, [inlineHtml, url, fmt, artifact?.status, activeVersion?.status]);
+  }, [inlineHtml, url, fmt, artifact?.status, activeVersion?.status, htmlFetchNonce]);
 
   const html = inlineHtml || fetchedHtml;
   const p = versionPreview && typeof versionPreview === "object" ? versionPreview : {};
@@ -189,7 +196,13 @@ export function ArtifactPanel({
         msg: isAr ? "تم نسخ رابط webcal." : "Copied webcal link.",
       });
     } catch {
-      setDlState({ kind: "error", msg: webcal });
+      // Clipboard denied: show a neutral notice, not the raw URL as an error.
+      setDlState({
+        kind: "idle",
+        msg: isAr
+          ? `تعذّر النسخ التلقائي — انسخ الرابط يدويًا: ${webcal}`
+          : `Auto-copy failed — copy manually: ${webcal}`,
+      });
     }
   }
 
@@ -496,7 +509,7 @@ export function ArtifactPanel({
           ) : tab === "preview" && html ? (
             <iframe
               title={activeTitle || artifact.title}
-              sandbox="allow-same-origin"
+              sandbox="allow-same-origin allow-popups"
               srcDoc={buildArtifactSrcDoc(html, dir)}
               style={{
                 width: "100%",
@@ -507,6 +520,40 @@ export function ArtifactPanel({
                 background: "#FAF7F1",
               }}
             />
+          ) : tab === "preview" && fmt === "pdf" && url && url !== "#" ? (
+            <div>
+              <object
+                data={url}
+                type="application/pdf"
+                style={{
+                  width: "100%",
+                  minHeight: 520,
+                  height: "70vh",
+                  border: "1px solid #E0D8C8",
+                  borderRadius: 12,
+                  background: "#FAF7F1",
+                }}
+              >
+                <embed src={url} type="application/pdf" style={{ width: "100%", minHeight: 520 }} />
+              </object>
+              <div style={{ fontSize: 12, color: "#7D6E5D", marginTop: 8 }}>
+                {isAr
+                  ? "إن لم تظهر المعاينة، استخدم زر التحميل أدناه."
+                  : "If the preview does not load, use the download button below."}
+              </div>
+            </div>
+          ) : tab === "preview" &&
+            (fmt === "png" || fmt === "jpg" || fmt === "jpeg" || fmt === "svg" || fmt === "webp") &&
+            url &&
+            url !== "#" ? (
+            <div style={{ textAlign: "center" }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={url}
+                alt={activeTitle || artifact.title}
+                style={{ maxWidth: "100%", borderRadius: 12, border: "1px solid #E0D8C8" }}
+              />
+            </div>
           ) : tab === "preview" && isPresentation ? (
             <div>
               <div
@@ -707,6 +754,36 @@ export function ArtifactPanel({
                 border: "1px solid #E0D8C8",
               }}
             >
+              {tab === "preview" && htmlFetchFailed && (
+                <div
+                  role="status"
+                  style={{
+                    fontSize: 12,
+                    color: "#9E3A2F",
+                    background: "#FBF1EC",
+                    border: "1px solid #E8C9BC",
+                    borderRadius: 8,
+                    padding: "8px 12px",
+                    marginBottom: 12,
+                  }}
+                >
+                  {isAr ? "تعذّر تحميل المعاينة." : "Preview failed to load."}{" "}
+                  <button
+                    onClick={() => setHtmlFetchNonce((n) => n + 1)}
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: "#BE4A24",
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      textDecoration: "underline",
+                    }}
+                  >
+                    {isAr ? "إعادة المحاولة" : "Retry"}
+                  </button>
+                </div>
+              )}
               <div style={{ fontSize: 40, marginBottom: 8 }}>{kindIcon(artifact)}</div>
               <h2 style={{ margin: "0 0 8px 0", fontSize: 17 }}>{activeTitle || artifact.title}</h2>
               <div style={{ fontSize: 13, color: "#63584E", lineHeight: 2 }}>
@@ -888,9 +965,17 @@ export function ArtifactPanel({
             )}
           </div>
 
-          {dlState.kind === "error" && dlState.msg && (
-            <div role="status" style={{ marginTop: 8, fontSize: 12, color: "#9E3A2F" }}>
-              ⚠️ {dlState.msg}
+          {dlState.msg && (
+            <div
+              role="status"
+              style={{
+                marginTop: 8,
+                fontSize: 12,
+                color: dlState.kind === "error" ? "#9E3A2F" : "#5C6B4C",
+              }}
+            >
+              {dlState.kind === "error" ? "⚠️ " : "✓ "}
+              {dlState.msg}
             </div>
           )}
           <div style={{ marginTop: 6, fontSize: 11, color: "#7D6E5D" }}>

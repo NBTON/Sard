@@ -25,6 +25,7 @@ export const copy: Copy = {
   chatEmptyTitle: { ar: "كيف أساعدك في استكشاف التراث اليوم؟", en: "How can I help you explore heritage today?" },
   thinkingError: { ar: "تعذّر إتمام الإجابة. حاول مرة أخرى.", en: "Could not complete the answer. Please try again." },
   sources: { ar: "المصادر", en: "Sources" },
+  invalidSources: { ar: "غير صالح", en: "invalid" },
   attachments: { ar: "المرفقات", en: "Attachments" },
 };
 

@@ -140,6 +140,25 @@ def test_revision_with_format_conversion_keeps_v1_bytes(client):
     assert "text/plain" in dl1.headers["content-type"]
 
 
+def test_revision_leaks_no_orphan_files(client, tmp_path):
+    """Revision must not leak random-ID orphan bytes: every stored file stays
+    under the stable artifact identity (append-only v1+v2, no divergent IDs)."""
+    test_client, store = client
+    created = _create(store)
+    resp = test_client.post(
+        f"/api/artifacts/{created.id}/revisions",
+        json={"instruction": "append: فقرة تنقيحية للفحص"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == created.id
+    stray = [
+        p.name
+        for p in tmp_path.rglob("*")
+        if p.is_file() and created.id not in p.name
+    ]
+    assert stray == [], f"orphan files outside stable identity: {stray}"
+
+
 def test_unknown_artifact_revision_is_422_and_versions_404(client):
     test_client, _ = client
     resp = test_client.post(

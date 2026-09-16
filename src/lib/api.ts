@@ -241,8 +241,18 @@ export async function downloadArtifactFile(
   let response: Response;
   const targetUrl =
     url.startsWith("/") && API_BASE ? `${API_BASE.replace(/\/+$/, "")}${url}` : url;
+  // Cookie-auth downloads break cross-origin with same-origin credentials:
+  // include cookies only when the target is same-origin (or relative).
+  let sameOrigin = true;
   try {
-    response = await fetch(targetUrl, { credentials: "same-origin" });
+    if (typeof window !== "undefined") {
+      sameOrigin = new URL(targetUrl, window.location.href).origin === window.location.origin;
+    }
+  } catch {
+    sameOrigin = true;
+  }
+  try {
+    response = await fetch(targetUrl, { credentials: sameOrigin ? "same-origin" : "include" });
   } catch (err: any) {
     throw new SardApiError(err?.message || "Network error during download", {
       code: "http_error",

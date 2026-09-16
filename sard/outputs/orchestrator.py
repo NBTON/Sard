@@ -51,6 +51,59 @@ _BLOB_DEFAULT_RUN = "default"
 _BLOB_DEFAULT_VERSION = 1
 
 
+def _proxy_download_url(filename: str, expires_in: int = 3600) -> str:
+    """Server-proxy download URL, HMAC-signed when a secret is configured.
+
+    With ``SARD_DOWNLOAD_SECRET`` set, the URL carries ``?exp=&sig=`` and
+    the endpoint enforces it; otherwise a plain proxy path (local-dev open
+    mode, reported by /api/status).
+    """
+    from sard.outputs.signing import signed_suffix_for_filename as _suffix
+
+    safe_name = urllib.parse.quote(str(filename or ""), safe="")
+    return "/api/artifacts/" + safe_name + _suffix(str(filename or ""), expires_in)
+
+
+def _proxy_version_url(artifact_id: str, version: int, expires_in: int = 3600) -> str:
+    """Signed ``/api/artifacts/version/{id}/{v}`` URL (open path when unset)."""
+    from sard.outputs.signing import signed_suffix_for_version as _vsuffix
+
+    return f"/api/artifacts/version/{artifact_id}/{int(version)}" + _vsuffix(artifact_id, version, expires_in)
+
+
+def _call_store_with_budget(store: Any, method_name: str, budget_s: float, *args: Any, **kwargs: Any) -> Any:
+    """Run a blocking store op with a hard wall-clock budget.
+
+    Blob I/O uses constructor-fixed timeouts that ignore the run deadline;
+    without this a slow blob call eats the terminal reserve and the
+    ``request-2s`` hard stop is breached. The worker is a daemon thread
+    (never joined past budget); overrun raises ``TimeoutError`` so callers
+    surface a typed storage-timeout failure instead of a late success.
+    """
+    import threading as _threading
+
+    try:
+        budget = max(0.5, float(budget_s))
+    except (TypeError, ValueError):
+        budget = 15.0
+    box: Dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["result"] = getattr(store, method_name)(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - re-raised below
+            box["error"] = exc
+
+    worker = _threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(budget)
+    if worker.is_alive():
+        raise TimeoutError(f"Storage {method_name} exceeded {budget:.1f}s budget.")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
 def _resolve_blob_token(explicit: Optional[str] = None) -> str:
     """Resolve a blob RW token from explicit value or supported env aliases.
 
@@ -237,11 +290,13 @@ class ArtifactStore(abc.ABC):
     def signed_url(self, artifact_id: str, filename: str, expires_in: int = 3600) -> str:
         """Returns a download URL usable by browsers (never embeds secrets).
 
-        Blob-backed stores return the authenticated ``/api/artifacts`` proxy;
-        local stores return the same stable proxy path.
+        Honors ``expires_in`` via HMAC ``?exp=&sig=`` when
+        ``SARD_DOWNLOAD_SECRET`` is configured; otherwise the plain stable
+        proxy path (open mode).
         """
-        _ = expires_in
-        return self.get_download_url(artifact_id, filename)
+        safe_name = self._validate_filename(filename) if hasattr(self, "_validate_filename") else str(filename)
+        self._validate_id(artifact_id) if hasattr(self, "_validate_id") else None
+        return _proxy_download_url(safe_name, expires_in)
 
     def get_metadata(self, id_or_filename: str) -> Optional[Dict[str, Any]]:
         """Returns the metadata record for an artifact, if known."""
@@ -521,7 +576,7 @@ class FileSystemArtifactStore(ArtifactStore):
     def get_download_url(self, artifact_id: str, filename: str) -> str:
         safe_name = self._validate_filename(filename)
         self._validate_id(artifact_id)
-        return "/api/artifacts/" + urllib.parse.quote(safe_name, safe="")
+        return _proxy_download_url(safe_name)
 
     def exists(self, id_or_filename: str) -> bool:
         return self.get_file_path(id_or_filename) is not None
@@ -563,8 +618,9 @@ class FileSystemArtifactStore(ArtifactStore):
         return removed
 
     def signed_url(self, artifact_id: str, filename: str, expires_in: int = 3600) -> str:
-        _ = expires_in
-        return self.get_download_url(artifact_id, filename)
+        safe_name = self._validate_filename(filename)
+        self._validate_id(artifact_id)
+        return _proxy_download_url(safe_name, expires_in)
 
     def get_metadata(self, id_or_filename: str) -> Optional[Dict[str, Any]]:
         record = self._record_for(id_or_filename)
@@ -929,7 +985,7 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
         except ValueError:
             safe_name = str(filename)
         FileSystemArtifactStore._validate_id(artifact_id)
-        return "/api/artifacts/" + urllib.parse.quote(safe_name, safe="")
+        return _proxy_download_url(safe_name)
 
     def exists(self, id_or_filename: str) -> bool:
         if not self.blob_configured:
@@ -976,8 +1032,12 @@ class ConfigurableBlobArtifactStore(ArtifactStore):
         return removed
 
     def signed_url(self, artifact_id: str, filename: str, expires_in: int = 3600) -> str:
-        _ = expires_in
-        return self.get_download_url(artifact_id, filename)
+        try:
+            safe_name = FileSystemArtifactStore._validate_filename(filename)
+        except ValueError:
+            safe_name = str(filename)
+        FileSystemArtifactStore._validate_id(artifact_id)
+        return _proxy_download_url(safe_name, expires_in)
 
     def get_metadata(self, id_or_filename: str) -> Optional[Dict[str, Any]]:
         # Sidecar-first (local mirror), then remote index (head-like, no content GET).
@@ -1255,7 +1315,7 @@ class VercelBlobArtifactStore(ArtifactStore):
             return self.rest.get_download_url(artifact_id, filename)
         except Exception:
             safe_name = FileSystemArtifactStore._validate_filename(filename)
-            return "/api/artifacts/" + urllib.parse.quote(safe_name, safe="")
+            return _proxy_download_url(safe_name)
 
     def exists(self, id_or_filename: str) -> bool:
         if self._sdk_available():
@@ -1306,8 +1366,11 @@ class VercelBlobArtifactStore(ArtifactStore):
         return removed
 
     def signed_url(self, artifact_id: str, filename: str, expires_in: int = 3600) -> str:
-        _ = expires_in
-        return self.get_download_url(artifact_id, filename)
+        try:
+            safe_name = FileSystemArtifactStore._validate_filename(filename)
+        except ValueError:
+            safe_name = str(filename)
+        return _proxy_download_url(safe_name, expires_in)
 
     def get_metadata(self, id_or_filename: str) -> Optional[Dict[str, Any]]:
         # Sidecar-first, then SDK head (no content download, no second PUT).
@@ -1338,33 +1401,34 @@ class VercelBlobArtifactStore(ArtifactStore):
                     continue
                 size = getattr(head, "size", None)
                 ctype = getattr(head, "content_type", None)
-                url = getattr(head, "url", "")
-                download_url = getattr(head, "download_url", "")
                 if base:
                     base.setdefault("size", size if size is not None else base.get("size"))
                     base.setdefault("mime", ctype or base.get("mime"))
                     base.setdefault("key", key)
                 else:
+                    # Provider-direct SDK URLs stay server-side (self._blob_urls
+                    # retains them for head/get/delete). Client-bound metadata
+                    # carries only the authenticated proxy URL — never
+                    # blob.vercel-storage.com, which would bypass the proxy.
+                    proxy_name = filename or Path(key).name
                     base = {
                         "artifact_id": artifact_id or "",
                         "run_id": _BLOB_DEFAULT_RUN,
                         "version": _BLOB_DEFAULT_VERSION,
                         "type": "",
                         "key": key,
-                        "filename": filename or Path(key).name,
+                        "filename": proxy_name,
                         "mime": ctype or "application/octet-stream",
                         "size": size if size is not None else 0,
                         "sha256": "",
                         "created_at": time.time(),
                         "status": "created",
                         "verification": {},
-                        "url": url,
-                        "download_url": download_url,
+                        "download_url": _proxy_download_url(proxy_name),
                     }
-                retained = self._blob_urls.get(key, {})
-                if retained:
-                    base.setdefault("url", retained.get("url", ""))
-                    base.setdefault("download_url", retained.get("download_url", ""))
+                # Provider-direct URLs stay in self._blob_urls (server-side
+                # head/get/delete use); they are deliberately NOT copied into
+                # this client-bound dict.
                 return base
         except Exception as exc:
             logger.debug("Suppressed boundary exception in orchestrator.py: %s", type(exc).__name__)
@@ -1570,12 +1634,23 @@ class ArtifactGeneratorRegistry:
 
     @staticmethod
     def render_ics(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:
-        """Generates RFC 5545 .ics calendar data for heritage events and itineraries."""
+        """Generates RFC 5545 .ics calendar data.
+
+        Two explicit stacks (documented, not conflated):
+        1. Explicit dated events from ``content_data.events`` (itinerary
+           conversions, chat-built schedules) -> ``calendar.render_calendar``
+           with deterministic UUIDv5 UIDs and round-trip validation.
+        2. Heritage-topic lookup in the curated DB (topic-gated honesty:
+           unknown topics raise typed ``no_match``, never fabricated).
+        """
+        from sard.outputs.validation import ArtifactValidationError as _VE
+
+        explicit = ArtifactGeneratorRegistry._render_ics_from_explicit_events(req)
+        if explicit is not None:
+            return explicit
         from sard.outputs.calendar_sync import HeritageCalendarSync
 
         if not (req.topic or "").strip():
-            from sard.outputs.validation import ArtifactValidationError as _VE
-
             raise _VE("missing_filters", "Calendar render requires a topic/query or filters.")
         sync = HeritageCalendarSync()
         events = sync.search_events(query=req.topic)
@@ -1591,6 +1666,104 @@ class ArtifactGeneratorRegistry:
             "events": [ev.to_dict() for ev in events],
         }
         return data, "text/calendar; charset=utf-8", preview_data
+
+    @staticmethod
+    def _render_ics_from_explicit_events(req: ArtifactRequest) -> Optional[Tuple[bytes, str, Dict[str, Any]]]:
+        """Build ICS from explicit dated ``content_data.events`` (None when absent).
+
+        Each event: ``{title, start_date: YYYY-MM-DD, start_time/end_time:
+        HH:MM, location?, description?}``. Undated or untimed entries are
+        skipped with a warning; when nothing valid remains, None is
+        returned so the caller falls through to the heritage-DB stack.
+        """
+        import logging as _logging
+        from datetime import date as _date
+        from datetime import datetime as _datetime
+        from datetime import time as _time
+        from datetime import timezone as _tz
+
+        _logger = _logging.getLogger(__name__)
+        content = getattr(req, "content_data", None) or {}
+        raw_events = content.get("events") if isinstance(content, dict) else None
+        if not isinstance(raw_events, list) or not raw_events:
+            return None
+        try:
+            from sard.outputs.schemas import Itinerary as _Itin
+            from sard.outputs.schemas import ItineraryDay as _Day
+            from sard.outputs.schemas import ItineraryStop as _Stop
+            from sard.outputs.calendar import render_calendar as _render_cal
+        except Exception as exc_import:
+            _logger.debug("Explicit-events ICS import skipped (%s).", type(exc_import).__name__)
+            return None
+
+        by_date: dict[str, list[dict]] = {}
+        skipped = 0
+        for entry in raw_events:
+            if not isinstance(entry, dict):
+                skipped += 1
+                continue
+            try:
+                day = _date.fromisoformat(str(entry.get("start_date", "") or "").strip())
+                start = _time.fromisoformat(str(entry.get("start_time", "") or "").strip())
+                end = _time.fromisoformat(str(entry.get("end_time", "") or "").strip())
+            except ValueError:
+                skipped += 1
+                continue
+            title = str(entry.get("title", "") or "").strip() or "فعالية"
+            by_date.setdefault(day.isoformat(), []).append({
+                "day": day, "start": start, "end": end, "title": title,
+                "location": str(entry.get("location", "") or "").strip(),
+                "description": str(entry.get("description", "") or "").strip(),
+            })
+        if not by_date:
+            _logger.debug("Explicit-events ICS: %d entries, none dated+timed; heritage fallback.", skipped)
+            return None
+        days = []
+        for index, iso in enumerate(sorted(by_date), start=1):
+            stops = []
+            for pos, ev in enumerate(by_date[iso]):
+                try:
+                    stops.append(_Stop(
+                        time=ev["start"].strftime("%H:%M"), title=ev["title"],
+                        location=ev["location"], stop_id=f"explicit-{index}-{pos}",
+                        start_time=ev["start"], end_time=ev["end"],
+                        location_name=ev["location"] or None,
+                    ))
+                except Exception as exc_stop:
+                    _logger.debug("Explicit-events stop skipped (%s).", type(exc_stop).__name__)
+                    skipped += 1
+            if stops:
+                days.append(_Day(title=f"اليوم {index}", date=by_date[iso][0]["day"],
+                                 stops=tuple(stops), relative_day_number=index))
+        if not days:
+            return None
+        meta = getattr(req, "metadata", None) or {}
+        run_id = str(meta.get("run_id", "") or "explicit-events")
+        try:
+            itin = _Itin(
+                title=(req.title or req.topic or "جدول سرد").strip(),
+                summary=(req.raw_text or req.topic or "جدول فعاليات").strip()[:500],
+                days=tuple(days), sources=(),
+                generated_at=_datetime.now(_tz.utc), run_id=run_id,
+            )
+            result = _render_cal(itin)
+        except Exception as exc_cal:
+            _logger.debug("Explicit-events calendar render skipped (%s).", type(exc_cal).__name__)
+            return None
+        preview_events = [
+            {"title": ev["title"], "start_date": ev["day"].isoformat(),
+             "start_time": ev["start"].strftime("%H:%M"), "end_time": ev["end"].strftime("%H:%M"),
+             "location": ev["location"]}
+            for iso in sorted(by_date) for ev in by_date[iso]
+        ]
+        preview_data: Dict[str, Any] = {
+            "type": "calendar",
+            "events_count": len(preview_events),
+            "events": preview_events,
+        }
+        if skipped:
+            preview_data["warnings"] = [f"تم تخطي {skipped} مدخلات ناقصة التاريخ/الوقت."]
+        return bytes(result.data), "text/calendar; charset=utf-8", preview_data
 
     @staticmethod
     def render_svg_or_png(req: ArtifactRequest) -> Tuple[bytes, str, Optional[Dict[str, Any]]]:
@@ -1853,6 +2026,20 @@ class ArtifactOrchestrator:
                 return dl.reserve_remaining() <= 0
             return deadline_monotonic is not None and isinstance(deadline_monotonic, (float, int)) and _time.monotonic() > float(deadline_monotonic)
 
+        def _store_budget() -> float:
+            """Wall-clock budget for one blocking store op.
+
+            ``min(15s, reserve_remaining)`` so a slow blob call can never
+            consume the terminal reserve (the request-2s hard stop stays
+            reachable). No deadline -> constructor-scale default.
+            """
+            try:
+                if dl is not None:
+                    return max(1.0, min(15.0, float(dl.reserve_remaining())))
+            except Exception as exc_budget:
+                logger.debug("Store budget read skipped (%s).", type(exc_budget).__name__)
+            return 15.0
+
         meta_in = dict(getattr(request, "metadata", None) or {})
         requested_aid = str(meta_in.get("artifact_id", "") or "").strip()
         requested_run = str(meta_in.get("run_id", "") or "").strip()
@@ -1950,7 +2137,8 @@ class ArtifactOrchestrator:
             if _expired():
                 raise TimeoutError("Artifact deadline exceeded before store; discarding late output.")
             active_store = self.store
-            _, stored_filename, size_bytes, checksum = active_store.store_bytes(
+            _, stored_filename, size_bytes, checksum = _call_store_with_budget(
+                active_store, "store_bytes", _store_budget(),
                 artifact_id=art_id,
                 filename=filename,
                 data=raw_bytes,
@@ -1959,7 +2147,7 @@ class ArtifactOrchestrator:
             )
             if size_bytes != len(raw_bytes) or checksum != hashlib.sha256(raw_bytes).hexdigest():
                 raise RuntimeError("Stored artifact metadata does not match generated bytes.")
-            stored = active_store.get_bytes(stored_filename)
+            stored = _call_store_with_budget(active_store, "get_bytes", _store_budget(), stored_filename)
             if stored is None or stored[0] != bytes(raw_bytes) or stored[2] != mime_type:
                 raise RuntimeError("Stored artifact could not be verified.")
             validate_artifact_bytes(fmt, stored[0])
@@ -2254,8 +2442,6 @@ class ArtifactOrchestrator:
         if idempotency_key:
             for entry in (getattr(self.store, "list_versions", lambda _a: [])(safe_id) or []):
                 if str(entry.get("idempotency_key", "") or "") == idempotency_key:
-                    existing = self.generate_artifact.__self__ if False else None  # placeholder
-                    _ = existing
                     # Return the already-stored version without minting a new one.
                     get_bytes = getattr(self.store, "get_version_bytes", None)
                     payload = get_bytes(safe_id, int(entry.get("version", 0) or 0)) if callable(get_bytes) else None
@@ -2327,19 +2513,12 @@ class ArtifactOrchestrator:
             region=revised.metadata.region,
         )
         result = self.generate_artifact(tmp_req, deadline=deadline, cancel_event=cancel_event)
-        # generate_artifact mints a fresh random ID when run_id is absent; pin
-        # the stable identity back for revision semantics.
-        if result.status == "created" and result.id != safe_id:
-            # Re-point bytes under the stable ID via versioned store semantics:
-            # the stored file already exists under the random ID; expose the
-            # stable ID by returning it while keeping both retrievable.
-            # (Store-level alias: latest pointer already versioned under
-            # tmp_req's artifact_id when run path preserved it.)
-            pass
         if result.status != "created":
             return result
-        # Ensure the stable ID carries version+1 (generate path used tmp_req's
-        # stable artifact_id when run/artifact IDs were valid).
+        # tmp_req pins metadata.artifact_id=safe_id, so generate_artifact
+        # stores under the stable identity. If a divergent ID ever comes
+        # back, re-point the bytes under the stable ID and best-effort
+        # remove the orphan so revision never leaks random-ID files.
         if result.id != safe_id:
             # Fall back: store the same bytes under the stable identity.
             try:
@@ -2357,6 +2536,13 @@ class ArtifactOrchestrator:
                         put_doc(safe_id, revised_pinned, version=new_version)
                     except TypeError:
                         pass
+                try:
+                    _delete = getattr(self.store, "delete", None)
+                    if callable(_delete) and result.id:
+                        _delete(result.id)
+                except Exception as exc_cleanup:
+                    import logging as _logging
+                    _logging.getLogger(__name__).debug("Revision orphan cleanup skipped (%s).", type(exc_cleanup).__name__)
                 return ArtifactResult(
                     id=_sid, kind=result.kind, format=result.format, title=result.title,
                     filename=_sname, mime_type=result.mime_type, size_bytes=_ssize,
@@ -2585,7 +2771,7 @@ class ArtifactOrchestrator:
                 id=safe_id, kind=kind, format=str(entry.get("format", "") or "txt"),
                 title=title or "مخرج ثقافي", filename=fname, mime_type=mime,
                 size_bytes=len(data), status="created",
-                download_url=f"/api/artifacts/version/{safe_id}/{version}",
+                download_url=_proxy_version_url(safe_id, version),
                 preview=preview, checksum=str(entry.get("checksum", "") or "") or None,
                 data=data, document=doc,
             )
@@ -2803,8 +2989,8 @@ class ArtifactOrchestrator:
             "mime_type": mime,
             "size_bytes": len(data),
             "status": "created",
-            "download_url": f"/api/artifacts/version/{safe_id}/{version}",
-            "url": f"/api/artifacts/version/{safe_id}/{version}",
+            "download_url": _proxy_version_url(safe_id, version),
+            "url": _proxy_version_url(safe_id, version),
             "preview": preview,
             "warnings": list(getattr(getattr(doc, "metadata", None), "warnings", ()) or []),
             "error": None,

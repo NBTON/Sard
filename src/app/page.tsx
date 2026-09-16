@@ -199,7 +199,11 @@ function ChatAppContent() {
       }
     }, 50);
 
-    const history = [...messages, userMsg].map((m) => ({
+    const history = [...messages, userMsg]
+      // Stopped turns never reach the backend twice: a retried prompt drops
+      // its stale placeholder, so exclude stopped messages from history.
+      .filter((m) => !(m as any).stopped)
+      .map((m) => ({
       role: m.role,
       content: m.content,
       attachments: m.attachments?.map((a) => ({
@@ -337,7 +341,15 @@ function ChatAppContent() {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === thinkId
-              ? { ...m, isThinking: false, isStreaming: false, runId: meta?.run_id || m.runId || null }
+              ? {
+                  ...m,
+                  isThinking: false,
+                  isStreaming: false,
+                  runId: meta?.run_id || m.runId || null,
+                  // A late completion after the client timeout fired must
+                  // clear the stale timeout error once content arrived.
+                  ...(m.content ? { error: undefined } : {}),
+                }
               : m
           )
         );
@@ -404,8 +416,20 @@ function ChatAppContent() {
   function handleRetry() {
     const { text, attachments } = lastPromptRef.current;
     if (!text && attachments.length === 0) return;
-    // Clear stopped flags before resending so the new turn starts clean.
-    setMessages((prev) => prev.map((m) => (m.stopped ? { ...m, stopped: false } : m)));
+    // Drop the stopped turn before resending: retry reuses one
+    // user/assistant pair instead of duplicating the user bubble.
+    setMessages((prev) => {
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (last && last.role === "assistant" && (last as any).stopped) {
+        next.pop();
+        const maybeUser = next[next.length - 1];
+        if (maybeUser && maybeUser.role === "user" && maybeUser.content === text) {
+          next.pop();
+        }
+      }
+      return next.map((m) => ((m as any).stopped ? { ...m, stopped: false } : m));
+    });
     doSend(text, attachments);
   }
 
@@ -450,8 +474,14 @@ function ChatAppContent() {
         return m;
       })
     );
-    // Update active selection to revised artifact (preserving accumulated versions)
-    setSelectedArtifact(revised);
+    // Merge-then-select: accumulate versions[] history into the open panel
+    // instead of replacing the selection with the raw revision snapshot
+    // (which would hide v1 until GET /versions refetches).
+    setSelectedArtifact((prev) => {
+      if (!prev || prev.id !== revised.id) return revised;
+      const merged = mergeArtifactVersions([prev], [revised]);
+      return merged[0] ?? revised;
+    });
   }
 
 
@@ -485,7 +515,7 @@ function ChatAppContent() {
         view={view}
       />
 
-      {view === "explore" || view === "landing" ? (
+      {view === "explore" ? (
         <Landing
           lang={lang}
           onStartChat={openChat}

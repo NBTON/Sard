@@ -364,7 +364,14 @@ def render_cultural_pdf_report(
     summary: str = "",
     output_path: Optional[Path] = None,
 ) -> bytes:
-    """Builds a multi-page Arabic RTL cultural report PDF and returns bytes."""
+    """Builds a multi-page Arabic RTL cultural report PDF and returns bytes.
+
+    .. deprecated::
+        Legacy flat-paragraph path. Production routes through the canonical
+        ``ArtifactDocument`` (``pdf.build_pdf_from_document``); this export
+        stays only as a regression guard (see test_html_pdf_docx_pptx_rtl)
+        and must not gain new callers.
+    """
     ar_font, lat_font = ensure_fonts_registered()
 
     stream = io.BytesIO()

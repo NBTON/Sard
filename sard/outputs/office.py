@@ -344,7 +344,7 @@ class PresentationGenerator:
                         )
                         paras, bullets, quote = [], [], ""
                     pending_heading = text or pending_heading
-                elif btype in {"bullet", "item", "point", "takeaway"}:
+                elif btype in {"bullet", "item", "point", "takeaway", "list"}:
                     if text:
                         bullets.append(text)
                 elif btype == "quote":
@@ -361,6 +361,41 @@ class PresentationGenerator:
                         images.append(src)
                     elif text:
                         paras.append(text)
+                elif btype == "timeline":
+                    items = data.get("items") or data.get("entries") or data.get("events") or []
+                    if isinstance(items, (list, tuple)) and items:
+                        for it in items:
+                            if isinstance(it, dict):
+                                date = str(it.get("date") or "").strip()
+                                title = str(it.get("title") or it.get("text") or "").strip()
+                                line = f"{date}: {title}" if date and title else (title or date)
+                                if line:
+                                    bullets.append(line)
+                            elif str(it or "").strip():
+                                bullets.append(str(it))
+                    elif text:
+                        bullets.append(text)
+                elif btype == "sources":
+                    # Structured bibliography gets its own sources slide from
+                    # doc.sources; a sources block's own text is kept here.
+                    if text:
+                        paras.append(text)
+                elif btype == "page-break":
+                    # Natural slide boundary: flush the current group so the
+                    # break lands between slides instead of vanishing.
+                    if paras or bullets or quote:
+                        deck.slides.append(
+                            SlideContent(
+                                slide_type="briefing",
+                                title=pending_heading or section.title or title,
+                                body_paragraphs=paras,
+                                bullets=bullets,
+                                quote=quote,
+                                region_badge=meta.region,
+                            )
+                        )
+                        paras, bullets, quote = [], [], ""
+                        pending_heading = ""
                 elif btype == "attachment":
                     continue
                 elif text:

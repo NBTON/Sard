@@ -263,7 +263,17 @@ export function buildGoogleCalendarUrl(ev: any, fallbackTitle = "مخرج ثقا
   const loc = encodeURIComponent(resolved.location);
   let dates = "";
   const s = resolved.start.replace(/[-:]/g, "").split(".")[0].replace(" ", "T");
-  const e = resolved.end ? resolved.end.replace(/[-:]/g, "").split(".")[0].replace(" ", "T") : s;
+  let e = resolved.end ? resolved.end.replace(/[-:]/g, "").split(".")[0].replace(" ", "T") : s;
+  // All-day convention: a date-only start with no explicit end is a
+  // zero-duration event Google may reject — end = start + 1 day (exclusive).
+  if (/^\d{8}$/.test(s) && e === s) {
+    const y = parseInt(s.slice(0, 4), 10);
+    const m = parseInt(s.slice(4, 6), 10) - 1;
+    const d = parseInt(s.slice(6, 8), 10);
+    const next = new Date(Date.UTC(y, m, d + 1));
+    const pad = (n: number) => String(n).padStart(2, "0");
+    e = `${next.getUTCFullYear()}${pad(next.getUTCMonth() + 1)}${pad(next.getUTCDate())}`;
+  }
   if (s) {
     dates = `&dates=${encodeURIComponent(s + (e ? "/" + e : "/" + s))}`;
   }

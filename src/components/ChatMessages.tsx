@@ -52,7 +52,7 @@ function CitationList({ citations, lang }: { citations: Citation[]; lang: Lang }
         }}
       >
         {t("sources", lang)} • {valid.length}
-        {invalidCount > 0 ? ` (${invalidCount} غير صالح)` : ""} {open ? "▾" : "▸"}
+        {invalidCount > 0 ? ` (${invalidCount} ${t("invalidSources", lang)})` : ""} {open ? "▾" : "▸"}
       </button>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
         {shown.map((c: Citation, idx: number) => (

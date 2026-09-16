@@ -20,6 +20,7 @@ from reportlab.platypus import (
     HRFlowable,
     Image,
     KeepTogether,
+    PageBreak,
     SimpleDocTemplate,
     Spacer,
     Table,
@@ -1142,6 +1143,8 @@ def render_document_pdf(
                 story.append(Spacer(1, 6))
                 story.append(picture)
                 story.append(Spacer(1, 6))
+        if section.get("page_break_after"):
+            story.append(PageBreak())
 
     if takeaways:
         story.append(Spacer(1, 12))
@@ -1292,6 +1295,7 @@ def build_pdf_from_document(doc) -> bytes:
         sec_bullets: list[str] = []
         table_data: list[list[str]] | None = None
         image_src = ""
+        sec_break_after = False
         for block in blocks:
             btype = str(getattr(block, "block_type", "") or "").lower()
             text = (getattr(block, "text", "") or "").strip()
@@ -1300,9 +1304,30 @@ def build_pdf_from_document(doc) -> bytes:
             if btype in {"takeaway"}:
                 if text:
                     takeaways.append(text)
-            elif btype in {"bullet", "item", "point"}:
+            elif btype in {"bullet", "item", "point", "list"}:
                 if text:
                     sec_bullets.append(text)
+            elif btype == "timeline":
+                items = data.get("items") or data.get("entries") or data.get("events") or []
+                if isinstance(items, (list, tuple)) and items:
+                    for it in items:
+                        if isinstance(it, dict):
+                            date = str(it.get("date") or "").strip()
+                            title = str(it.get("title") or it.get("text") or "").strip()
+                            line = f"{date}: {title}" if date and title else (title or date)
+                            if line:
+                                sec_bullets.append(line)
+                        elif str(it or "").strip():
+                            sec_bullets.append(str(it))
+                elif text:
+                    sec_bullets.append(text)
+            elif btype == "sources":
+                # Structured bibliography renders from doc.sources; a sources
+                # block's own text is kept (never silently dropped).
+                if text:
+                    sec_paras.append(text)
+            elif btype == "page-break":
+                sec_break_after = True
             elif btype in {"table", "table_row", "row"}:
                 rows = data.get("rows") or data.get("table_data") or data.get("table")
                 if isinstance(rows, (list, tuple)) and rows:
@@ -1328,7 +1353,7 @@ def build_pdf_from_document(doc) -> bytes:
             elif text:
                 sec_paras.append(text)
         paragraphs.extend(sec_paras)
-        if section.title.strip() or sec_paras or sec_bullets or table_data:
+        if section.title.strip() or sec_paras or sec_bullets or table_data or sec_break_after:
             entry: dict = {"title": section.title.strip(), "content": "\n\n".join(sec_paras)}
             if sec_bullets:
                 entry["bullets"] = sec_bullets
@@ -1336,6 +1361,8 @@ def build_pdf_from_document(doc) -> bytes:
                 entry["table_data"] = table_data
             if image_src:
                 entry["image"] = image_src
+            if sec_break_after:
+                entry["page_break_after"] = True
             sections.append(entry)
     if not paragraphs and not sections and not takeaways and not summary.strip():
         raise ValueError("PDF report content is missing; refusing to render filler.")
