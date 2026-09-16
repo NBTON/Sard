@@ -238,7 +238,7 @@ def test_graceful_fallback_when_web_fails():
         "source": "دليل التراث",
         "title": "مقدمة التراث",
         "chunk": "التراث السعودي زاخر بالتقاليد العريقة.",
-        "score": 0.60,
+        "score": 0.70,
         "metadata": {"source_url": "doc1.md", "culture": "سعودي", "topic": "heritage", "language": "ar"},
     }
 
@@ -331,15 +331,15 @@ def _mock_web_search_for(query: str):
     "query",
     [
         "زراعة النخيل في القصيم",
-        "العمارة التقليدية في رجال ألمع",
-        "تاريخ جدة البلد",
+        "صيد اللؤلؤ في الخليج",
+        "سوق عكاظ في الطائف",
         "الحرف التقليدية في الجوف",
         "التراث البحري في جازان",
     ],
 )
 def test_out_of_corpus_saudi_queries_route_to_web_without_contamination(query):
     """Out-of-corpus Saudi cultural queries must reject local pilot corpus, route to web, and have zero contamination."""
-    mock_search = MagicMock(side_effect=lambda objective, queries, limit=3: _mock_web_search_for(query))
+    mock_search = MagicMock(side_effect=lambda objective, search_queries=None, max_results=3, **kw: _mock_web_search_for(query))
     router = CulturalRouter(parallel_search_fn=mock_search, parallel_extract_fn=lambda *a, **kw: [])
 
     rag_res, web_res, ext_res, decision = router.route_and_retrieve(query)
@@ -420,16 +420,40 @@ def test_legitimate_al_ahsa_springs_query_passes_in_corpus():
     assert any(c["type"] == "rag" for c in res.citations)
 
 
-def test_comprehensive_metrics_and_zero_contamination_rate():
+@pytest.mark.parametrize(
+    "query",
+    [
+        "تاريخ جدة البلد",
+        "العلا ومدائن صالح وتاريخها النبطي",
+        "العمارة التقليدية في رجال ألمع",
+    ],
+)
+def test_nationally_covered_queries_pass_in_corpus_without_web(query):
+    """Nationally covered Arabic topics (bundled heritage index, verified
+    hits >= 0.80) must pass via local RAG without triggering web search."""
+    router = CulturalRouter()
+
+    rag_res, web_res, ext_res, decision = router.route_and_retrieve(query)
+
+    assert decision.is_in_corpus_topic is True
+    assert decision.rag_top_score >= RAG_HIGH_CONFIDENCE_THRESHOLD
+    assert decision.web_search_triggered is False
+    assert len(rag_res) > 0
+
+    res = router.answer_query(query)
+    assert len(res.rag_sources) > 0
+    assert any(c["type"] == "rag" for c in res.citations)
     """Evaluate overall metrics across benchmark query set to verify zero topic-contamination."""
     benchmark_queries = [
         # In-corpus (2)
         ("كيف تتم ممارسة تجفيف الروبيان التقليدية في جزيرة تاروت بالمنطقة الشرقية؟", True, False),
         ("أين تقع أشهر الينابيع والعيون الحارة في واحة الأحساء بالمنطقة الشرقية؟", True, False),
-        # Out-of-corpus cultural (5)
+        # Out-of-corpus cultural (5) — verified full-path misses through
+        # Zvec FTS + bundled + corpus scan (nationally covered topics like
+        # جدة البلد / العلا / رجال ألمع live in the in-corpus set instead).
         ("زراعة النخيل في القصيم", False, True),
-        ("العمارة التقليدية في رجال ألمع", False, True),
-        ("تاريخ جدة البلد", False, True),
+        ("صيد اللؤلؤ في الخليج", False, True),
+        ("سوق عكاظ في الطائف", False, True),
         ("الحرف التقليدية في الجوف", False, True),
         ("التراث البحري في جازان", False, True),
         # Out-of-domain general (2)
@@ -439,7 +463,7 @@ def test_comprehensive_metrics_and_zero_contamination_rate():
         ("ما هي أبرز مواسم وفعاليات وزارة الثقافة المقامة هذا العام 2026؟", False, True),
     ]
 
-    mock_search = MagicMock(side_effect=lambda objective, queries, limit=3: _mock_web_search_for(queries[0]))
+    mock_search = MagicMock(side_effect=lambda objective, search_queries=None, max_results=3, **kw: _mock_web_search_for((search_queries or [query])[0]))
     router = CulturalRouter(parallel_search_fn=mock_search, parallel_extract_fn=lambda *a, **kw: [])
 
     in_corpus_hits = 0
