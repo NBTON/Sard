@@ -7,6 +7,8 @@ the provider's API, so a fake, non-functional API key is sufficient here.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -24,7 +26,18 @@ def _clean_model_env(monkeypatch):
         "OPENAI_API_KEY",
         "NVIDIA_API_KEY",
         "NVIDIA_CHAT_BASE_URL",
+        # Auto-detect reads these too: a leaked key flips provider
+        # selection and makes tests order/environment-dependent.
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_BASE_URL",
+        "OPENROUTER_REFERER",
+        "OPENROUTER_TITLE",
     ):
+        monkeypatch.delenv(key, raising=False)
+    # Route-override vars also steer auto-detect; drop any present.
+    for key in [k for k in os.environ if k.startswith("OPENROUTER_") or k.startswith("NVIDIA_")]:
         monkeypatch.delenv(key, raising=False)
 
 

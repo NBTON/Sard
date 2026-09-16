@@ -257,6 +257,24 @@ def test_static_ids_are_bakeoff_canonical_not_human_names():
             assert "/" in leg.model_id, f"human-name-as-ID rejected: {leg.model_id!r}"
 
 
+def test_fast_primary_is_catalog_verified_and_budgets_cover_smoke_p50():
+    """Every default OpenRouter leg must be catalog-verified (no fail-open
+    unverified primary), and LFM-bearing fast legs must budget >= 12s so the
+    9.74s benchmark p50 can complete instead of timing out."""
+    from sard.config.routing_table import CONFIGURED_FAST_PRIMARY
+
+    assert CONFIGURED_FAST_PRIMARY in OPENROUTER_CANDIDATES, (
+        f"fast primary {CONFIGURED_FAST_PRIMARY!r} is not catalog-verified"
+    )
+    for task in (TaskClass.FAST_CLASSIFY, TaskClass.QUERY_REWRITE):
+        legs = [leg for leg in get_route(task) if leg.provider == "openrouter"]
+        assert legs, f"{task} has no OpenRouter legs"
+        for leg in legs:
+            assert leg.model_id in OPENROUTER_CANDIDATES, leg.model_id
+            if leg.model_id == "liquid/lfm-2.5-2.6b:free":
+                assert leg.deadline_s >= 12.0, f"LFM leg budget too tight: {leg.deadline_s}s"
+
+
 def test_embed_route_is_primary_only_never_mixed_dims():
     legs = get_route(TaskClass.EMBED_TEXT)
     nvidia_legs = [leg for leg in legs if leg.provider == "nvidia"]
@@ -306,3 +324,60 @@ def test_provider_name_selection():
     assert provider_name_for_model("custom/vendor-model") == "openrouter"
     assert provider_name_for_model("nemotron-3-super-120b-a12b") == "nvidia"
     assert provider_name_for_model("") == "nvidia"
+    # Slashed NVIDIA NIM IDs must not be misrouted to OpenRouter by the
+    # "/" heuristic (legacy factory default shape).
+    assert provider_name_for_model("meta/llama-3.1-70b-instruct") == "nvidia"
+    assert provider_name_for_model("nvidia/llama-3.1-nemotron-70b-instruct") == "nvidia"
+
+
+def test_reasoning_channel_reader_recovers_thinking_mandatory_leg():
+    """A leg with empty content but reasoning_content text succeeds on the
+    same leg (no MALFORMED degradation hop)."""
+    from sard.config.model_router import _reasoning_channel_text
+
+    resp = SimpleNamespace(
+        content="",
+        additional_kwargs={"reasoning_content": "إجابة من قناة التفكير"},
+    )
+    assert _reasoning_channel_text(resp) == "إجابة من قناة التفكير"
+    assert _reasoning_channel_text(SimpleNamespace(content="x")) == ""
+
+    router, _, _ = _router({"model-a": []})
+    text = router._invoke_once(
+        _ScriptedReasoningModel("إجابة من قناة التفكير"), ["hi"], 5.0
+    )
+    assert text == "إجابة من قناة التفكير"
+
+
+class _ScriptedReasoningModel:
+    """Fake thinking-mandatory model: empty content, answer in reasoning."""
+
+    def __init__(self, reasoning: str):
+        self._reasoning = reasoning
+
+    def invoke(self, messages: Any) -> Any:
+        return SimpleNamespace(
+            content="", additional_kwargs={"reasoning_content": self._reasoning}
+        )
+
+
+def test_reasoning_off_flag_only_for_flagged_ids(monkeypatch):
+    """needs_reasoning_off IDs get extra_body reasoning.enabled=false."""
+    import langchain_openai
+
+    seen: dict[str, Any] = {}
+
+    class _FakeChatOpenAI:
+        def __init__(self, **kwargs: Any):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", _FakeChatOpenAI)
+
+    import sard.config.providers.openrouter as or_mod
+
+    provider = or_mod.OpenRouterProvider(api_key="test-key")
+    provider.build_chat("dots-studio/dots-3-note-preview:free", 5.0)
+    assert seen.get("extra_body") == {"reasoning": {"enabled": False}}
+    seen.clear()
+    provider.build_chat("liquid/lfm-2.5-2.6b:free", 5.0)
+    assert "extra_body" not in seen

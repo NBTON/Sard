@@ -87,7 +87,11 @@ def _read_settings() -> ModelSettings:
         elif os.environ.get("OPENROUTER_API_KEY", "").strip():
             provider = "openrouter"
             if not model_name:
-                model_name = "google/gemini-2.0-flash-001"
+                # Verified free default (bakeoff smoke); never an
+                # unverified/possibly-paid ID.
+                from sard.config.routing_table import CONFIGURED_FAST_PRIMARY as _FAST
+
+                model_name = _FAST
         elif os.environ.get("NVIDIA_API_KEY", "").strip():
             provider = "nvidia"
             if not model_name:

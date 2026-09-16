@@ -68,17 +68,33 @@ class OpenRouterProvider(ModelProvider):
             raise ModelConfigError(
                 "حزمة langchain-openai غير مثبّتة. ثبّتها عبر: uv sync --extra openai"
             ) from exc
-        return ChatOpenAI(
-            model=model_id,
-            temperature=0.2,
-            api_key=self._api_key,
-            base_url=self._base_url,
-            timeout=float(timeout_s),
-            default_headers={
+        # Bakeoff §7.1: thinking-mandatory models leak reasoning into (or
+        # displace) content unless called with reasoning.enabled=false.
+        # ChatOpenAI forwards extra_body verbatim to the OpenAI-compatible
+        # endpoint, which covers OpenRouter's reasoning parameter.
+        extra_body: dict[str, object] | None = None
+        try:
+            from sard.config.routing_table import OPENROUTER_CANDIDATES as _CANDIDATES
+
+            flags = _CANDIDATES.get(model_id)
+            if flags is not None and getattr(flags, "needs_reasoning_off", False):
+                extra_body = {"reasoning": {"enabled": False}}
+        except Exception:
+            extra_body = None
+        chat_kwargs: dict[str, object] = {
+            "model": model_id,
+            "temperature": 0.2,
+            "api_key": self._api_key,
+            "base_url": self._base_url,
+            "timeout": float(timeout_s),
+            "default_headers": {
                 "HTTP-Referer": self._referer,
                 "X-Title": self._title,
             },
-        )
+        }
+        if extra_body is not None:
+            chat_kwargs["extra_body"] = extra_body
+        return ChatOpenAI(**chat_kwargs)  # type: ignore[arg-type]
 
     def build_embeddings(self, model_id: str, timeout_s: float) -> Any:
         """Embeddings stay on the NVIDIA path — never OpenRouter chat IDs."""

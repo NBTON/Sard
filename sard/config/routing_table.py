@@ -78,6 +78,9 @@ class CandidateFlags:
     supports_structured: bool
     supports_vision: bool
     note: str = ""
+    # Bakeoff §7.1: thinking leaks into/displaces content unless the
+    # provider is called with reasoning.enabled=false.
+    needs_reasoning_off: bool = False
 
 
 # Exact canonical free IDs from bakeoff report §2 (+ flags from §2 table).
@@ -99,10 +102,12 @@ OPENROUTER_CANDIDATES: dict[str, CandidateFlags] = {
     "nvidia/nemotron-3-super-120b-a12b:free": CandidateFlags(
         "nvidia/nemotron-3-super-120b-a12b:free", 262144, True, True, False,
         note="Requires reasoning.enabled=false or reasoning leaks into content.",
+        needs_reasoning_off=True,
     ),
     "nvidia/nemotron-3-ultra-550b-a55b:free": CandidateFlags(
         "nvidia/nemotron-3-ultra-550b-a55b:free", 1000000, True, False, False,
-        note="Best T1 Arabic in smoke (7.1s); large-context primary.",
+        note="Smoke FAIL (ReadTimeout 30s, free-tier queue risk); long-context "
+        "fallback only, never latency-sensitive primary.",
     ),
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": CandidateFlags(
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", 256000, True, False, True,
@@ -112,10 +117,12 @@ OPENROUTER_CANDIDATES: dict[str, CandidateFlags] = {
     "dots-studio/dots-3-note-preview:free": CandidateFlags(
         "dots-studio/dots-3-note-preview:free", 512000, True, True, True,
         note="Requires reasoning.enabled=false (answer sits in reasoning by default).",
+        needs_reasoning_off=True,
     ),
     "inclusionai/ling-3.0-flash-vl:free": CandidateFlags(
         "inclusionai/ling-3.0-flash-vl:free", 262144, True, False, True,
         note="Requires reasoning.enabled=false; vision primary.",
+        needs_reasoning_off=True,
     ),
 }
 
@@ -126,8 +133,12 @@ EXCLUDED_IDS: dict[str, str] = {
     "thinkingmachines/inkling-small:free": "HTTP 403 via plain chat completions (agentic harnesses only).",
 }
 
-# Operator-configured (possibly paid) OpenRouter primary for fast tasks.
-CONFIGURED_FAST_PRIMARY = "google/gemini-2.0-flash-001"
+# Verified free primary for fast tasks (smoke median 4.72s, tools +
+# structured). Previously an unverified, possibly-paid ID
+# (google/gemini-2.0-flash-001); re-pinned to the bakeoff smoke winner so
+# every default leg is catalog-verified. Operators may override per-deploy
+# by editing this constant.
+CONFIGURED_FAST_PRIMARY = "dots-studio/dots-3-note-preview:free"
 
 # Per-task default per-candidate budgets (seconds). ChatService callers pass
 # a tighter deadline_monotonic; the router always takes the minimum.
@@ -182,46 +193,49 @@ NVIDIA_RUNTIME_ROUTE: dict[TaskClass, Optional[str]] = {
 DEFAULT_OPENROUTER_ROUTES: dict[TaskClass, tuple[tuple[str, float], ...]] = {
     TaskClass.FAST_CLASSIFY: (
         (CONFIGURED_FAST_PRIMARY, 6.0),
-        ("liquid/lfm-2.5-2.6b:free", 6.0),
+        # LFM benchmark p50 9.74s exceeds the 6s fast budget: fallback leg
+        # carries 12s so it can actually complete instead of timing out.
+        ("liquid/lfm-2.5-2.6b:free", 12.0),
     ),
     TaskClass.QUERY_REWRITE: (
         (CONFIGURED_FAST_PRIMARY, 8.0),
-        ("liquid/lfm-2.5-2.6b:free", 8.0),
+        ("liquid/lfm-2.5-2.6b:free", 12.0),
     ),
     TaskClass.PLAN: (
         ("nvidia/nemotron-3-super-120b-a12b:free", 8.0),
-        ("google/gemma-4-31b-it:free", 8.0),
+        ("dots-studio/dots-3-note-preview:free", 8.0),
     ),
     TaskClass.RESEARCH_SYNTHESIS: (
-        ("nvidia/nemotron-3-ultra-550b-a55b:free", 20.0),
         ("dots-studio/dots-3-note-preview:free", 20.0),
+        ("nvidia/nemotron-3-super-120b-a12b:free", 20.0),
+        # Ultra last: 1M context but free-tier queue timeouts observed; it
+        # must never burn the first 20s of a research budget.
+        ("nvidia/nemotron-3-ultra-550b-a55b:free", 20.0),
     ),
     TaskClass.COMPOSE_LONGFORM: (
-        ("nvidia/nemotron-3-ultra-550b-a55b:free", 20.0),
         ("dots-studio/dots-3-note-preview:free", 20.0),
+        ("nvidia/nemotron-3-super-120b-a12b:free", 20.0),
+        ("nvidia/nemotron-3-ultra-550b-a55b:free", 20.0),
     ),
     TaskClass.COMPOSE_SHORT: (
         ("nvidia/nemotron-3-super-120b-a12b:free", 6.0),
-        ("google/gemma-4-26b-a4b-it:free", 6.0),
+        ("dots-studio/dots-3-note-preview:free", 6.0),
     ),
     TaskClass.VERIFY: (
-        ("google/gemma-4-31b-it:free", 8.0),
         ("nvidia/nemotron-3-super-120b-a12b:free", 8.0),
+        ("dots-studio/dots-3-note-preview:free", 8.0),
     ),
     TaskClass.REPAIR: (
         ("nvidia/nemotron-3-super-120b-a12b:free", 8.0),
-        ("google/gemma-4-31b-it:free", 8.0),
+        ("dots-studio/dots-3-note-preview:free", 8.0),
     ),
     TaskClass.VISION: (
         ("inclusionai/ling-3.0-flash-vl:free", 20.0),
         ("dots-studio/dots-3-note-preview:free", 20.0),
-        ("google/gemma-4-26b-a4b-it:free", 20.0),
-        ("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", 20.0),
     ),
     TaskClass.STRUCTURED_JSON: (
-        ("google/gemma-4-31b-it:free", 8.0),
-        ("nvidia/nemotron-3-super-120b-a12b:free", 8.0),
         ("dots-studio/dots-3-note-preview:free", 8.0),
+        ("nvidia/nemotron-3-super-120b-a12b:free", 8.0),
     ),
     TaskClass.EMBED_TEXT: (),
     TaskClass.EMBED_MULTIMODAL: (),

@@ -255,6 +255,56 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
+def _reasoning_channel_text(response: Any) -> str:
+    """Extract thinking-channel text from a chat response (never raises).
+
+    Mirrors the bakeoff runner extraction: ``reasoning`` /
+    ``reasoning_content`` on the message, ``additional_kwargs``, or
+    ``response_metadata``, plus legacy ``choices[0].text``. Returns "" when
+    no channel carries text.
+    """
+    try:
+        holders: list[Any] = [response]
+        for attr in ("additional_kwargs", "response_metadata"):
+            try:
+                value = getattr(response, attr, None)
+            except Exception:
+                value = None
+            if isinstance(value, dict):
+                holders.append(value)
+        for holder in holders:
+            if isinstance(holder, dict):
+                for key in ("reasoning_content", "reasoning"):
+                    value = holder.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value
+                    if isinstance(value, list):
+                        texts = [str(p.get("text", "")) for p in value if isinstance(p, dict)]
+                        joined = " ".join(t for t in texts if t.strip())
+                        if joined.strip():
+                            return joined
+            else:
+                for key in ("reasoning_content", "reasoning"):
+                    try:
+                        value = getattr(holder, key, None)
+                    except Exception:
+                        value = None
+                    if isinstance(value, str) and value.strip():
+                        return value
+        try:
+            raw = getattr(response, "response_metadata", None) or {}
+            choices = raw.get("choices") if isinstance(raw, dict) else None
+            if choices:
+                text = (choices[0] or {}).get("text", "")
+                if isinstance(text, str) and text.strip():
+                    return text
+        except Exception:
+            pass
+    except Exception as exc_reason:
+        logger.debug("Reasoning-channel read skipped (%s).", type(exc_reason).__name__)
+    return ""
+
+
 def _is_transient(category: FailureCategory, exc: BaseException) -> bool:
     # Aligned bounded transient policy: delegate to the shared fallback
     # helper so router and run_with_fallback retry exactly the same set
@@ -286,14 +336,22 @@ def _is_transient(category: FailureCategory, exc: BaseException) -> bool:
 def provider_name_for_model(model_id: str) -> str:
     """Return the provider name for a model ID (pure function, no I/O).
 
-    Canonical OpenRouter IDs are vendor/name namespaced (contain ``/``);
-    bare NVIDIA NIM IDs delegate to the existing ChatNVIDIA factory.
+    Membership in the catalog wins; known NVIDIA NIM slashed IDs
+    (``meta/...``, ``nvidia/...``, ``mistralai/...`` legacy shapes) route
+    to NVIDIA; remaining ``/``-namespaced IDs are OpenRouter; bare IDs
+    delegate to the existing ChatNVIDIA factory.
     """
     from sard.config.routing_table import OPENROUTER_CANDIDATES
 
     if not model_id:
         return "nvidia"
-    if model_id in OPENROUTER_CANDIDATES or "/" in model_id:
+    if model_id in OPENROUTER_CANDIDATES:
+        return "openrouter"
+    lowered = model_id.strip().lower()
+    for prefix in ("meta/", "nvidia/", "mistralai/", "nv-"):
+        if lowered.startswith(prefix):
+            return "nvidia"
+    if "/" in model_id:
         return "openrouter"
     return "nvidia"
 
@@ -484,6 +542,13 @@ class ModelRouter:
                     raise TimeoutError(f"Model invocation timed out after {timeout_s:.2f}s.")
                 continue
         text = _content_to_text(getattr(response, "content", ""))
+        if not text.strip():
+            # Reasoning-channel reader (bakeoff §7.2): thinking-mandatory
+            # endpoints (e.g. liquid/lfm) return the answer in
+            # message.reasoning_content with empty content. LangChain
+            # surfaces it via additional_kwargs/response_metadata, so probe
+            # those before declaring the leg MALFORMED.
+            text = _reasoning_channel_text(response)
         if not text.strip():
             raise FallbackClassifiedError(FailureCategory.MALFORMED_OUTPUT, "Model returned empty content.")
         return text

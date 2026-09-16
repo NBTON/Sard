@@ -23,6 +23,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from sard.agent.util import extract_json_object, pick_allowed
 from sard.config.model_router import provider_name_for_model, route_chat_factory
+# Single-source reasoning-channel reader (thinking-mandatory endpoints put
+# the answer in message.reasoning_content with empty content).
+from sard.config.model_router import _reasoning_channel_text as _router_reasoning_text
 from sard.config.rag import RAGSettings
 from sard.rag.fallbacks import (
     AllCandidatesFailedError,
@@ -221,6 +224,8 @@ class AgentModelService:
             )
             content = _content_to_text(getattr(response, "content", ""))
             if not content.strip():
+                content = _router_reasoning_text(response)
+            if not content.strip():
                 raise FallbackClassifiedError(
                     FailureCategory.MALFORMED_OUTPUT, "Model returned empty content."
                 )
@@ -334,6 +339,8 @@ class AgentModelService:
                 [SystemMessage(content=system_prompt), HumanMessage(content=user_text)]
             )
             content = _content_to_text(getattr(response, "content", ""))
+            if not content.strip():
+                content = _router_reasoning_text(response)
             if not content.strip():
                 raise FallbackClassifiedError(
                     FailureCategory.MALFORMED_OUTPUT, "Model returned empty content."
