@@ -185,26 +185,28 @@ def get_rag_settings() -> RAGSettings:
         rerank_base_url=_env("NVIDIA_RERANK_BASE_URL") or None,
         chat_route=ModelRoute(
             use_case="generation",
-            primary=_env("NVIDIA_CHAT_MODEL_PRIMARY", "nemotron-3-ultra-550b-a55b"),
+            # Catalog-verified full IDs (2026-09-16): bare short names 404
+            # on the hosted API, and several legacy defaults are EOL.
+            primary=_env("NVIDIA_CHAT_MODEL_PRIMARY", "nvidia/nemotron-3-super-120b-a12b"),
             fallbacks=(
-                _env("NVIDIA_CHAT_MODEL_FALLBACK_1", "nemotron-3-super-120b-a12b"),
-                _env("NVIDIA_CHAT_MODEL_FALLBACK_2", "qwen3-next-80b-a3b-instruct"),
+                _env("NVIDIA_CHAT_MODEL_FALLBACK_1", "nvidia/nemotron-3-ultra-550b-a55b"),
+                _env("NVIDIA_CHAT_MODEL_FALLBACK_2", "nvidia/llama-3.1-nemotron-70b-instruct"),
             ),
         ),
         query_route=ModelRoute(
             use_case="query_rewrite",
-            primary=_env("NVIDIA_QUERY_MODEL_PRIMARY", "nemotron-3-nano-30b-a3b"),
+            primary=_env("NVIDIA_QUERY_MODEL_PRIMARY", "nvidia/nemotron-nano-3-30b-a3b"),
             fallbacks=(
-                _env("NVIDIA_QUERY_MODEL_FALLBACK_1", "nvidia-nemotron-nano-9b-v2"),
-                _env("NVIDIA_QUERY_MODEL_FALLBACK_2", "llama-3.1-8b-instruct"),
+                _env("NVIDIA_QUERY_MODEL_FALLBACK_1", "nvidia/mistral-nemo-minitron-8b-8k-instruct"),
+                _env("NVIDIA_QUERY_MODEL_FALLBACK_2", "mistralai/mistral-7b-instruct-v0.3"),
             ),
         ),
         embedding_route=ModelRoute(
             use_case="embedding",
-            primary=_env("NVIDIA_EMBEDDING_MODEL_PRIMARY", "nemotron-3-embed-1b"),
+            primary=_env("NVIDIA_EMBEDDING_MODEL_PRIMARY", "nvidia/nemotron-3-embed-1b"),
             fallbacks=(),  # the fallback model builds a SEPARATE collection; see embeddings.py
         ),
-        embedding_fallback_model=_env("NVIDIA_EMBEDDING_MODEL_FALLBACK", "nv-embed-v1"),
+        embedding_fallback_model=_env("NVIDIA_EMBEDDING_MODEL_FALLBACK", "nvidia/nv-embedqa-mistral-7b-v2"),
         rerank_route=ModelRoute(
             use_case="rerank",
             primary=_env("NVIDIA_RERANK_MODEL_PRIMARY", "rerank-qa-mistral-4b"),
@@ -212,16 +214,16 @@ def get_rag_settings() -> RAGSettings:
         ),
         vision_route=ModelRoute(
             use_case="vision",
-            primary=_env("NVIDIA_VISION_MODEL_PRIMARY", "muse-glimmer-30b"),
+            primary=_env("NVIDIA_VISION_MODEL_PRIMARY", "meta/muse-glimmer-30b"),
             fallbacks=(
-                _env("NVIDIA_VISION_MODEL_FALLBACK_1", "llama-3.1-nemotron-nano-vl-8b-v1"),
-                _env("NVIDIA_VISION_MODEL_FALLBACK_2", "nemotron-nano-12b-v2-vl"),
+                _env("NVIDIA_VISION_MODEL_FALLBACK_1", "meta/llama-3.2-11b-vision-instruct"),
+                _env("NVIDIA_VISION_MODEL_FALLBACK_2", "microsoft/phi-3-vision-128k-instruct"),
             ),
         ),
         translation_route=ModelRoute(
             use_case="translation",
-            primary=_env("NVIDIA_TRANSLATE_MODEL_PRIMARY", "riva-translate-4b-instruct-v2"),
-            fallbacks=(_env("NVIDIA_TRANSLATE_MODEL_FALLBACK", "riva-translate-4b-instruct-v1_1"),),
+            primary=_env("NVIDIA_TRANSLATE_MODEL_PRIMARY", "nvidia/riva-translate-4b-instruct-v2"),
+            fallbacks=(_env("NVIDIA_TRANSLATE_MODEL_FALLBACK", "nvidia/riva-translate-4b-instruct-v1.1"),),
         ),
         safety_route=ModelRoute(
             use_case="safety",
