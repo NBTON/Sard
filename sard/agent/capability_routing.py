@@ -178,6 +178,16 @@ _RESEARCH_HINT = re.compile(
     r"(توثيق معتمد|بحث أكاديمي|مراجع رسمية|دارة الملك عبد العزيز|هيئة التراث|توثيق تاريخي|research|citation|bibliography)",
     re.I,
 )
+# Pure small-talk: greetings, how-are-you, thanks, farewells. Matched
+# against the lowered query; kept narrow so factual "كيف/لماذا" questions
+# still reach COMPLEX_REASONING.
+_SMALLTALK_RE = re.compile(
+    r"(كيف حالك|كيف حالكم|كيف الحال|شلونك|وشلونك|وش أخبارك|وش اخبارك|"
+    r"عساك بخير|طمني عنك|صباح الخير|مساء الخير|السلام عليكم|مرحبا|أهلا|اهلا|"
+    r"هلا والله|شكرا|شكراً|يعطيك العافية|مع السلامة|إلى اللقاء|"
+    r"\bhi\b|\bhello\b|\bhey\b|how are you|thank you|thanks|good morning|good evening|bye|goodbye)",
+    re.I,
+)
 
 _FRESH_KEYWORDS = re.compile(
     r"(اليوم|غدا|غدًا|الآن|موعد|فعالية|مهرجان|افتتاح|إغلاق|سعر|تذكرة|جدول|مواعيد|opening|hours|price|event|today|tomorrow)",
@@ -322,8 +332,15 @@ def classify_intent(
     # 3. Domain Capability
     domain_cap: Capability
 
+    # Small-talk first: greetings/how-are-you/thanks must never fall through
+    # to the COMPLEX_REASONING "كيف/لماذا" rule below (e.g. "كيف حالك؟" is
+    # small-talk, not an explanatory how-question). Non-text modalities still
+    # take precedence (a photo with "كيف حالك" is a vision request).
+    if _SMALLTALK_RE.search(q_lower) and set(modalities) <= {"text"}:
+        domain_cap = Capability.SIMPLE_CONVERSATION
+
     # Multimodal detection (file references & inputs take precedence)
-    if "audio" in modalities and (_FILE_AUDIO_RE.search(q_lower) or "تفريغ" in q_lower or "transcribe" in q_lower):
+    elif "audio" in modalities and (_FILE_AUDIO_RE.search(q_lower) or "تفريغ" in q_lower or "transcribe" in q_lower):
         domain_cap = Capability.AUDIO_TRANSCRIPTION
     elif "3d" in modalities and (_FILE_3D_RE.search(q_lower) or "أبعاد" in q_lower or "mesh" in q_lower):
         domain_cap = Capability.THREE_D_INSPECTION

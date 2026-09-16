@@ -7,6 +7,15 @@ from sard.agent.capability_routing import (
 )
 
 
+def test_intent_smalltalk_skips_complex_reasoning():
+    """Small-talk (greetings/how-are-you/thanks) is SIMPLE_CONVERSATION even
+    though it contains the كيف trigger for explanatory questions."""
+    for query in ["كيف حالك؟", "السلام عليكم", "شكرا جزيلا", "hello"]:
+        intent = classify_intent(query)
+        assert intent.domain_capability == Capability.SIMPLE_CONVERSATION, query
+        assert intent.explicit_artifact_request is False
+
+
 def test_intent_pdf_najd_history():
     intent = classify_intent("أنشئ لي PDF عن تاريخ نجد")
     assert "pdf" in intent.requested_formats
