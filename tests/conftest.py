@@ -43,6 +43,9 @@ for _key in (
     "BLOB_READ_WRITE_TOKEN",
     "SARD_BLOB_TOKEN",
     "VERCEL_BLOB_READ_WRITE_TOKEN",
+    # A developer-set download secret switches artifact URLs to signed mode
+    # and breaks the unsigned-URL expectations of the revision contract tests.
+    "SARD_DOWNLOAD_SECRET",
 ):
     os.environ.pop(_key, None)
 

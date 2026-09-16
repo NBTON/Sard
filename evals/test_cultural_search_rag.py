@@ -443,6 +443,9 @@ def test_nationally_covered_queries_pass_in_corpus_without_web(query):
     res = router.answer_query(query)
     assert len(res.rag_sources) > 0
     assert any(c["type"] == "rag" for c in res.citations)
+
+
+def test_comprehensive_metrics_and_zero_contamination_rate():
     """Evaluate overall metrics across benchmark query set to verify zero topic-contamination."""
     benchmark_queries = [
         # In-corpus (2)

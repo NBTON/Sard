@@ -1,13 +1,13 @@
 # Local-only artifacts that must never ship to Vercel.
-// Local vector cache (locked native files break the uploader; serverless
-// uses the bundled static index for zero-cold-start retrieval instead).
+# Local vector cache (locked native files break the uploader; serverless
+# uses the bundled static index for zero-cold-start retrieval instead).
 data/zvec
-// Generated runtime output + run records (ephemeral, instance-local).
+# Generated runtime output + run records (ephemeral, instance-local).
 output
 .runs
 tmp
 scratch
-// Local tooling state and logs.
+# Local tooling state and logs.
 .claude-flow
 .swarm
 .zed
