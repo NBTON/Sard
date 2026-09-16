@@ -23,7 +23,16 @@ def test_root_endpoint(client):
     assert response_api.json()["status"] == "ok"
 
 
-def test_health_endpoint(client):
+def test_health_endpoint(client, monkeypatch):
+    # Offline/CI hermetic: mock provider credentials so /api/health reports
+    # "ok" without requiring real .env keys or network access. Retrieval
+    # itself stays real (bundled_index.json + data/corpus are committed),
+    # so this still verifies the retrieval path. Live probes stay skipped
+    # by default (SARD_HEALTH_PROBE_* unset => inference success None).
+    monkeypatch.setenv("MODEL_PROVIDER", "nvidia")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-dummy-key-for-offline-ci")
+    monkeypatch.delenv("SARD_HEALTH_PROBE_NETWORK", raising=False)
+    monkeypatch.delenv("SARD_HEALTH_PROBE_INFERENCE", raising=False)
     response = client.get("/api/health")
     assert response.status_code == 200
     data = response.json()
