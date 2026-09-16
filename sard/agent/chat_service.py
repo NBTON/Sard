@@ -797,8 +797,19 @@ class ChatService:
             _fast_arts = _maybe_orchestrate(_fast_text, [])
             return ChatResult(ok=True, text=sanitize_cultural_output(_fast_text), decision="structured_fastpath", citations=[], planner_result=None, artifacts=_fast_arts)
 
+        # Simple-chat short-circuit: small-talk classified as
+        # SIMPLE_CONVERSATION skips the heavyweight hybrid planner+RAG and
+        # takes the direct 6s model path below. Guards: no explicit artifact
+        # request, no attachments/uploads (multimodal needs the full path).
+        # Scope-guard + hedge behavior are unchanged (both paths share them).
+        _simple_chat = (
+            getattr(intent, "domain_capability", None) == Capability.SIMPLE_CONVERSATION
+            and not getattr(intent, "explicit_artifact_request", False)
+            and not (attachments or mock_multimodal_files or uploaded_files)
+        )
+
         # Hybrid retrieval path via Isnād Planner & Agentic Cultural Tools
-        if use_hybrid_retrieval:
+        if use_hybrid_retrieval and not _simple_chat:
             citations: list[dict[str, Any]] = []
             text_resp = ""
             decision = None
@@ -937,8 +948,11 @@ class ChatService:
         try:
             system_prompt = _SYSTEM_PROMPT_EN if resolved_lang == "en" else _SYSTEM_PROMPT
             lc_messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
-            if messages:
-                for m in messages[:-1]:
+            # Bound history fan-in: only the most recent turns reach the model,
+            # mirroring extract_session_history_turns (12-turn) semantics.
+            history_window = list(messages or [])[-(_MAX_HISTORY_TURNS + 1):]
+            if history_window:
+                for m in history_window[:-1]:
                     role = m.get("role")
                     content = m.get("content", "").strip()
                     if not content:
@@ -953,7 +967,8 @@ class ChatService:
             if routed is not None:
                 routed_text = sanitize_cultural_output(routed)
                 if not routed_text or not routed_text.strip():
-                    routed_text = ""
+                    # Empty model output must be an explicit hedge, never "".
+                    routed_text = _empty_hedge(user_query)
                 routed_artifacts = _maybe_orchestrate(routed_text, []) if routed_text else []
                 return ChatResult(ok=True, text=routed_text, artifacts=routed_artifacts)
 
@@ -969,7 +984,8 @@ class ChatService:
                 text = str(text)
             text = sanitize_cultural_output(text)
             if not text or not text.strip():
-                text = ""
+                # Empty model output must be an explicit hedge, never "".
+                text = _empty_hedge(user_query)
 
             artifacts = _maybe_orchestrate(text, []) if text else []
             return ChatResult(ok=True, text=text, artifacts=artifacts)

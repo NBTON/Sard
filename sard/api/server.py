@@ -147,7 +147,7 @@ def _persist_attachment_index() -> None:
         logger.debug("Suppressed boundary exception in server.py: %s", type(exc).__name__)
 
 
-_SAFE_ATTACHMENT_ID_RE = re.compile(r"^att_[0-9a-f]{12}$")
+_SAFE_ATTACHMENT_ID_RE = re.compile(r"^att_[0-9a-f]{12,64}$")
 _SAFE_DOWNLOAD_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -232,13 +232,13 @@ class AttachmentPayload(BaseModel):
 
 class ChatMessage(BaseModel):
     role: str = Field(..., description="Role: 'user', 'assistant', or 'system'")
-    content: str = Field(..., description="Message text")
+    content: str = Field(..., max_length=4000, description="Message text")
     attachments: Optional[List[AttachmentPayload]] = Field(default_factory=list, description="Attached files")
 
 
 class ChatRequest(BaseModel):
-    messages: List[ChatMessage] = Field(default_factory=list, description="Conversation history")
-    query: Optional[str] = Field(None, description="Direct user query if not using messages array")
+    messages: List[ChatMessage] = Field(default_factory=list, max_length=50, description="Conversation history")
+    query: Optional[str] = Field(None, max_length=4000, description="Direct user query if not using messages array")
     session_id: Optional[str] = Field(None, description="Optional session tracking ID")
     itinerary_mode: Optional[bool] = Field(False, description="Whether to trigger full itinerary generation")
     dates: Optional[List[str]] = Field(default_factory=list, description="Optional dates for itinerary")
@@ -248,7 +248,7 @@ class ChatRequest(BaseModel):
 
 
 class ItineraryRequest(BaseModel):
-    query: str = Field(..., description="Travel/cultural query in Arabic")
+    query: str = Field(..., max_length=4000, description="Travel/cultural query in Arabic")
     dates: Optional[List[str]] = Field(default_factory=list, description="List of ISO dates (e.g. ['2026-09-01', '2026-09-02'])")
     preview_calendar: Optional[bool] = Field(True, description="Enable calendar generation")
     output_root: Optional[str] = Field(None, description="Artifact output directory")
@@ -336,7 +336,25 @@ def _check_storage_readiness() -> dict:
         mode = "ephemeral_unconfigured"
     else:
         mode = "local_filesystem"
-    return {"durable": durable, "mode": mode, "ephemeral_host": ephemeral}
+    # Per-surface honesty: only artifact bytes are blob-backed (G3).
+    # Attachments (/api/upload index) and run records (/api/runs/:id) stay
+    # filesystem-local, so a second instance 404s them despite durable_blob.
+    try:
+        from sard.outputs.signing import enforcement_mode as _dl_mode
+        downloads = _dl_mode()
+    except Exception:
+        downloads = "unknown"
+    return {
+        "durable": durable,
+        "mode": mode,
+        "ephemeral_host": ephemeral,
+        "surfaces": {
+            "artifacts": mode,
+            "attachments": "ephemeral_filesystem",
+            "run_records": "ephemeral_filesystem",
+        },
+        "downloads": downloads,
+    }
 
 
 def _check_rag_readiness() -> dict:
@@ -663,7 +681,7 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="الملف المرفوع فارغ.")
 
     # Generate stable attachment ID and safe filename
-    att_id = f"att_{uuid.uuid4().hex[:12]}"
+        att_id = f"att_{uuid.uuid4().hex}"
     safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", Path(filename).stem)
     stored_filename = f"{att_id}_{safe_stem}{ext}"
     dest_path = (UPLOAD_DIR / stored_filename).resolve()
@@ -722,20 +740,48 @@ async def get_attachment_file(attachment_id: str):
 # ---------------------------------------------------------------------------
 
 
+def _require_download_auth(resource: str, exp: Optional[str], sig: Optional[str]) -> None:
+    """Enforce HMAC expiry auth on private download endpoints (signed mode).
+
+    Open mode (no ``SARD_DOWNLOAD_SECRET``): no-op so local dev keeps
+    working. Signed mode: missing/invalid signature -> 401; well-formed
+    but past-expiry -> 410 Gone with recovery wording.
+    """
+    from sard.outputs.signing import enforcement_mode, verify_resource
+
+    if enforcement_mode() != "signed":
+        return
+    if exp is None or sig is None:
+        raise HTTPException(status_code=401, detail="رابط التحميل غير موقّع أو منتهي. اطلب رابطًا جديدًا.")
+    if not verify_resource(resource, exp, sig):
+        try:
+            expired = int(str(exp).strip()) <= int(__import__("time").time())
+        except (TypeError, ValueError):
+            expired = False
+        if expired:
+            raise HTTPException(status_code=410, detail="انتهت صلاحية رابط التحميل. اطلب رابطًا جديدًا.")
+        raise HTTPException(status_code=401, detail="توقيع رابط التحميل غير صالح.")
+
+
 @app.get("/api/artifacts/{filename}")
 @app.get("/artifacts/{filename}")
-async def get_artifact_file(filename: str):
+async def get_artifact_file(filename: str, exp: Optional[str] = None, sig: Optional[str] = None):
     """Securely download a generated artifact file (PDF, DOCX, PPTX, HTML, ICS, SVG, JSON).
 
     Glob-wildcard IDOR fix: the filename must be an exact safe name (no
     ``*?[]{}`` expansion, no recursive ``**/`` search). Private blob
     URLs/tokens stay server-side; browsers only ever see this proxy.
+
+    Signed mode (``SARD_DOWNLOAD_SECRET`` set): ``?exp=&sig=`` is required
+    and enforced — a bare filename alone returns 401/410. Open mode (local
+    dev): plain URLs keep working and /api/status says so.
     """
     raw_name = Path(filename).name
     # Reject glob metacharacters outright (no wildcard expansion).
     if any(ch in raw_name for ch in ("*", "?", "[", "]", "{", "}")) or not _SAFE_DOWNLOAD_NAME_RE.fullmatch(raw_name):
         raise HTTPException(status_code=404, detail="الملف المطلوب غير موجود.")
     safe_name = raw_name
+    _require_download_auth(f"file:{safe_name}", exp, sig)
 
     def _mime_for_download(name: str) -> str:
         fn_lower = name.lower()
@@ -836,11 +882,16 @@ async def list_artifact_versions(artifact_id: str):
 
 @app.get("/api/artifacts/version/{artifact_id}/{version}")
 @app.get("/artifacts/version/{artifact_id}/{version}")
-async def get_artifact_version(artifact_id: str, version: int):
-    """Download one exact retained version (prior versions stay retrievable)."""
+async def get_artifact_version(artifact_id: str, version: int, exp: Optional[str] = None, sig: Optional[str] = None):
+    """Download one exact retained version (prior versions stay retrievable).
+
+    Signed mode (``SARD_DOWNLOAD_SECRET`` set) enforces ``?exp=&sig=`` like
+    the filename endpoint.
+    """
     safe = re.sub(r"[^A-Za-z0-9_-]", "", str(artifact_id or ""))[:128]
     if not safe or int(version or 0) < 1:
         raise HTTPException(status_code=400, detail="artifact_id/version غير صالح.")
+    _require_download_auth(f"version:{safe}:{int(version)}", exp, sig)
     store = get_artifact_store()
     get_version = getattr(store, "get_version_bytes", None)
     payload = get_version(safe, int(version)) if callable(get_version) else None
@@ -983,6 +1034,17 @@ async def get_artifact_version_history(artifact_id: str):
 # done} in-memory + durable JSON sidecar with short TTL, so a client can
 # poll-after-abort via GET /api/runs/:id. Frontend contract: expose fields
 # only (page.tsx/api.ts owned by frontend agent).
+
+
+def _is_cancel_exc(exc: BaseException) -> bool:
+    """True for typed cancellation (never matched on message substrings)."""
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    try:
+        from sard.agent.deadline import DeadlineCancelledError as _DCancelled
+    except Exception:
+        return False
+    return isinstance(exc, _DCancelled)
 # ---------------------------------------------------------------------------
 
 _RUNS: Dict[str, Dict[str, Any]] = {}
@@ -1014,7 +1076,14 @@ def _run_record_put(run_id: str, status: str, artifacts: Optional[List[Dict[str,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if extra:
-        record.update(extra)
+        # Privacy: pollable run records keep a short query preview, never
+        # the full user text (run IDs are bearer-capable on open surfaces).
+        scrubbed = dict(extra)
+        query = scrubbed.get("query")
+        if isinstance(query, str) and len(query) > 120:
+            scrubbed["query"] = query[:120]
+            scrubbed["query_truncated"] = True
+        record.update(scrubbed)
     _RUNS[run_id] = record
     # Bounded memory: keep last 200 runs.
     if len(_RUNS) > 200:
@@ -1076,8 +1145,8 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
     cancellation.
 
     Follow-up (requires owner plan confirm, NOT done here): raise Vercel
-    maxDuration 60 -> itinerary 60s (platform supports up to 300s on paid
-    plans; no billing changes made in this workstream).
+    maxDuration 60 -> itinerary clamped to 45s max (default 40+8 reserve)
+    (platform supports up to 300s on paid plans; no billing changes here).
     """
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="الرجاء تقديم استفسار للرحلة")
@@ -1097,13 +1166,16 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
             return False
 
     try:
-        run_id = f"itin-{uuid.uuid4().hex[:10]}"
+        run_id = f"itin-{uuid.uuid4().hex}"
         _run_record_put(run_id, "running", [], False, {"query": req.query})
         deps = default_dependencies(open_rag=True)
         deps.render_artifacts = True
         deps.output_root = str(OUTPUT_DIR)
         deps.caller_dates = tuple(req.dates or [])
         deps.preview_calendar = req.preview_calendar
+        # Live runs retrieve beyond the local corpus: budgeted
+        # Parallel -> Tavily -> Exa fanout inside the retrieve node.
+        deps.enable_web_search = True
 
         # Run pipeline with deadline + disconnect checks (no orphan execution).
         # The worker runs in a DETACHED daemon thread (not loop.run_in_executor):
@@ -1227,7 +1299,7 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
             return JSONResponse(
                 status_code=504,
                 content={
-                    "ok": True, "partial": True,
+                    "ok": False, "partial": True,
                     "error": "timeout", "error_category": "timeout",
                     "message": "اكتمل النص دون مخرجات ملفات ضمن المهلة.",
                     "run_id": run_id, "query": req.query,
@@ -1247,7 +1319,7 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
             path = getattr(art, "path", "")
             if filename and Path(path).exists() and Path(path).stat().st_size > 0:
                 artifacts_list.append({
-                    "id": f"art-{uuid.uuid4().hex[:8]}",
+                    "id": f"art-{uuid.uuid4().hex}",
                     "filename": filename,
                     "kind": "document" if art_type == "pdf" else "calendar",
                     "format": art_type or "pdf",
@@ -1269,7 +1341,7 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
                 return JSONResponse(
                     status_code=504 if timed_out else 499,
                     content={
-                        "ok": True, "partial": True,
+                        "ok": False, "partial": True,
                         "error": "timeout" if timed_out else "cancelled",
                         "error_category": "timeout" if timed_out else "cancelled",
                         "message": "اكتمل النص دون مخرجات ملفات ضمن المهلة.",
@@ -1311,7 +1383,9 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
         }
     except Exception as exc:
         logger.exception("Error generating full itinerary")
-        raise HTTPException(status_code=500, detail=f"حدث خطأ أثناء إعداد برنامج الرحلة: {exc}")
+        # Static public detail: raw exception text must never cross the API
+        # boundary (paths/provider messages). Server-side log keeps it.
+        raise HTTPException(status_code=500, detail="حدث خطأ أثناء إعداد برنامج الرحلة.")
 
 
 # ---------------------------------------------------------------------------
@@ -1338,8 +1412,9 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     path is preserved (no orchestration runs).
 
     Follow-up (requires owner plan confirm, NOT done here): raise Vercel
-    maxDuration 60 -> artifact-chat 55s / itinerary 60s / chat-text 35s
-    (platform supports up to 300s on paid plans; no billing changes here).
+    maxDuration 60 -> artifact-chat 55s / itinerary clamped to 45s (default
+    40+8 reserve) / chat-text 35s (platform supports up to 300s on paid
+    plans; no billing changes here).
 
     Invariants enforced here:
     - Explicit artifact intent (requested_formats via classify_intent) survives every fallback
@@ -1364,12 +1439,16 @@ async def chat_endpoint(req: ChatRequest, request: Request):
         from sard.agent.deadline import Deadline, chat_request_budget
 
         t_start = time.monotonic()
-        run_id = f"chat-{uuid.uuid4().hex[:10]}"
+        run_id = f"chat-{uuid.uuid4().hex}"
         citations_sent: list[dict[str, Any]] = []
         artifacts_sent: list[dict[str, Any]] = []
         proposals: list[Any] = []
         full_response_text = ""
         verified = False
+        # Set inside the hybrid phase when typed cancellation arrives; the
+        # direct fallback must not run after cancel. Initialized here because
+        # the hybrid block itself is conditional.
+        hybrid_cancelled = False
         # Early intent classification so fallback path knows artifact expectation and can surface failed artifacts
         early_intent = classify_intent(effective_query, messages=[m.model_dump() for m in req.messages] if req.messages else None, attachments=all_attachments)
         session_id_out = req.session_id or str(uuid.uuid4())
@@ -1619,11 +1698,23 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                     logger.info("SSE cancelled during hybrid phase (run_id=%s).", run_id)
                     raise
                 except Exception as exc:
-                    logger.warning("Isnād planner exception (run_id=%s): %s. Falling back to direct chat.", run_id, type(exc).__name__)
+                    # Typed cancellation must skip the direct fallback: doing
+                    # more model work after the client went away wastes budget
+                    # and can emit deltas after the cancelled terminal.
+                    if _is_cancel_exc(exc) or chat_cancel.is_set():
+                        try:
+                            chat_cancel.set()
+                        except Exception:
+                            pass
+                        hybrid_cancelled = True
+                        logger.info("Hybrid chat cancelled (run_id=%s); skipping direct fallback.", run_id)
+                    else:
+                        logger.warning("Isnād planner exception (run_id=%s): %s. Falling back to direct chat.", run_id, type(exc).__name__)
 
             # 3. Fallback if no response text yet — also handles artifact-only requests with empty model
-            # This path must also honor artifact intent: direct model fallback can still produce requested artifact
-            if not full_response_text or not full_response_text.strip():
+            # This path must also honor artifact intent: direct model fallback can still produce requested artifact.
+            # A cancelled hybrid run never falls back (no expensive work after cancel).
+            if (not full_response_text or not full_response_text.strip()) and not hybrid_cancelled and not chat_cancel.is_set():
                 # Check if we already have artifacts from hybrid (even with empty text, artifacts may be present)
                 # If artifacts already satisfy intent, we still need text hedge for delta; otherwise we try direct model
                 needs_text = not full_response_text or not full_response_text.strip()
