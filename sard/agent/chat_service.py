@@ -780,19 +780,14 @@ class ChatService:
             # renderer fails (loop continues; no early return on failure).
             return local_artifacts
 
-        # Early check for unconfigured model when no injected model is present
-        if self._injected_model is None:
-            try:
-                _ = self._get_model()
-            except ModelConfigError as exc:
-                logger.warning("Chat model configuration error: %s", exc)
-                err_msg = str(exc)
-                if resolved_lang == "en" and "ANTHROPIC_API_KEY" in err_msg:
-                    err_msg = "Server not configured: missing API credentials. Please configure ANTHROPIC_API_KEY or another provider."
-                artifacts = []
-                if intent.explicit_artifact_request:
-                    artifacts = _maybe_orchestrate(_empty_hedge(user_query), [])
-                return ChatResult(ok=False, error_message=err_msg, artifacts=artifacts)
+        # Offline-first: deterministic paths (G10 fastpath, hybrid planner with
+        # bundled/corpus retrieval + deterministic synthesis) must NOT require
+        # model credentials. The planner already degrades llm_invoke_fn to None
+        # when no provider is configured (see ask_isnad/_can_load_model), and
+        # the direct (non-hybrid) path below still returns a typed
+        # ModelConfigError when a live model is genuinely required. An early
+        # return here would force ok=False for every offline request and break
+        # the offline CI contract (citations/proposals/fastpath without keys).
 
         # G10 fast-path: pure data formats (json/csv/txt) render deterministically
         # in ~ms; skip slow RAG/web planner so SSE always meets 5s budget.
