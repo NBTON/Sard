@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from sard.agent.capability_routing import (
     Capability,
     classify_intent,
+    is_smalltalk,
 )
 from sard.agent.cultural_router import (
     CULTURAL_SYSTEM_PROMPT,
@@ -797,13 +798,13 @@ class ChatService:
             _fast_arts = _maybe_orchestrate(_fast_text, [])
             return ChatResult(ok=True, text=sanitize_cultural_output(_fast_text), decision="structured_fastpath", citations=[], planner_result=None, artifacts=_fast_arts)
 
-        # Simple-chat short-circuit: small-talk classified as
-        # SIMPLE_CONVERSATION skips the heavyweight hybrid planner+RAG and
-        # takes the direct 6s model path below. Guards: no explicit artifact
-        # request, no attachments/uploads (multimodal needs the full path).
-        # Scope-guard + hedge behavior are unchanged (both paths share them).
+        # Small-talk short-circuit: pure social turns skip the heavyweight
+        # hybrid planner+RAG and take the direct 6s model path below.
+        # Gated on is_smalltalk (not the coarse SIMPLE_CONVERSATION bucket,
+        # which also holds short factual questions that need grounding).
+        # Guards: no explicit artifact request, no attachments/uploads.
         _simple_chat = (
-            getattr(intent, "domain_capability", None) == Capability.SIMPLE_CONVERSATION
+            is_smalltalk(user_query)
             and not getattr(intent, "explicit_artifact_request", False)
             and not (attachments or mock_multimodal_files or uploaded_files)
         )

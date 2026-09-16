@@ -15,6 +15,13 @@ from sard.rag.zvec_store import ZvecRepository, versioned_collection_path
 
 
 def test_default_nvidia_routes_match_step3_contract(monkeypatch):
+    """Default routes use catalog-verified, fully-qualified NVIDIA NIM IDs.
+
+    Re-baselined 2026-09-16 after live probing: the previous bare short names
+    (``nemotron-3-ultra-550b-a55b`` etc.) 404 against the hosted catalog, and
+    ``llama-nemotron-embed-1b-v2`` / ``nv-embed-v1`` are EOL. The contract
+    now pins IDs that the catalog actually serves for this account.
+    """
     for key in list(os.environ):
         if key.startswith(("NVIDIA_", "RAG_", "ZVEC_")):
             monkeypatch.delenv(key, raising=False)
@@ -22,19 +29,30 @@ def test_default_nvidia_routes_match_step3_contract(monkeypatch):
     settings = get_rag_settings()
 
     assert settings.chat_route.ordered == (
-        "nemotron-3-ultra-550b-a55b",
-        "nemotron-3-super-120b-a12b",
-        "qwen3-next-80b-a3b-instruct",
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/llama-3.1-nemotron-70b-instruct",
     )
     assert settings.query_route.ordered == (
-        "nemotron-3-nano-30b-a3b",
-        "nvidia-nemotron-nano-9b-v2",
-        "llama-3.1-8b-instruct",
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "nvidia/nemotron-3-super-120b-a12b",
+        "mistralai/mistral-7b-instruct-v0.3",
     )
-    assert settings.embedding_route.primary == "nemotron-3-embed-1b"
-    assert settings.embedding_fallback_model == "nv-embed-v1"
+    # Chat/query/embedding defaults must be fully qualified (vendor/model):
+    # these are the hosted-catalog completions/embeddings endpoints that 404
+    # on bare short names. Rerank uses the separate ranking endpoint and is
+    # asserted by exact value below.
+    for leg in (
+        *settings.chat_route.ordered,
+        *settings.query_route.ordered,
+        settings.embedding_route.primary,
+        settings.embedding_fallback_model,
+    ):
+        assert "/" in leg, f"default route ID must be vendor-qualified: {leg!r}"
+    assert settings.embedding_route.primary == "nvidia/nemotron-3-embed-1b"
+    assert settings.embedding_fallback_model == "nvidia/nv-embedqa-mistral-7b-v2"
     assert settings.rerank_route.primary == "rerank-qa-mistral-4b"
-    assert settings.vision_route.primary == "muse-glimmer-30b"
+    assert settings.vision_route.primary == "meta/muse-glimmer-30b"
 
 
 def test_invalid_rag_configuration_fails_before_network(monkeypatch):

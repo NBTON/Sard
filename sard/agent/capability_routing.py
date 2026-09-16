@@ -189,6 +189,17 @@ _SMALLTALK_RE = re.compile(
     re.I,
 )
 
+def is_smalltalk(query: str) -> bool:
+    """True for pure social turns (greeting/thanks/farewell), not questions.
+
+    ``SIMPLE_CONVERSATION`` is a coarse bucket that also covers short factual
+    questions ("ما هي عاصمة السعودية؟"), which still need retrieval grounding.
+    Callers that want to skip the heavyweight pipeline must gate on this, not
+    on the capability alone.
+    """
+    return bool(_SMALLTALK_RE.search((query or "").strip().lower()))
+
+
 _FRESH_KEYWORDS = re.compile(
     r"(اليوم|غدا|غدًا|الآن|موعد|فعالية|مهرجان|افتتاح|إغلاق|سعر|تذكرة|جدول|مواعيد|opening|hours|price|event|today|tomorrow)",
     re.I,

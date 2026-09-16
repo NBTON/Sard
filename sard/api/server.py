@@ -31,7 +31,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-load_dotenv(_PROJECT_ROOT / ".env")
+# Load local developer credentials, but never inside the test suite: tests
+# must stay deterministic and network-free (see tests/conftest.py), and an
+# unconditional load_dotenv here silently re-injects real provider keys.
+if os.environ.get("SARD_DISABLE_DOTENV", "").strip().lower() not in ("1", "true", "yes"):
+    load_dotenv(_PROJECT_ROOT / ".env")
 
 from sard.agent.capability_routing import Capability, StructuredIntent, classify_intent
 from sard.agent.chat_service import ChatService
@@ -681,7 +685,7 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="الملف المرفوع فارغ.")
 
     # Generate stable attachment ID and safe filename
-        att_id = f"att_{uuid.uuid4().hex}"
+    att_id = f"att_{uuid.uuid4().hex}"
     safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", Path(filename).stem)
     stored_filename = f"{att_id}_{safe_stem}{ext}"
     dest_path = (UPLOAD_DIR / stored_filename).resolve()
