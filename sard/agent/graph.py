@@ -68,6 +68,11 @@ class GraphDependencies:
     compose_max_retries: int = 2
     deadline: Optional[Any] = None
     cancel_event: Optional[Any] = None
+    # Web-search leg for the ``retrieve`` node (Parallel -> Tavily -> Exa
+    # failover, budgeted by the run deadline). Opt-in: live entry points
+    # (API server, CLI, application service) set it True; unit tests leave
+    # it False for deterministic, network-free runs.
+    enable_web_search: bool = False
 
 
 def default_dependencies(open_rag: bool = False) -> GraphDependencies:
@@ -89,10 +94,10 @@ logger = logging.getLogger(__name__)
 def _cancelled_node_failure(run: str, name: str, start: float, state: dict, deps: GraphDependencies) -> dict:
     """Typed node failure for CANCELLATION — distinguishable from timeout.
 
-    Cancellation is never a degraded/ordinary failure: the error carries the
-    ``(cancelled)`` marker, kind ``TIMEOUT`` (closest fixed kind), and
-    ``retryable=False`` (timeouts stay retryable), so server layers can tell
-    "client went away" apart from "provider was slow" without new schema.
+    Cancellation is never a degraded/ordinary failure: the error carries
+    kind ``CANCELLED`` and ``retryable=False`` (timeouts stay retryable), so
+    server layers can tell "client went away" apart from "provider was slow"
+    via :func:`classify_failure_to_kind` without message-substring matching.
 
     It also exhausts the verify->compose retry loop (``verification_exhausted``
     + ``compose_retry_count`` past the cap) and seeds an honest partial
@@ -117,7 +122,7 @@ def _cancelled_node_failure(run: str, name: str, start: float, state: dict, deps
             make_error(
                 run,
                 name,
-                FailureKind.TIMEOUT,
+                FailureKind.CANCELLED,
                 f"أُلغي الطلب (cancelled) قبل/أثناء {name}؛ لا تُعَد المحاولة ولا تُستكمل كفشل عادي.",
                 False,
             )

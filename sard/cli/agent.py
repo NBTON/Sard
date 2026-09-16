@@ -139,6 +139,9 @@ def main():
     deps.caller_dates = tuple(args.date)
     deps.preview_calendar = args.preview_calendar
     deps.render_checksums = args.checksums
+    if not args.demo:
+        # Live CLI runs retrieve beyond the local corpus (budgeted fanout).
+        deps.enable_web_search = True
 
     run_id = args.run_id or f"cli-{uuid.uuid4().hex[:12]}"
     result = run_pipeline(args.query, dependencies=deps, run_id=run_id, caller_dates=args.date, preview_calendar=args.preview_calendar)

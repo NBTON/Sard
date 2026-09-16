@@ -152,7 +152,9 @@ def test_graph_compiles_offline_with_no_dependencies():
 
 
 def test_offline_no_dependencies_run_finishes_as_partial_not_crash():
-    result = run_pipeline("خطة رحلة إلى الرياض", dependencies=GraphDependencies())
+    # Offline contract: web leg pinned off so this test is deterministic
+    # and network-free even when provider keys exist in the environment.
+    result = run_pipeline("خطة رحلة إلى الرياض", dependencies=GraphDependencies(enable_web_search=False))
     assert result["graph_outcome"] in {"partial", "completed", "failed"}
     assert result["final_answer"]
     assert result["errors"] == []

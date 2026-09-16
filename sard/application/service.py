@@ -308,6 +308,8 @@ class SardApplicationService:
             render_artifacts=request.render_artifacts,
             output_root=str(self._output_root),
             caller_dates=caller_dates,
+            # Live UI runs retrieve beyond the local corpus (budgeted fanout).
+            enable_web_search=True,
         )
         state = initial_state(
             effective_request,

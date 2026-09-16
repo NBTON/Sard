@@ -218,6 +218,10 @@ class GraphState(TypedDict, total=False):
     retrieval_mode: str
     reranking_used: Optional[str]
     retrieval_warnings: list[str]
+    web_search_triggered: bool
+    web_search_reason: str
+    web_result_count: int
+    web_unavailable_warning: bool
 
     draft: Optional[str]
     itinerary: Optional[Itinerary]
@@ -287,6 +291,10 @@ def initial_state(
         "retrieval_mode": RAGMode.UNAVAILABLE.value,
         "reranking_used": None,
         "retrieval_warnings": [],
+        "web_search_triggered": False,
+        "web_search_reason": "",
+        "web_result_count": 0,
+        "web_unavailable_warning": False,
         "draft": None,
         "itinerary": None,
         "sources": [],
