@@ -187,17 +187,19 @@ def get_rag_settings() -> RAGSettings:
             use_case="generation",
             # Catalog-verified full IDs (2026-09-16): bare short names 404
             # on the hosted API, and several legacy defaults are EOL.
-            primary=_env("NVIDIA_CHAT_MODEL_PRIMARY", "nvidia/nemotron-3-super-120b-a12b"),
+            # Live-probed: ultra responds (~4s), super intermittently 503s,
+            # so ultra leads with super as first fallback.
+            primary=_env("NVIDIA_CHAT_MODEL_PRIMARY", "nvidia/nemotron-3-ultra-550b-a55b"),
             fallbacks=(
-                _env("NVIDIA_CHAT_MODEL_FALLBACK_1", "nvidia/nemotron-3-ultra-550b-a55b"),
+                _env("NVIDIA_CHAT_MODEL_FALLBACK_1", "nvidia/nemotron-3-super-120b-a12b"),
                 _env("NVIDIA_CHAT_MODEL_FALLBACK_2", "nvidia/llama-3.1-nemotron-70b-instruct"),
             ),
         ),
         query_route=ModelRoute(
             use_case="query_rewrite",
-            primary=_env("NVIDIA_QUERY_MODEL_PRIMARY", "nvidia/nemotron-nano-3-30b-a3b"),
+            primary=_env("NVIDIA_QUERY_MODEL_PRIMARY", "nvidia/nemotron-3-ultra-550b-a55b"),
             fallbacks=(
-                _env("NVIDIA_QUERY_MODEL_FALLBACK_1", "nvidia/mistral-nemo-minitron-8b-8k-instruct"),
+                _env("NVIDIA_QUERY_MODEL_FALLBACK_1", "nvidia/nemotron-3-super-120b-a12b"),
                 _env("NVIDIA_QUERY_MODEL_FALLBACK_2", "mistralai/mistral-7b-instruct-v0.3"),
             ),
         ),

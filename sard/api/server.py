@@ -1312,23 +1312,76 @@ async def generate_full_itinerary(req: ItineraryRequest, request: Request):
         orchestrator = get_artifact_orchestrator()
         artifacts_list = []
 
-        # If LangGraph rendered artifacts, extract them
+        # If LangGraph rendered artifacts, register their bytes in the active
+        # store under STABLE identities (run+format+topic) so downloads,
+        # revision, and conversion work uniformly with orchestrator artifacts.
+        # Ad-hoc random IDs + unregistered files used to yield dead download
+        # links (404) and unknown_artifact revision failures (422).
+        from sard.outputs.document import ArtifactDocument as _Doc
+        from sard.outputs.document import stable_artifact_id as _stable_id
+
         for art in state.get("rendered_artifacts", []):
             filename = getattr(art, "filename", "")
-            art_type = getattr(art, "artifact_type", "")
+            art_type = getattr(art, "artifact_type", "") or "pdf"
             path = getattr(art, "path", "")
-            if filename and Path(path).exists() and Path(path).stat().st_size > 0:
-                artifacts_list.append({
-                    "id": f"art-{uuid.uuid4().hex}",
-                    "filename": filename,
-                    "kind": "document" if art_type == "pdf" else "calendar",
-                    "format": art_type or "pdf",
-                    "status": "created",
-                    "url": f"/api/artifacts/{filename}",
-                    "download_url": f"/api/artifacts/{filename}",
-                    "size_bytes": Path(path).stat().st_size,
-                    "title": f"برنامج الرحلة ({art_type.upper()})",
-                })
+            if not (filename and path and Path(path).exists() and Path(path).stat().st_size > 0):
+                continue
+            try:
+                raw_bytes = Path(path).read_bytes()
+            except OSError as exc_read:
+                logger.debug("Itinerary artifact read skipped (%s).", type(exc_read).__name__)
+                continue
+            fmt = "pdf" if art_type == "pdf" else ("ics" if art_type == "calendar" else "txt")
+            mime = {
+                "pdf": "application/pdf",
+                "ics": "text/calendar; charset=utf-8",
+                "txt": "text/plain; charset=utf-8",
+            }[fmt]
+            stable = _stable_id(run_id, fmt, (req.query or "")[:40])
+            try:
+                _sid, stored_name, size_bytes, _checksum = orchestrator.store.store_bytes(
+                    stable, Path(filename).name, bytes(raw_bytes), mime,
+                    {"artifact_id": stable, "run_id": run_id, "version": 1},
+                )
+            except Exception as exc_store:
+                logger.debug("Itinerary artifact store skipped (%s).", type(exc_store).__name__)
+                continue
+            # Persist a canonical document so revision/conversion work: the
+            # verified itinerary object backs PDFs, raw text backs txt.
+            try:
+                put_doc = getattr(orchestrator.store, "put_document", None)
+                itin_obj = state.get("itinerary")
+                if fmt == "pdf" and itin_obj is not None:
+                    _doc = _Doc.from_itinerary(itin_obj, artifact_id=stable, run_id=run_id, format="pdf")
+                else:
+                    from sard.outputs.orchestrator import ArtifactRequest as _ArtifactRequest
+
+                    _doc = _Doc.from_request(_ArtifactRequest(
+                        format=fmt, kind="document",
+                        title=f"برنامج الرحلة ({art_type.upper()})",
+                        topic=(req.query or "")[:200],
+                        raw_text=(state.get("final_itinerary_text") or state.get("final_response") or "")[:20000],
+                        metadata={"artifact_id": stable, "run_id": run_id, "version": 1},
+                    ))
+                if callable(put_doc):
+                    put_doc(stable, _doc)
+                    try:
+                        put_doc(stable, _doc, version=1)
+                    except TypeError:
+                        pass
+            except Exception as exc_doc:
+                logger.debug("Itinerary document persist skipped (%s).", type(exc_doc).__name__)
+            artifacts_list.append({
+                "id": stable,
+                "filename": stored_name,
+                "kind": "document" if art_type == "pdf" else "calendar",
+                "format": fmt,
+                "status": "created",
+                "url": orchestrator.store.get_download_url(stable, stored_name),
+                "download_url": orchestrator.store.get_download_url(stable, stored_name),
+                "size_bytes": size_bytes,
+                "title": f"برنامج الرحلة ({art_type.upper()})",
+            })
 
         # Fallback: if no artifacts rendered yet, generate via orchestrator
         # (only if reserve budget remains; otherwise return typed partial).
