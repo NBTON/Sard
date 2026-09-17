@@ -40,7 +40,30 @@ def parse_sse_events(sse_text: str):
     return events
 
 
-def test_chat_sse_explicit_pdf_request(client):
+def _grounded_planner_result():
+    """Grounded planner outcome so the download flow is deterministic offline."""
+    from sard.schemas.isnad import Evidence, IsnadChain, PlannerResult
+
+    evidence = [Evidence(source_id="s1", origin="ministry", region="national",
+                         excerpt="excerpt text", raw_ref="r1")]
+    chain = IsnadChain(request_id="req-e2e", classification="other",
+                       region="national", evidence=evidence, atoms=[],
+                       conflicts=[], score="high", decision="generate",
+                       missing=[])
+    return PlannerResult(chain=chain, answer_ar="grounded answer prose",
+                         answer_en="", visible_sources=list(evidence),
+                         follow_up="")
+
+
+def test_chat_sse_explicit_pdf_request(client, monkeypatch):
+    # DG-1: an ungrounded live planner must refuse; pin a grounded outcome
+    # so this test proves the created/download flow deterministically.
+    from sard.agent.chat_service import ChatService
+
+    monkeypatch.setattr(ChatService, "ask_isnad",
+                        lambda self, *a, **k: _grounded_planner_result())
+    monkeypatch.setattr(ChatService, "_filter_planner_result",
+                        lambda self, q, r: r)
     test_client, store = client
     response = test_client.post(
         "/api/chat",

@@ -1,80 +1,39 @@
 import assert from "node:assert";
 import test from "node:test";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import vm from "node:vm";
 
-// Simple compilation of PersistentSSEParser logic for Node testing
-class PersistentSSEParser {
-  constructor() {
-    this.buffer = "";
-    this.currentEvent = "message";
-    this.currentDataLines = [];
-  }
-
-  feed(chunk, onEvent) {
-    this.buffer += chunk;
-    while (true) {
-      const newlineIndex = this.buffer.indexOf("\n");
-      if (newlineIndex === -1) {
-        break;
-      }
-      let line = this.buffer.slice(0, newlineIndex);
-      this.buffer = this.buffer.slice(newlineIndex + 1);
-
-      if (line.endsWith("\r")) {
-        line = line.slice(0, -1);
-      }
-      this.processLine(line, onEvent);
-    }
-  }
-
-  processLine(line, onEvent) {
-    if (line === "") {
-      if (this.currentDataLines.length > 0) {
-        const payload = this.currentDataLines.join("\n");
-        onEvent({
-          event: this.currentEvent || "message",
-          data: payload,
-        });
-        this.currentEvent = "message";
-        this.currentDataLines = [];
-      }
-      return;
-    }
-
-    if (line.startsWith(":")) {
-      return;
-    }
-
-    if (line.startsWith("event:")) {
-      this.currentEvent = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      let dataVal = line.slice(5);
-      if (dataVal.startsWith(" ")) {
-        dataVal = dataVal.slice(1);
-      }
-      this.currentDataLines.push(dataVal);
-    }
-  }
-
-  flush(onEvent) {
-    if (this.buffer.length > 0) {
-      let line = this.buffer;
-      if (line.endsWith("\r")) {
-        line = line.slice(0, -1);
-      }
-      this.buffer = "";
-      this.processLine(line, onEvent);
-    }
-    if (this.currentDataLines.length > 0) {
-      const payload = this.currentDataLines.join("\n");
-      onEvent({
-        event: this.currentEvent || "message",
-        data: payload,
-      });
-      this.currentEvent = "message";
-      this.currentDataLines = [];
-    }
-  }
-}
+// F-4: exercise the shipped parser (src/lib/sseParser.ts), never a copy.
+// The TypeScript source is transpiled with the repo's own compiler so the
+// committed cases fail if the shipped implementation drifts.
+const require = createRequire(import.meta.url);
+const ts = require("typescript");
+const here = path.dirname(fileURLToPath(import.meta.url));
+const shipped = fs.readFileSync(
+  path.join(here, "..", "src", "lib", "sseParser.ts"),
+  "utf8"
+);
+const { outputText } = ts.transpileModule(shipped, {
+  compilerOptions: {
+    module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2020,
+  },
+});
+const shim = { exports: {} };
+vm.runInNewContext(outputText, {
+  module: shim,
+  exports: shim.exports,
+  console,
+});
+const { PersistentSSEParser } = shim.exports;
+assert.strictEqual(
+  typeof PersistentSSEParser,
+  "function",
+  "shipped sseParser.ts must export PersistentSSEParser"
+);
 
 test("PersistentSSEParser - fragmented event and data chunks", () => {
   const parser = new PersistentSSEParser();

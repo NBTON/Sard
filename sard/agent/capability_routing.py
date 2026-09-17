@@ -138,9 +138,28 @@ _REPORT_DOWNLOADABLE_RE = re.compile(
     re.I,
 )
 _GENERIC_REPORT_WITH_VERB_RE = re.compile(
-    r"(?:حوّل|حول|أنشئ|انشئ|اعطني|أعطني|صمم|جهز|احتاج|أحتاج|create|make|generate|convert).*(?:تقرير|report|مستند|document|وثيقة)",
+    r"(?:حوّل|حول|أنشئ|انشئ|اعطني|أعطني|صمم|جهز|احتاج|أحتاج|أريد|اريد|create|make|generate|convert|need|want|give(?:\s+me)?|provide|build|design|prepare|produce).*(?:تقرير|report|مستند|document|وثيقة)",
     re.I,
 )
+
+# Negated creation request: a negation marker shortly before a creation verb
+# ("don't create a report"). Such queries must not infer a default artifact
+# format. The guard is intentionally narrow (negation must precede the verb).
+_NEGATED_CREATION_RE = re.compile(
+    r"(?:\bdon'?t\b|\bdo\s+not\b|\bdoesn'?t\b|\bdoes\s+not\b|\bnever\b"
+    r"|\bwithout\b|\bstop\b|لا\s+|لم\s+|لن\s+"
+    r"|ليس\s+|بدون\s+|أوقف"
+    r"|اوقف)"
+    r"[\w\s'\"،,؛:.-]{0,24}?"
+    r"(?:create|make|generate|convert|need|want|give|provide|build|design|prepare|produce)",
+    re.I,
+)
+
+
+def is_negated_creation_request(query):
+    """True when the query negates artifact creation."""
+    return bool(_NEGATED_CREATION_RE.search((query or "").strip()))
+
 
 _PRESENTATION_HINT = re.compile(
     r"(عرض تقديمي|شرائح|بوربوينت|pptx|presentation|slides|سلايدات|برزنتيشن|إيجاز ثقافي|powerpoint)",
@@ -275,8 +294,9 @@ def extract_requested_formats(query: str) -> List[str]:
         if _REPORT_DOWNLOADABLE_RE.search(q):
             if "pdf" not in formats:
                 formats.append("pdf")
-        elif _GENERIC_REPORT_WITH_VERB_RE.search(q):
+        elif _GENERIC_REPORT_WITH_VERB_RE.search(q) and not is_negated_creation_request(q):
             # e.g. "حوّل هذا إلى تقرير" or "create a report about..." -> default to pdf
+            # Negated requests never infer a default format.
             if "pdf" not in formats and "docx" not in formats:
                 # Only infer if no explicit format already and creation verb present
                 if _CREATION_VERB_RE.search(q):

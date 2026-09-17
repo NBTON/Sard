@@ -155,3 +155,206 @@ def test_current_status_label_reflects_nvidia_configuration(monkeypatch):
     label = current_status_label()
 
     assert label == "nvidia / nvidia/nemotron-3-super-120b-a12b"
+
+class _HybridPlannerStub:
+    """Stub for ask_isnad returning a fixed planner outcome."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def __call__(self, *args, **kwargs):
+        return self._result
+
+
+def _dg1_planner_result(decision, with_citation):
+    from sard.schemas.isnad import Evidence, IsnadChain, PlannerResult
+
+    ev = []
+    if with_citation:
+        ev = [Evidence(source_id="s1", origin="ministry", region="national",
+                       excerpt="excerpt text", raw_ref="r1")]
+    chain = IsnadChain(request_id="req-dg1", classification="other",
+                       region="national", evidence=ev, atoms=[], conflicts=[],
+                       score="medium", decision=decision, missing=[])
+    answer = "grounded answer prose about heritage" if (with_citation or decision == "generate") else ""
+    return PlannerResult(chain=chain, answer_ar=answer, answer_en="",
+                         visible_sources=list(ev), follow_up="")
+
+
+def _dg1_service(tmp_path, decision, with_citation):
+    from unittest.mock import patch
+
+    from sard.outputs.orchestrator import ArtifactOrchestrator, FileSystemArtifactStore
+
+    store = FileSystemArtifactStore(tmp_path / ("dg1-" + decision))
+    service = ChatService(chat_model=_FakeChatModel("model text"),
+                          orchestrator=ArtifactOrchestrator(store))
+    ask_patch = patch.object(ChatService, "ask_isnad",
+                             return_value=_dg1_planner_result(decision, with_citation))
+    filter_patch = patch.object(ChatService, "_filter_planner_result",
+                                lambda self, q, r: r)
+    ask_patch.start()
+    filter_patch.start()
+    try:
+        result = service.ask("create a PDF report about Najdi heritage",
+                             use_hybrid_retrieval=True, session_id="sess-dg1")
+    finally:
+        ask_patch.stop()
+        filter_patch.stop()
+    return result
+
+
+def test_dg1_refusal_yields_no_created_artifact(tmp_path):
+    result = _dg1_service(tmp_path, "refuse", False)
+
+    assert result.decision == "refuse"
+    assert result.artifacts, "refusal must surface a typed artifact entry"
+    assert not any(a.get("status") == "created" for a in result.artifacts)
+    pdf = next(a for a in result.artifacts if a.get("format") == "pdf")
+    assert pdf["status"] == "failed"
+    assert pdf["error_category"] == "insufficient_evidence"
+    assert pdf["download_url"] is None
+
+
+def test_dg1_clarification_yields_no_created_artifact(tmp_path):
+    result = _dg1_service(tmp_path, "ask", False)
+
+    assert result.decision == "ask"
+    assert result.artifacts
+    assert not any(a.get("status") == "created" for a in result.artifacts)
+    assert all(a.get("download_url") is None for a in result.artifacts)
+
+
+def test_dg1_unsupported_hedge_yields_no_created_artifact(tmp_path):
+    result = _dg1_service(tmp_path, "hedge", False)
+
+    assert result.artifacts
+    assert not any(a.get("status") == "created" for a in result.artifacts)
+    pdf = next(a for a in result.artifacts if a.get("format") == "pdf")
+    assert pdf["error_category"] == "insufficient_evidence"
+
+
+def test_dg1_supported_hedge_still_renders(tmp_path):
+    result = _dg1_service(tmp_path, "hedge", True)
+
+    pdf = next(a for a in result.artifacts if a.get("format") == "pdf")
+    assert pdf["status"] == "created"
+    assert pdf["download_url"] is not None
+
+
+def test_dg1_supported_generate_still_renders(tmp_path):
+    result = _dg1_service(tmp_path, "generate", True)
+
+    pdf = next(a for a in result.artifacts if a.get("format") == "pdf")
+    assert pdf["status"] == "created"
+    assert pdf["download_url"] is not None
+
+
+def test_dg1_config_error_hedge_yields_no_created_artifact(tmp_path):
+    service = ChatService()
+
+    result = service.ask("create a PDF report about Najdi heritage",
+                         use_hybrid_retrieval=False)
+
+    assert result.ok is False
+    assert result.artifacts
+    assert not any(a.get("status") == "created" for a in result.artifacts)
+
+def test_dg2_chat_retry_reuses_artifact(tmp_path):
+    """DG-2: same-session/same-request retry returns the same stored artifact."""
+    from unittest.mock import patch
+
+    from sard.outputs.orchestrator import ArtifactOrchestrator, FileSystemArtifactStore
+
+    store = FileSystemArtifactStore(tmp_path / "dg2-chat")
+    service = ChatService(chat_model=_FakeChatModel("model text"),
+                          orchestrator=ArtifactOrchestrator(store))
+    with patch.object(ChatService, "ask_isnad",
+                      return_value=_dg1_planner_result("generate", True)), \
+         patch.object(ChatService, "_filter_planner_result",
+                      lambda self, q, r: r):
+        first = service.ask("create a PDF report about Najdi heritage",
+                            use_hybrid_retrieval=True, session_id="sess-retry")
+        second = service.ask("create a PDF report about Najdi heritage",
+                             use_hybrid_retrieval=True, session_id="sess-retry")
+    for result in (first, second):
+        pdf = next(a for a in result.artifacts if a.get("format") == "pdf")
+        assert pdf["status"] == "created"
+    first_pdf = next(a for a in first.artifacts if a.get("format") == "pdf")
+    second_pdf = next(a for a in second.artifacts if a.get("format") == "pdf")
+    assert first_pdf["id"] == second_pdf["id"]
+    assert first_pdf["checksum"] == second_pdf["checksum"]
+    assert first_pdf["download_url"] == second_pdf["download_url"]
+    assert second_pdf["download_url"] is not None
+
+def _dg3_refuse_result():
+    from sard.schemas.isnad import IsnadChain, PlannerResult
+
+    chain = IsnadChain(request_id="req-dg3", classification="other",
+                       region="unknown", evidence=[], atoms=[], conflicts=[],
+                       score="low", decision="refuse", missing=["out_of_scope"])
+    return PlannerResult(chain=chain, answer_ar="", answer_en="",
+                         visible_sources=[], follow_up="")
+
+
+def _dg3_ask_calendar(tmp_path, query):
+    from unittest.mock import patch
+
+    from sard.outputs.orchestrator import ArtifactOrchestrator, FileSystemArtifactStore
+
+    store = FileSystemArtifactStore(tmp_path / "dg3-chat")
+    service = ChatService(chat_model=_FakeChatModel("model text"),
+                          orchestrator=ArtifactOrchestrator(store))
+    with patch.object(ChatService, "ask_isnad",
+                      return_value=_dg3_refuse_result()):
+        result = service.ask(query, use_hybrid_retrieval=True,
+                             session_id="sess-dg3")
+    return result, store
+
+
+def test_dg3_dated_calendar_request_creates_parseable_ics(tmp_path):
+    """DG-3: explicit dates in chat yield a downloadable ICS with matching VEVENTs."""
+    from icalendar import Calendar
+
+    result, store = _dg3_ask_calendar(
+        tmp_path,
+        "Create an ICS calendar for my trip: Riyadh visit on 2026-03-05 10:00-11:00",
+    )
+    ics = [a for a in result.artifacts if a.get("format") == "ics"]
+    assert len(ics) == 1
+    assert ics[0]["status"] == "created"
+    assert ics[0]["download_url"] is not None
+    data, _, _ = store.get_bytes(ics[0]["filename"])
+    cal = Calendar.from_ical(data)
+    vevents = [c for c in cal.walk() if c.name == "VEVENT"]
+    assert len(vevents) == 1
+    assert vevents[0].get("dtstart").dt.isoformat() == "2026-03-05T10:00:00+03:00"
+    assert vevents[0].get("dtend").dt.isoformat() == "2026-03-05T11:00:00+03:00"
+
+
+def test_dg3_undated_calendar_request_fails_honestly(tmp_path):
+    """DG-3: missing dates produce a typed failure, never an invented calendar."""
+    result, _ = _dg3_ask_calendar(tmp_path, "Create an ICS calendar for my trip")
+    assert result.artifacts
+    assert not any(a.get("status") == "created" for a in result.artifacts)
+    assert all(a.get("download_url") is None for a in result.artifacts)
+
+
+def test_dg3_invalid_range_calendar_request_fails_honestly(tmp_path):
+    """DG-3: end-before-start ranges are rejected, not rendered."""
+    result, _ = _dg3_ask_calendar(tmp_path, "Add calendar event on 2026-03-05 14:00-11:00")
+    assert result.artifacts
+    assert not any(a.get("status") == "created" for a in result.artifacts)
+
+def test_f6_injected_model_skips_network_router():
+    """F-6: an injected model is authoritative; the network router is untouched."""
+    from unittest.mock import patch
+
+    service = ChatService(chat_model=_FakeChatModel("direct answer"))
+    with patch.object(ChatService, "_invoke_via_router",
+                      side_effect=AssertionError("router must not be tried")) as router:
+        result = service.ask("plain question with no artifact intent",
+                             use_hybrid_retrieval=False)
+    assert result.ok is True
+    assert result.text == "direct answer"
+    assert router.call_count == 0

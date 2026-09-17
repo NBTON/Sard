@@ -138,7 +138,10 @@ test("mergeArtifactVersions - preserves old versions on failure", () => {
   assert.strictEqual(list[0].versions.length, 1);
   assert.strictEqual(list[0].versions[0].download_url, "/api/artifacts/v1.pdf");
   assert.strictEqual(list[0].versions[0].status, "created");
-  assert.strictEqual(list[0].status, "failed");
+  // F-2: a same-id failure must not flip the tile to failed while the
+  // created version with a working URL is retained; the failure detail is
+  // recorded but the downloadable version still reads as created.
+  assert.strictEqual(list[0].status, "created");
   assert.strictEqual(list[0].error, "Revision synthesis timed out");
   // download_url on the artifact retains fallback to previous valid download URL
   assert.strictEqual(list[0].download_url, "/api/artifacts/v1.pdf");

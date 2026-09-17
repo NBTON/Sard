@@ -1880,13 +1880,26 @@ async def chat_endpoint(req: ChatRequest, request: Request):
 
             # 5. SSE contract: artifacts event always before delta/done if artifacts exist; includes failed
             if artifacts_sent:
-                # Ensure artifacts are verified where possible: successful artifacts have downloadable verified bytes
-                # Failed artifacts must never appear as created
+                # F-3: validate each artifact explicitly instead of asserting.
+                # A violated invariant degrades that one artifact to a typed
+                # failed entry instead of aborting the whole SSE stream.
                 for art in artifacts_sent:
+                    if not isinstance(art, dict):
+                        continue
                     if art.get("status") == "failed":
-                        assert art.get("download_url") is None, "failed artifact must not have download_url"
-                    if art.get("status") == "created":
-                        assert art.get("download_url"), "created artifact must have download_url"
+                        if art.get("download_url") is not None:
+                            art["download_url"] = None
+                            art["url"] = ""
+                    elif art.get("status") == "created" and not art.get("download_url"):
+                        art["status"] = "failed"
+                        art["download_url"] = None
+                        art["url"] = ""
+                        art["size_bytes"] = 0
+                        if resolved_lang == "en":
+                            art["error"] = art.get("error") or "The file could not be verified for download."
+                        else:
+                            art["error"] = art.get("error") or "تعذر التحقق من الملف للتحميل."
+                        art["error_category"] = art.get("error_category") or "unverified_download"
                 yield {
                     "event": "artifacts",
                     "data": json.dumps({"artifacts": artifacts_sent}, ensure_ascii=False)

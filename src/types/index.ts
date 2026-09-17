@@ -548,14 +548,18 @@ export function mergeArtifactVersions(
     cur.activeVersion = cur.versions.length;
 
     // Refresh live (non-versioned) fields from newest event, but preserve old versions on failure.
+    // F-2: a same-id failure must not flip a tile to failed while a created
+    // version with a working URL is retained; the failure detail is recorded
+    // and the created status kept so the panel does not misread a good artifact.
     if (inc.status === "failed") {
-      cur.status = "failed";
-      cur.error = inc.error || cur.error;
-      cur.error_category = inc.error_category || cur.error_category;
-      // Do NOT erase cur.download_url if old version was successful
       if (!cur.download_url && cur.versions.length > 0) {
         const lastOk = [...cur.versions].reverse().find((v) => v.status === "created" && v.download_url);
         if (lastOk) cur.download_url = lastOk.download_url;
+      }
+      cur.error = inc.error || cur.error;
+      cur.error_category = inc.error_category || cur.error_category;
+      if (!cur.download_url) {
+        cur.status = "failed";
       }
     } else {
       cur.status = inc.status;

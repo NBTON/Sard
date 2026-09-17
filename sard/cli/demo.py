@@ -29,7 +29,8 @@ from sard.rag.ingest import load_metadata_sidecar
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(PROJECT_ROOT / ".env")
+if os.environ.get("SARD_DISABLE_DOTENV", "").strip().lower() not in ("1", "true", "yes"):
+    load_dotenv(PROJECT_ROOT / ".env")
 
 
 def _print(value: object) -> None:

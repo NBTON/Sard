@@ -29,7 +29,10 @@ from typing import Callable, Dict, Optional
 from dotenv import load_dotenv
 from langchain_core.language_models.chat_models import BaseChatModel
 
-if "PYTEST_CURRENT_TEST" not in os.environ:
+# F-5: import-time .env loading must honor the isolation flag so tests and
+# offline harnesses never pick up ambient provider credentials.
+if "PYTEST_CURRENT_TEST" not in os.environ and os.environ.get(
+    "SARD_DISABLE_DOTENV", "").strip().lower() not in ("1", "true", "yes"):
     load_dotenv()
     _PROJECT_ROOT = Path(__file__).resolve().parents[2]
     if (_PROJECT_ROOT / ".env").exists():

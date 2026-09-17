@@ -27,7 +27,8 @@ from typing import Any, Dict, List, Optional, Union
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+if os.environ.get("SARD_DISABLE_DOTENV", "").strip().lower() not in ("1", "true", "yes"):
+    load_dotenv()
 
 logger = logging.getLogger("sard.tools.multimodal")
 

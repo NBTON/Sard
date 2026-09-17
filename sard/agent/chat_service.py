@@ -605,7 +605,7 @@ class ChatService:
                 except Exception as exc:
                     logger.debug("Status callback skipped (%s).", type(exc).__name__)
 
-        def _maybe_orchestrate(text: str, sources: list[dict[str, str]]) -> list[dict[str, Any]]:
+        def _maybe_orchestrate(text: str, sources: list[dict[str, str]], *, grounded: bool = True, exempt_formats: Sequence[str] = ()) -> list[dict[str, Any]]:
             """Centralized helper: render requested artifact formats or return structured failure.
 
             Workstream E: checks the hierarchical deadline before each
@@ -614,6 +614,14 @@ class ChatService:
             cancelled) instead of writing late output. Emits typed SSE
             stages ``artifact_started`` / ``render_started`` /
             ``verify_started`` / ``artifact_ready`` / ``artifact_failed``.
+
+            DG-1: when ``grounded`` is False (refusal, clarification
+            request, or insufficient-evidence/error hedge), requested
+            formats become typed ``failed`` entries
+            (``error_category`` insufficient_evidence) instead of
+            downloadable documents. Formats in ``exempt_formats``
+            (user-supplied content such as dated calendar events or
+            conversions) still render.
             """
             local_artifacts: list[dict[str, Any]] = []
             target_fmts = getattr(intent, "target_formats", None) or getattr(intent, "requested_formats", ())
@@ -639,6 +647,33 @@ class ChatService:
                 )
                 if _degraded:
                     staged_warnings = list(staged_warnings)
+            if resolved_lang == "en":
+                _gate_error = ("No file was created: there is insufficient verified evidence "
+                               "to support this request.")
+            else:
+                _gate_error = ("\u0644\u0645 \u064a\u064f\u0646\u0634\u0623 \u0627\u0644\u0645\u0644\u0641: "
+                               "\u0644\u0627 \u062a\u0648\u062c\u062f \u0623\u062f\u0644\u0629 "
+                               "\u0645\u0648\u062b\u0642\u0629 \u0643\u0627\u0641\u064a\u0629 "
+                               "\u062a\u062f\u0639\u0645 \u0647\u0630\u0627 \u0627\u0644\u0637\u0644\u0628.")
+            # DG-3: dated chat requests carry explicit events into the ICS
+            # renderer (user-supplied schedule facts, no retrieval needed).
+            # Undated/ambiguous queries fall through to the curated lookup.
+            calendar_events: list = []
+            calendar_warnings: list = []
+            try:
+                from sard.agent.calendar_event_parser import extract_calendar_events as _extract_calendar_events
+
+                _wants_calendar = (
+                    getattr(intent, "domain_capability", None) == Capability.CALENDAR_SYNC
+                    or "ics" in tuple(target_fmts or ())
+                )
+                if intent.explicit_artifact_request and _wants_calendar:
+                    _cal_topic = getattr(intent, "canonical_topic", None) or getattr(intent, "extracted_topic", None) or user_query
+                    calendar_events, calendar_warnings = _extract_calendar_events(
+                        user_query, fallback_title=str(_cal_topic)[:80])
+            except Exception as exc:
+                logger.debug("Calendar event extraction skipped (%s).", type(exc).__name__)
+                calendar_events, calendar_warnings = [], []
             if intent.explicit_artifact_request and target_fmts:
                 for fmt in target_fmts:
                     if fmt == "text":
@@ -672,6 +707,22 @@ class ChatService:
                             })
                             continue
                     topic_str = getattr(intent, "canonical_topic", None) or getattr(intent, "extracted_topic", None) or user_query
+                    _auto_exempt = {"ics"} if calendar_events else set()
+                    if not grounded and fmt not in (set(exempt_formats or ()) | _auto_exempt):
+                        local_artifacts.append(ArtifactResult(
+                            id=f"art-gated-{fmt}",
+                            kind=kind_for_fmt,
+                            format=fmt,
+                            title=f"\u0645\u062e\u0631\u062c \u062b\u0642\u0627\u0641\u064a: {topic_str}",
+                            filename=f"sard-{fmt}",
+                            mime_type="application/octet-stream",
+                            size_bytes=0,
+                            status="failed",
+                            download_url=None,
+                            error=_gate_error,
+                            error_category="insufficient_evidence",
+                        ).to_dict())
+                        continue
                     proposal_capability = getattr(intent, "domain_capability", None) in {
                         Capability.RECIPE_CARD,
                         Capability.ARTISAN_CRAFT,
@@ -714,19 +765,20 @@ class ChatService:
                         kind=kind_for_fmt,
                         title=f"مخرج ثقافي: {topic_str}",
                         topic=topic_str,
-                        content_data=dict(staged_content) if staged_content else None,
+                        content_data=({"events": [dict(e) for e in calendar_events], "warnings": list(calendar_warnings)} if (fmt == "ics" and calendar_events) else (dict(staged_content) if staged_content else None)),
                         region=intent.region or "المملكة العربية السعودية",
                         raw_text=text,
                         sources=tuple(norm_sources) if norm_sources else (),
                         metadata={
                             "session_id": session_id,
                             "run_id": effective_run_id,
+                            "idempotency_key": f"{effective_run_id}:{fmt}",
                             "version": 1,
                             "intent": intent.to_dict() if hasattr(intent, "to_dict") else asdict(intent),
                             "locale": resolved_lang,
                             "provenance": ["chat_service"],
                             "evidence_ids": [d.get("evidence_id") or d.get("chunk_id") or d.get("source_id") for d in norm_sources if isinstance(d, dict) and (d.get("evidence_id") or d.get("chunk_id") or d.get("source_id"))],
-                            "warnings": list(staged_warnings),
+                            "warnings": list(staged_warnings) + (list(calendar_warnings) if fmt == "ics" else []),
                         },
                     )
                     try:
@@ -897,7 +949,8 @@ class ChatService:
                 citations.extend(mandate_citations)
 
             # Empty output must be explicit hedge, not empty string
-            if not text_resp or not text_resp.strip():
+            synthetic_hedge = not text_resp or not text_resp.strip()
+            if synthetic_hedge:
                 text_resp = _empty_hedge(user_query)
                 if decision is None:
                     decision = "hedge"
@@ -908,7 +961,19 @@ class ChatService:
                     text_resp = f"{text_resp.rstrip()}{medical_note}"
 
             # 3. Artifact Orchestration — always via helper (BOTH paths)
-            artifacts = _maybe_orchestrate(text_resp, citations)
+            # DG-1: generation follows the grounded outcome, not bare intent.
+            # Refusals, clarification requests, synthetic error hedges, and
+            # unsupported hedges report insufficient_evidence instead of
+            # minting documents. Per-format user-supplied content (dated
+            # calendar events, conversions) is exempted via exempt_formats.
+            grounded = True
+            if decision in ("refuse", "ask"):
+                grounded = False
+            elif synthetic_hedge:
+                grounded = False
+            elif decision == "hedge" and not citations:
+                grounded = False
+            artifacts = _maybe_orchestrate(text_resp, citations, grounded=grounded)
 
             return ChatResult(
                 ok=True,
@@ -939,7 +1004,7 @@ class ChatService:
             logger.warning("Chat model configuration error: %s", exc)
             # Even on config error, if artifact requested, return failed artifact so SSE can surface it
             if intent.explicit_artifact_request:
-                artifacts = _maybe_orchestrate(_empty_hedge(user_query), [])
+                artifacts = _maybe_orchestrate(_empty_hedge(user_query), [], grounded=False)
             # Localize error message if possible
             err_msg = str(exc)
             if resolved_lang == "en" and "ANTHROPIC_API_KEY" in err_msg:
@@ -964,13 +1029,18 @@ class ChatService:
                         lc_messages.append(AIMessage(content=content))
             lc_messages.append(HumanMessage(content=user_query))
 
-            routed = self._invoke_via_router(lc_messages, timeout_s=6.0)
+            # F-6: an injected model is authoritative (tests/offline); trying
+            # the network-backed router first only adds timeout latency.
+            routed = None
+            if self._injected_model is None:
+                routed = self._invoke_via_router(lc_messages, timeout_s=6.0)
             if routed is not None:
                 routed_text = sanitize_cultural_output(routed)
-                if not routed_text or not routed_text.strip():
+                routed_hedge = not routed_text or not routed_text.strip()
+                if routed_hedge:
                     # Empty model output must be an explicit hedge, never "".
                     routed_text = _empty_hedge(user_query)
-                routed_artifacts = _maybe_orchestrate(routed_text, []) if routed_text else []
+                routed_artifacts = _maybe_orchestrate(routed_text, [], grounded=not routed_hedge) if routed_text else []
                 return ChatResult(ok=True, text=routed_text, artifacts=routed_artifacts)
 
             future = _SHARED_EXECUTOR.submit(model.invoke, lc_messages)
@@ -1009,7 +1079,7 @@ class ChatService:
                 return ChatResult(ok=False, error_message=msg, artifacts=[])
 
             fallback_text = _empty_hedge(user_query)
-            artifacts = _maybe_orchestrate(fallback_text, [])
+            artifacts = _maybe_orchestrate(fallback_text, [], grounded=False)
             return ChatResult(ok=True, text=fallback_text, artifacts=artifacts)
 
 

@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import os
 from dotenv import load_dotenv
 
 from sard.config.rag import (
@@ -52,7 +53,8 @@ from sard.rag.normalize import NORMALIZATION_VERSION
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(_PROJECT_ROOT / ".env")
+if os.environ.get("SARD_DISABLE_DOTENV", "").strip().lower() not in ("1", "true", "yes"):
+    load_dotenv(_PROJECT_ROOT / ".env")
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):

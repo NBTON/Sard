@@ -209,7 +209,8 @@ test("Multi-turn revision lifecycle preserves historical snapshots on failure", 
   assert.strictEqual(activeList[0].versions[0].download_url, "/api/artifacts/life-v1.pdf");
   assert.strictEqual(activeList[0].versions[1].version, 2);
   assert.strictEqual(activeList[0].versions[1].download_url, "/api/artifacts/life-v2.pdf");
-  assert.strictEqual(activeList[0].status, "failed");
+  // F-2: retained created versions keep the tile readable as created.
+  assert.strictEqual(activeList[0].status, "created");
   assert.strictEqual(activeList[0].error, "Synthesis timeout");
 });
 

@@ -57,6 +57,42 @@ OUTPUT_DIR = output_root()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _publish_tool_file(filename: str, mime_type: str) -> tuple:
+    """Register a tool-written file with the active artifact store.
+
+    Returns ``(download_filename, download_url)`` backed by the store so
+    the URL round-trips through ``GET /api/artifacts/{filename}`` on every
+    backend. Falls back to the legacy direct filename/URL when the store
+    is unavailable (tool success is never broken by registration).
+    """
+    legacy_url = f"/api/artifacts/{filename}"
+    try:
+        from pathlib import Path as _Path
+
+        from sard.outputs.orchestrator import get_artifact_store
+
+        data = (_Path(OUTPUT_DIR) / str(filename)).read_bytes()
+        if not data:
+            return filename, legacy_url
+        store = get_artifact_store()
+        artifact_id = f"tool-{uuid.uuid4().hex[:12]}"
+        _, stored_name, _, _ = store.store_bytes(
+            artifact_id,
+            str(filename),
+            bytes(data),
+            mime_type,
+            metadata={"provenance": ["cultural_tool"], "version": 1},
+        )
+        try:
+            url = store.get_download_url(artifact_id, stored_name)
+        except Exception:
+            url = f"/api/artifacts/{stored_name}"
+        return stored_name, url
+    except Exception as exc:
+        logger.debug("Tool file store registration skipped (%s).", type(exc).__name__)
+        return filename, legacy_url
+
+
 # ---------------------------------------------------------------------------
 # 1. Slide Deck Generator Tool
 # ---------------------------------------------------------------------------
@@ -98,6 +134,7 @@ def tool_generate_presentation(
         }
     safe_filename = f"sard-presentation-{deck.deck_id}.pptx"
     path, filename = gen.save_deck_file(deck, safe_filename)
+    filename, download_url = _publish_tool_file(filename, "application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
     slides_summary = []
     for s in deck.slides:
@@ -114,7 +151,7 @@ def tool_generate_presentation(
         "artifact_type": "presentation_pptx",
         "title": deck.title,
         "filename": filename,
-        "download_url": f"/api/artifacts/{filename}",
+        "download_url": download_url,
         "slides_count": len(deck.slides),
         "slides": slides_summary,
         "message_ar": f"تم إعداد عرض تقديمي ثقافي متكامل ({len(deck.slides)} شرائح) بصيغة PowerPoint جاهز للتحميل والعرض.",
@@ -214,13 +251,14 @@ def tool_generate_recipe_or_craft_card(
 
     safe_filename = f"sard-card-{card.card_id}.pdf"
     path, filename = renderer.save_pdf_file(card, safe_filename)
+    filename, download_url = _publish_tool_file(filename, "application/pdf")
 
     return {
         "success": True,
         "artifact_type": "recipe_craft_card",
         "title": card.title,
         "filename": filename,
-        "download_url": f"/api/artifacts/{filename}",
+        "download_url": download_url,
         "card_data": card.to_dict(),
         "message_ar": f"تم توليد بطاقة تراثية مطبوعة وموثقة لـ«{card.item_name}» بجودة عالية (PDF).",
     }
@@ -264,6 +302,7 @@ def tool_sync_heritage_calendar(
 
     safe_filename = f"sard-calendar-{uuid.uuid4().hex[:6]}.ics"
     path, filename = sync.save_ics_file(safe_filename, OUTPUT_DIR, events=events)
+    filename, download_url = _publish_tool_file(filename, "text/calendar; charset=utf-8")
 
     events_list = [ev.to_dict() for ev in events]
 
@@ -271,7 +310,7 @@ def tool_sync_heritage_calendar(
         "success": True,
         "artifact_type": "calendar_ics",
         "filename": filename,
-        "download_url": f"/api/artifacts/{filename}",
+        "download_url": download_url,
         "total_events": len(events),
         "events": events_list,
         "message_ar": f"تمت مزامنة {len(events)} مناسبة وموسماً فلكياً وتراثياً مع روابط التقويم المباشرة وملف (.ics).",
@@ -623,6 +662,7 @@ def tool_create_greeting_card(
     svg_markup = studio.render_svg(card)
     safe_filename = f"sard-greeting-{card.card_id}.pdf"
     path, filename = studio.save_pdf_file(card, safe_filename)
+    filename, download_url = _publish_tool_file(filename, "application/pdf")
 
     return {
         "success": True,
@@ -635,7 +675,7 @@ def tool_create_greeting_card(
         "personal_message": card.personal_message,
         "svg_markup": svg_markup,
         "filename": filename,
-        "download_url": f"/api/artifacts/{filename}",
+        "download_url": download_url,
         "message_ar": f"تم تصميم بطاقة تهنئة فاخرة لـ«{card.title}» بالأشعار والتنسيق التراثي.",
     }
 
@@ -660,6 +700,7 @@ def tool_compile_oral_history_memoir(
     )
     safe_filename = f"sard-memoir-{memoir.memoir_id}.pdf"
     path, filename = compiler.save_pdf_file(memoir, safe_filename)
+    filename, download_url = _publish_tool_file(filename, "application/pdf")
 
     chapters_summary = []
     for ch in memoir.chapters:
@@ -677,7 +718,7 @@ def tool_compile_oral_history_memoir(
         "title": memoir.title,
         "narrator": memoir.family_or_narrator_name,
         "filename": filename,
-        "download_url": f"/api/artifacts/{filename}",
+        "download_url": download_url,
         "total_chapters": len(memoir.chapters),
         "chapters": chapters_summary,
         "message_ar": f"تم توثيق وصياغة كتيب السيرة والتاريخ الشفوي لـ«{memoir.family_or_narrator_name}» ({len(memoir.chapters)} فصول) بصيغة PDF.",

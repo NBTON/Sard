@@ -295,7 +295,28 @@ def test_failed_artifact_surface_and_download_not_created(client):
         assert done["data"]["artifacts_count"] >= 1
 
 
-def test_successful_artifact_verified_download_mime_and_signature(client):
+def _grounded_planner_result():
+    """Pinned grounded outcome so the download flow is deterministic offline."""
+    from sard.schemas.isnad import Evidence, IsnadChain, PlannerResult
+
+    evidence = [Evidence(source_id="s1", origin="ministry", region="national",
+                         excerpt="excerpt text", raw_ref="r1")]
+    chain = IsnadChain(request_id="req-inv", classification="other",
+                       region="national", evidence=evidence, atoms=[],
+                       conflicts=[], score="high", decision="generate",
+                       missing=[])
+    return PlannerResult(chain=chain, answer_ar="grounded answer prose",
+                         answer_en="", visible_sources=list(evidence),
+                         follow_up="")
+
+
+def test_successful_artifact_verified_download_mime_and_signature(client, monkeypatch):
+    # DG-1: an ungrounded live planner must refuse; pin a grounded outcome
+    # so this test proves the created/download flow deterministically.
+    monkeypatch.setattr(ChatService, "ask_isnad",
+                        lambda self, *a, **k: _grounded_planner_result())
+    monkeypatch.setattr(ChatService, "_filter_planner_result",
+                        lambda self, q, r: r)
     test_client, store = client
     resp = test_client.post("/api/chat", json={"messages": [{"role": "user", "content": "أنشئ لي ملف PDF عن تاريخ نجد"}]})
     events = parse_sse_events(resp.text)

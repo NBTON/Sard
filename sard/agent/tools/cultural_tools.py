@@ -18,7 +18,8 @@ from typing import Any, Optional, Sequence
 
 from dotenv import load_dotenv
 
-load_dotenv()
+if os.environ.get("SARD_DISABLE_DOTENV", "").strip().lower() not in ("1", "true", "yes"):
+    load_dotenv()
 
 from sard.rag.schemas import ScoreType
 from sard.rag.relevance import filter_relevant_evidence

@@ -122,6 +122,9 @@ def test_png_contains_meaningful_content():
     import io as _io
 
     img = Image.open(_io.BytesIO(data)).convert("RGB")
-    colors = img.getcolors(maxcolors=1 << 20)
+    # F-1: bound the palette query (a full-frame getcolors can exhaust
+    # memory on large images); a thumbnail preserves the diversity signal.
+    thumb = img.resize((120, 80))
+    colors = thumb.getcolors(maxcolors=120 * 80)
     assert colors is None or len(colors) > 4, "PNG must render card content, not a flat placeholder"
     assert img.size == (1200, 800)

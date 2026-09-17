@@ -1761,8 +1761,12 @@ class ArtifactGeneratorRegistry:
             "events_count": len(preview_events),
             "events": preview_events,
         }
+        caller_warnings = [str(w).strip() for w in (content.get("warnings") or []) if str(w).strip()]
+        merged_warnings = list(caller_warnings)
         if skipped:
-            preview_data["warnings"] = [f"تم تخطي {skipped} مدخلات ناقصة التاريخ/الوقت."]
+            merged_warnings.append(f"تم تخطي {skipped} مدخلات ناقصة التاريخ/الوقت.")
+        if merged_warnings:
+            preview_data["warnings"] = merged_warnings
         return bytes(result.data), "text/calendar; charset=utf-8", preview_data
 
     @staticmethod
@@ -1986,6 +1990,124 @@ class ArtifactOrchestrator:
     def store(self) -> ArtifactStore:
         return self._store if self._store is not None else get_artifact_store()
 
+    def _build_canonical_preview(
+        self, render_req, request, preview, art_id, requested_run, requested_version, checksum
+    ):
+        """Build the canonical ArtifactDocument preview for stored bytes.
+
+        Shared by the fresh-store path and the idempotent-reuse path so a
+        retried request returns the same preview shape. Raises
+        ArtifactValidationError on divergence (never silently downgrades).
+        """
+        from sard.outputs.document import ArtifactDocument as _ArtifactDocument
+
+        try:
+            _doc = _ArtifactDocument.from_request(
+                render_req,
+                artifact_id=art_id,
+                run_id=requested_run,
+                version=requested_version,
+                preview=preview if isinstance(preview, dict) else None,
+                checksum=checksum,
+            )
+            _doc.validate_citations()
+            canonical = _doc.to_preview()
+            # Canonical-first merge: renderer compat keys fill gaps only;
+            # canonical type/title/counts/items always win so bytes and
+            # preview stay aligned.
+            if isinstance(preview, dict):
+                if preview.get("slides") and not canonical.get("slides"):
+                    canonical["slides"] = preview["slides"]
+                    canonical["slides_count"] = preview.get("slides_count", len(preview["slides"]))
+                for _alias in ("card_data", "diagram_data"):
+                    if _alias in preview and _alias not in canonical:
+                        canonical[_alias] = preview[_alias]
+                for _key in (
+                    "deck_id", "events", "events_count", "width", "height",
+                    "paragraphs_count", "sections_count", "rows", "characters", "text",
+                    "warnings",
+                ):
+                    if _key in preview and _key not in canonical:
+                        canonical[_key] = preview[_key]
+            # Byte/preview alignment: canonical preview must describe the
+            # stored bytes (same title/format); mismatch fails loudly.
+            if str(canonical.get("title", "") or "") != str((request.title or f"\u0645\u062e\u0631\u062c \u062b\u0642\u0627\u0641\u064a: {request.topic}") or ""):
+                pass  # titles may localize; counts/items alignment enforced below
+            if not isinstance(canonical.get("items"), list):
+                raise ArtifactValidationError("preview_mismatch", "Canonical preview is missing items.")
+            return canonical, _doc
+        except ArtifactValidationError:
+            raise
+        except Exception as exc:
+            raise ArtifactValidationError("preview_failed", "Canonical preview build failed.") from exc
+
+    def _idempotent_reuse(
+        self, active_store, *, art_id, requested_version, raw_bytes, new_sha,
+        render_req, request, preview, requested_run, kind, fmt, title
+    ):
+        """Reuse an identical already-stored version for a retried request.
+
+        Same stable id + same version + same bytes returns a ``created``
+        result pointing at the stored artifact, so an identical retry
+        (same session/query/formats, no explicit run id) succeeds with
+        consistent ids, checksums, and download links on every storage
+        backend. Anything else (no record, version drift, differing
+        bytes) returns None so the caller keeps the original store
+        outcome — overwrite protection for different content is never
+        weakened.
+        """
+        get_meta = getattr(active_store, "get_metadata", None)
+        if not callable(get_meta):
+            return None
+        try:
+            record = get_meta(art_id)
+        except Exception:
+            return None
+        if not isinstance(record, dict):
+            return None
+        try:
+            if int(record.get("version", 0) or 0) != int(requested_version):
+                return None
+        except (TypeError, ValueError):
+            return None
+        stored_sha = str(record.get("sha256") or record.get("checksum") or "")
+        if not stored_sha or stored_sha != new_sha:
+            return None
+        stored_filename = str(record.get("filename") or "")
+        if not stored_filename:
+            return None
+        try:
+            fetched = active_store.get_bytes(stored_filename)
+        except Exception:
+            return None
+        if fetched is None or hashlib.sha256(bytes(fetched[0])).hexdigest() != new_sha:
+            return None
+        try:
+            download_url = active_store.get_download_url(art_id, stored_filename)
+        except Exception:
+            return None
+        mime_type = str(fetched[2] or ARTIFACT_MIME_TYPES.get(fmt, "application/octet-stream"))
+        try:
+            canonical, document = self._build_canonical_preview(
+                render_req, request, preview, art_id, requested_run, requested_version, new_sha)
+        except Exception:
+            return None
+        return ArtifactResult(
+            id=art_id,
+            kind=kind,
+            format=fmt,
+            title=title,
+            filename=stored_filename,
+            mime_type=mime_type,
+            size_bytes=len(bytes(raw_bytes)),
+            status="created",
+            download_url=download_url,
+            preview=canonical,
+            checksum=new_sha,
+            data=bytes(raw_bytes),
+            document=document,
+        )
+
     def generate_artifact(
         self,
         request: ArtifactRequest,
@@ -2137,14 +2259,42 @@ class ArtifactOrchestrator:
             if _expired():
                 raise TimeoutError("Artifact deadline exceeded before store; discarding late output.")
             active_store = self.store
-            _, stored_filename, size_bytes, checksum = _call_store_with_budget(
-                active_store, "store_bytes", _store_budget(),
-                artifact_id=art_id,
-                filename=filename,
-                data=raw_bytes,
-                mime_type=mime_type,
-                metadata=dict(meta_in),
+            new_sha = hashlib.sha256(bytes(raw_bytes)).hexdigest()
+            # DG-2: identical retry reuses the stored version (same id +
+            # same version + same bytes) instead of failing, consistently
+            # across storage backends.
+            reused = self._idempotent_reuse(
+                active_store, art_id=art_id, requested_version=requested_version,
+                raw_bytes=raw_bytes, new_sha=new_sha, render_req=render_req,
+                request=request, preview=preview, requested_run=requested_run,
+                kind=kind, fmt=fmt,
+                title=request.title or ("\u0645\u062e\u0631\u062c \u062b\u0642\u0627\u0641\u064a: " + str(request.topic)),
             )
+            if reused is not None:
+                return reused
+            try:
+                _, stored_filename, size_bytes, checksum = _call_store_with_budget(
+                    active_store, "store_bytes", _store_budget(),
+                    artifact_id=art_id,
+                    filename=filename,
+                    data=raw_bytes,
+                    mime_type=mime_type,
+                    metadata=dict(meta_in),
+                )
+            except (ValueError, RuntimeError):
+                # Concurrent identical retry may have stored between the
+                # pre-check and this write: reuse on byte match, else keep
+                # the original outcome (overwrite protection intact).
+                race_reused = self._idempotent_reuse(
+                    active_store, art_id=art_id, requested_version=requested_version,
+                    raw_bytes=raw_bytes, new_sha=new_sha, render_req=render_req,
+                    request=request, preview=preview, requested_run=requested_run,
+                    kind=kind, fmt=fmt,
+                    title=request.title or ("\u0645\u062e\u0631\u062c \u062b\u0642\u0627\u0641\u064a: " + str(request.topic)),
+                )
+                if race_reused is not None:
+                    return race_reused
+                raise
             if size_bytes != len(raw_bytes) or checksum != hashlib.sha256(raw_bytes).hexdigest():
                 raise RuntimeError("Stored artifact metadata does not match generated bytes.")
             stored = _call_store_with_budget(active_store, "get_bytes", _store_budget(), stored_filename)
@@ -2158,46 +2308,8 @@ class ArtifactOrchestrator:
             # 5. Canonical preview via ArtifactDocument (single generator).
             # Never silently downgrade: a failed canonical preview fails the
             # artifact instead of shipping divergent renderer bytes + preview.
-            from sard.outputs.document import ArtifactDocument as _ArtifactDocument
-
-            try:
-                _doc = _ArtifactDocument.from_request(
-                    render_req,
-                    artifact_id=art_id,
-                    run_id=requested_run,
-                    version=requested_version,
-                    preview=preview if isinstance(preview, dict) else None,
-                    checksum=checksum,
-                )
-                _doc.validate_citations()
-                canonical = _doc.to_preview()
-                # Canonical-first merge: renderer compat keys fill gaps only;
-                # canonical type/title/counts/items always win so bytes and
-                # preview stay aligned.
-                if isinstance(preview, dict):
-                    if preview.get("slides") and not canonical.get("slides"):
-                        canonical["slides"] = preview["slides"]
-                        canonical["slides_count"] = preview.get("slides_count", len(preview["slides"]))
-                    for _alias in ("card_data", "diagram_data"):
-                        if _alias in preview and _alias not in canonical:
-                            canonical[_alias] = preview[_alias]
-                    for _key in (
-                        "deck_id", "events", "events_count", "width", "height",
-                        "paragraphs_count", "sections_count", "rows", "characters", "text",
-                    ):
-                        if _key in preview and _key not in canonical:
-                            canonical[_key] = preview[_key]
-                # Byte/preview alignment: canonical preview must describe the
-                # stored bytes (same title/format); mismatch fails loudly.
-                if str(canonical.get("title", "") or "") != str((request.title or f"مخرج ثقافي: {request.topic}") or ""):
-                    pass  # titles may localize; counts/items alignment enforced below
-                if not isinstance(canonical.get("items"), list):
-                    raise ArtifactValidationError("preview_mismatch", "Canonical preview is missing items.")
-                document = _doc
-            except ArtifactValidationError:
-                raise
-            except Exception as exc:
-                raise ArtifactValidationError("preview_failed", "Canonical preview build failed.") from exc
+            canonical, document = self._build_canonical_preview(
+                render_req, request, preview, art_id, requested_run, requested_version, checksum)
             # Persist the canonical document for revision/conversion (best
             # effort after bytes verify; failure to persist fails loudly to
             # avoid unrevisable artifacts).
